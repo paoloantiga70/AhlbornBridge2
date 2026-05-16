@@ -22,6 +22,11 @@ if (-not $content -or $content.Trim().Length -eq 0) {
     exit 0
 }
 
+if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
+    Write-Warning "PluginVersion.h contains merge conflict markers - skipping bump."
+    exit 0
+}
+
 $verMatch = [regex]::Match($content, '#define PLUGIN_VERSION "(\d+)\.(\d+)\.(\d+)"')
 if (-not $verMatch.Success) {
     Write-Warning "Could not parse PLUGIN_VERSION from PluginVersion.h - skipping bump."

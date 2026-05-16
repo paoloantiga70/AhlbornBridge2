@@ -20,6 +20,11 @@ if (-not $content -or $content.Trim().Length -eq 0) {
     exit 0
 }
 
+if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
+    Write-Warning "Version.h contains merge conflict markers - skipping bump."
+    exit 0
+}
+
 # Read version from APP_VERSION string (the single source of truth).
 $verMatch = [regex]::Match($content, '#define APP_VERSION "(\d+)\.(\d+)\.(\d+)"')
 if (-not $verMatch.Success) {
