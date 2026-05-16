@@ -8,10 +8,10 @@
 // ---------------------------------------------------------------
 #define PLUGIN_VERSION_MAJOR 1
 #define PLUGIN_VERSION_MINOR 0
-#define PLUGIN_VERSION_PATCH 35
-#define PLUGIN_VERSION "1.0.35"
+#define PLUGIN_VERSION_PATCH 38
+#define PLUGIN_VERSION "1.0.38"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.
 #define PLUGIN_GITHUB_REPO_OWNER L"paoloantiga70"
-#define PLUGIN_GITHUB_REPO_NAME  L"AhlbornBridgeSD"
+#define PLUGIN_GITHUB_REPO_NAME  L"AhlbornBridgeSD2"
