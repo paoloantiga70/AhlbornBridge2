@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <title>Load Organ</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-size: 12px;
+            color: #ccc;
+            background: #2d2d30;
+            margin: 0;
+            padding: 12px;
+        }
+        .sdpi-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .sdpi-item-label {
+            flex: 0 0 80px;
+            text-align: right;
+            padding-right: 8px;
+            color: #969696;
+        }
+        select {
+            flex: 1;
+            background: #3c3c3c;
+            color: #ccc;
+            border: 1px solid #555;
+            border-radius: 3px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+        select:focus {
+            outline: none;
+            border-color: #0078d4;
+        }
+        .info {
+            color: #969696;
+            font-size: 11px;
+            margin-top: 12px;
+            padding-top: 8px;
+            border-top: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+    <div class="sdpi-item">
+        <div class="sdpi-item-label">Organ</div>
+        <select id="organSelect">
+            <option value="0">-- Select organ --</option>
+        </select>
+    </div>
+    <div class="info" id="status">Waiting for Stream Deck...</div>
+
+    <script>
+        var ws = null;
+        var piContext = '';
+        var piAction = '';
+        var currentSettings = {};
+        var selectEl = document.getElementById('organSelect');
+        var statusEl = document.getElementById('status');
+
+        function populateOrgans(organs, connected) {
+            selectEl.innerHTML = '<option value="0">-- Select organ --</option>';
+            organs.forEach(function(o) {
+                var opt = document.createElement('option');
+                opt.value = o.index;
+                opt.textContent = o.index + ' - ' + o.name;
+                selectEl.appendChild(opt);
+            });
+            if (currentSettings.organIndex) {
+                selectEl.value = currentSettings.organIndex;
+            }
+            if (organs.length === 0 && !connected) {
+                statusEl.textContent = 'No organs available. AhlbornBridge not connected!';
+            } else {
+                statusEl.textContent = organs.length + ' organs available';
+            }
+        }
+
+        // SD calls this global function with connection parameters
+        function connectElgatoStreamDeckSocket(inPort, inPluginUUID, inRegisterEvent, inInfo, inActionInfo) {
+            // Handle both string and object for inActionInfo
+            var actionInfo = {};
+            if (typeof inActionInfo === 'string') {
+                try { actionInfo = JSON.parse(inActionInfo); } catch(e) { }
+            } else if (typeof inActionInfo === 'object' && inActionInfo !== null) {
+                actionInfo = inActionInfo;
+            }
+
+            piContext = (actionInfo && actionInfo.context) || '';
+            piAction = (actionInfo && actionInfo.action) || '';
+            currentSettings = (actionInfo && actionInfo.payload && actionInfo.payload.settings) || {};
+
+            if (currentSettings.organIndex) {
+                selectEl.value = currentSettings.organIndex;
+            }
+
+            ws = new WebSocket('ws://127.0.0.1:' + inPort);
+
+            ws.onopen = function() {
+                ws.send(JSON.stringify({ event: inRegisterEvent, uuid: inPluginUUID }));
+                statusEl.textContent = 'Connected, requesting organs...';
+
+                ws.send(JSON.stringify({
+                    event: 'sendToPlugin',
+                    context: piContext,
+                    action: piAction,
+                    payload: { piEvent: 'requestOrgans' }
+                }));
+            };
+
+            ws.onmessage = function(evt) {
+                var msg = {};
+                try { msg = JSON.parse(evt.data); } catch(e) { return; }
+
+                if (msg.event === 'sendToPropertyInspector') {
+                    var pl = msg.payload || {};
+                    if (pl.organs) {
+                            populateOrgans(pl.organs, pl.connected);
+                        }
+                }
+                else if (msg.event === 'didReceiveSettings') {
+                    var s = (msg.payload && msg.payload.settings) || {};
+                    if (s.organIndex !== undefined) {
+                        currentSettings.organIndex = s.organIndex;
+                        selectEl.value = s.organIndex;
+                    }
+                }
+            };
+
+            ws.onclose = function() {
+                statusEl.textContent = 'Disconnected';
+            };
+
+            ws.onerror = function() {
+                statusEl.textContent = 'Connection error';
+            };
+        }
+
+        selectEl.addEventListener('change', function() {
+            var idx = parseInt(selectEl.value) || 0;
+            currentSettings.organIndex = idx;
+
+            // Direct HTTP to plugin (bypasses broken SD relay)
+            var url = 'http://127.0.0.1:28781/set?ctx=' + encodeURIComponent(piContext) + '&organ=' + idx;
+            fetch(url).then(function() {
+                statusEl.textContent = 'Saved organ #' + idx;
+            }).catch(function(e) {
+                // Fallback: fire-and-forget via Image (no CORS restrictions)
+                new Image().src = url + '&t=' + Date.now();
+                statusEl.textContent = 'Saved organ #' + idx;
+            });
+
+            // Also try SD API paths (in case they start working in future)
+            if (ws && ws.readyState === 1) {
+                ws.send(JSON.stringify({
+                    event: 'setSettings',
+                    context: piContext,
+                    payload: { organIndex: idx }
+                }));
+                ws.send(JSON.stringify({
+                    event: 'sendToPlugin',
+                    context: piContext,
+                    action: piAction,
+                    payload: { piEvent: 'setOrganIndex', organIndex: idx }
+                }));
+            }
+        });
+    </script>
+</body>
+</html>

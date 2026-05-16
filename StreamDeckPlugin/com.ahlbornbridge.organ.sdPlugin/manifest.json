@@ -1,0 +1,43 @@
+{
+    "Actions": [
+        {
+            "Icon": "images/organ-off",
+            "Name": "Load Organ",
+            "States": [
+                {
+                    "Image": "images/organ-off",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                },
+                {
+                    "Image": "images/organ-on",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                }
+            ],
+            "PropertyInspectorPath": "property_inspector.html",
+            "SupportedInMultiActions": false,
+            "Tooltip": "Load an organ in Hauptwerk via AhlbornBridge",
+            "UUID": "com.ahlbornbridge.organ.load"
+        }
+    ],
+    "Author": "Paolo Antiga",
+    "Category": "AhlbornBridge",
+    "CategoryIcon": "images/category-icon",
+    "CodePath": "AhlbornBridgeSD.exe",
+    "Description": "Control Hauptwerk organs via AhlbornBridge",
+    "Icon": "images/plugin-icon",
+    "Name": "AhlbornBridge",
+    "OS": [
+        {
+            "MinimumVersion": "10",
+            "Platform": "windows"
+        }
+    ],
+    "SDKVersion": 2,
+    "Software": {
+        "MinimumVersion": "6.0"
+    },
+    "UUID": "com.ahlbornbridge.organ",
+    "Version": "1.0.35"
+}
