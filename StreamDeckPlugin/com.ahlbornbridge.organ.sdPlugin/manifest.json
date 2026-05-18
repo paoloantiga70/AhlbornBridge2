@@ -39,9 +39,5 @@
         "MinimumVersion": "6.0"
     },
     "UUID": "com.ahlbornbridge.organ",
-<<<<<<< HEAD
-    "Version": "1.0.41"
-=======
-    "Version": "1.0.41"
->>>>>>> 32e036f39465300960239d987b6a5ea07752fcbf
+    "Version": "1.0.56"
 }

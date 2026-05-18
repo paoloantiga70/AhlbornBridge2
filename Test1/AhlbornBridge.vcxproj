@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -54,6 +54,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="..\packages\Microsoft.Windows.Devices.Midi2.1.0.17-rc.4.25\build\native\Microsoft.Windows.Devices.Midi2.props" Condition="exists('..\packages\Microsoft.Windows.Devices.Midi2.1.0.17-rc.4.25\build\native\Microsoft.Windows.Devices.Midi2.props')" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -109,6 +110,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -125,6 +127,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\bump-version.ps1" patch</Command>
@@ -135,6 +138,9 @@
     <ClCompile Include="AutoUpdate.cpp" />
     <ClCompile Include="Hauptwerk.cpp" />
     <ClCompile Include="Midi.cpp" />
+    <ClCompile Include="Midi2Endpoint.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="Qt.cpp" />
     <ClCompile Include="StreamDeck.cpp" />
     <ClCompile Include="StreamDeck_profiler.cpp" />
@@ -146,6 +152,7 @@
     <ClInclude Include="AutoUpdate.h" />
     <ClInclude Include="Hauptwerk.h" />
     <ClInclude Include="Midi.h" />
+    <ClInclude Include="Midi2Endpoint.h" />
     <ClInclude Include="Qt.h" />
     <ClInclude Include="StreamDeck.h" />
     <ClInclude Include="StreamDeck_profiler.h" />
@@ -161,8 +168,12 @@
     <PostBuildEvent>
       <Command>powershell -NoProfile -Command "$v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern '#define APP_VERSION \"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\""</Command>
     </PostBuildEvent>
+    <Link>
+      <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\packages\Microsoft.Windows.Devices.Midi2.1.0.17-rc.4.25\build\native\Microsoft.Windows.Devices.Midi2.targets" Condition="'$(Platform)'=='x64' and exists('..\packages\Microsoft.Windows.Devices.Midi2.1.0.17-rc.4.25\build\native\Microsoft.Windows.Devices.Midi2.targets')" />
   </ImportGroup>
 </Project>

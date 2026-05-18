@@ -3,12 +3,12 @@
 ; Do NOT edit @PLUGIN_VERSION@ manually - update PluginVersion.h instead.
 
 [Setup]
-AppName=AhlbornBridge Stream Deck Plugin
+AppName=AhlbornBridgeSD2 Stream Deck Plugin
 AppVersion=@PLUGIN_VERSION@
 AppPublisher=Paolo Antiga
 DefaultDirName={userappdata}\Elgato\StreamDeck\Plugins\com.ahlbornbridge.organ.sdPlugin
-DefaultGroupName=AhlbornBridge SD Plugin
-OutputBaseFilename=AhlbornBridgeSD_Setup
+DefaultGroupName=AhlbornBridgeSD2 Plugin
+OutputBaseFilename=AhlbornBridgeSD2_Setup
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -18,7 +18,7 @@ WizardStyle=modern
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 Uninstallable=yes
-UninstallDisplayName=AhlbornBridge Stream Deck Plugin
+UninstallDisplayName=AhlbornBridgeSD2 Stream Deck Plugin
 
 [Files]
 ; Plugin executable

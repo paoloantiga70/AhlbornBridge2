@@ -3,12 +3,12 @@
 ; Do NOT edit @APP_VERSION@ manually - update Version.h instead.
 
 [Setup]
-AppName=AhlbornBridge
+AppName=AhlbornBridge2
 AppVersion=@APP_VERSION@
-AppPublisher=AhlbornBridge
-DefaultDirName={pf}\AhlbornBridge
-DefaultGroupName=AhlbornBridge
-OutputBaseFilename=AhlbornBridge_Setup
+AppPublisher=AhlbornBridge2
+DefaultDirName={pf}\AhlbornBridge2
+DefaultGroupName=AhlbornBridge2
+OutputBaseFilename=AhlbornBridge2_Setup
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -22,7 +22,7 @@ WizardStyle=modern
 Source: "*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Installa la cartella Icons nella posizione Roaming dell'utente corrente (usata dall'icona del collegamento)
-Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge2\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; File di configurazione da includere esplicitamente
 Source: "Settings.xml"; DestDir: "{app}"; Flags: ignoreversion
@@ -31,19 +31,19 @@ Source: "Settings.xml"; DestDir: "{app}"; Flags: ignoreversion
 ; Source: "Release\AhlbornBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\AhlbornBridge"; Filename: "{app}\AhlbornBridge.exe"; IconFilename: "{userappdata}\AhlbornBridge\Icons\AhlbornBridge.ico"
-Name: "{group}\Uninstall AhlbornBridge"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\AhlbornBridge"; Filename: "{app}\AhlbornBridge.exe"; Tasks: desktopicon
+Name: "{group}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; IconFilename: "{userappdata}\AhlbornBridge2\Icons\AhlbornBridge.ico"
+Name: "{group}\Uninstall AhlbornBridge2"; Filename: "{uninstallexe}"
+Name: "{userdesktop}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Crea icona sul Desktop"; GroupDescription: "Opzioni installazione"
 
 [Run]
-Filename: "{app}\AhlbornBridge.exe"; Description: "Avvia AhlbornBridge"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\AhlbornBridge.exe"; Description: "Avvia AhlbornBridge2"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
-Type: filesandordirs; Name: "{userappdata}\AhlbornBridge"
+Type: filesandordirs; Name: "{userappdata}\AhlbornBridge2"
 
 ; Note:
 ; - Se l'app richiede Visual C++ Redistributable, includi il controllo o il pacchetto separato.

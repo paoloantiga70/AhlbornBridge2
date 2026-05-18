@@ -1,9 +1,10 @@
-#include "Midi.h"
+﻿#include "Midi.h"
 #include "StreamDeck.h"
 #include "Xml.h"
 #include "TrayIcon.h"
 #include "Hauptwerk.h"
 #include "Qt.h"
+#include "Midi2Endpoint.h"
 #include <cwchar>
 #include <string>
 #include <shlobj.h>
@@ -243,7 +244,7 @@ namespace
 				case DeferredCmd::LoadInstalledOrgan:
 					{
 						int idx = g_pendingInstalledOrganIndex.load();
-						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
+						printf("[Deferred] LoadInstalledOrgan %d â€” loading via GUI automation\n", idx);
 
 						std::vector<std::wstring> names = LoadInstalledOrganNames();
 						if (idx >= 1 && idx <= static_cast<int>(names.size()) && !names[idx - 1].empty())
@@ -1694,6 +1695,9 @@ bool initMidiState()
     }
     printf("[initMidiState] : HAUPTWERK bridge enabled: [%s]\n\n", g_midiRouterEnabled.load() ? "true" : "false");
 
+    // Start the Windows MIDI Services virtual endpoint (graceful no-op if unavailable)
+    EnableMidi2Endpoint();
+
     RefreshSettingsFile();
 
     return true;
@@ -1931,6 +1935,7 @@ bool IsMidiOutput2DeviceOpen()
 
 void CleanupMidiLocks()
 {
+    DisableMidi2Endpoint();
     DeleteCriticalSection(&g_midiOutLock);
 }
 
@@ -2011,6 +2016,9 @@ void CALLBACK MidiInProc(
 			g_midiOutQueue.TryEnqueue(msg);
 		}
 	}
+
+	// Also publish the message on the Windows MIDI Services virtual endpoint
+	ForwardToMidi2Endpoint(msg);
 
 	if (status == ALL_RESET)
 	{
@@ -2139,7 +2147,7 @@ void CALLBACK MidiInProc(
 			clearChannel(ch);
        
 		// Esegue Unload organ se viene ricevuto CC ch16, data1= BF_0x50 o BF_0x51, data2 = 0
-		// oppure Cancel se l'organo è in caricamento
+		// oppure Cancel se l'organo Ã¨ in caricamento
 		if (ch == 0x0F && (data1 == BF_0x50 || data1 == BF_0x51) && data2 == 0)
 		{
 			printf("[MidiInProc] : Received MIDI message: CC ch16, data1= 0x%02X, data2 = 0\n", data1);

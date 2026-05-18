@@ -50,6 +50,10 @@ constexpr int kShowConsoleCheckId = 202;
 constexpr int kCheckForUpdateOnStartCheckId = 203;
 constexpr int kSdSendButtonId = 304;
 constexpr int kSdPluginUpdateButtonId = 305;
+constexpr int kMainWindowBehaviorComboId = 401;
+constexpr int kMainDebugConsoleComboId = 402;
+constexpr int kMainUpdateModeComboId = 403;
+constexpr int kMainCheckNowButtonId = 404;
 
 namespace
 {
@@ -554,7 +558,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         tabItem.mask = TCIF_TEXT;
         tabItem.pszText = const_cast<wchar_t*>(L"MIDI");
         TabCtrl_InsertItem(g_settingsTabHwnd, 0, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"Options");
+        tabItem.pszText = const_cast<wchar_t*>(L"Main");
         TabCtrl_InsertItem(g_settingsTabHwnd, 1, &tabItem);
         tabItem.pszText = const_cast<wchar_t*>(L"Organ Info...");
         TabCtrl_InsertItem(g_settingsTabHwnd, 2, &tabItem);
@@ -646,50 +650,101 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             g_settingsOrganInfoPageHwnd, nullptr, nullptr, nullptr);
         UpdateOrganInfoGroupTitle();
 
-        CreateWindowW(L"BUTTON", L"Settings window", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 8, 300, 60, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hAutoCloseCheck = CreateWindowW(L"BUTTON",
-            L"AUTO close when ALL is disconnected.",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            22, 30, 280, 20, g_settingsInfoPageHwnd, (HMENU)kAutoCloseCheckId, nullptr, nullptr);
-
-        bool closeOnDisconnect = false;
-        if (LoadCloseSettingsOnDisconnect(closeOnDisconnect) && closeOnDisconnect)
         {
-            SendMessageW(hAutoCloseCheck, BM_SETCHECK, BST_CHECKED, 0);
+            const int leftLabel = 26;
+            const int leftControl = 248;
+            const int controlWidth = 320;
+            const int rowHeight = 24;
+            const int rowGap = 44;
+            const int baseY = 58;
+
+            CreateWindowW(L"STATIC", L"Main preferences",
+                WS_CHILD | WS_VISIBLE,
+                24, 16, 220, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Configure the default behavior of AhlbornBridge in a single place.",
+                WS_CHILD | WS_VISIBLE,
+                24, 36, 470, 18, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", nullptr,
+                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                24, 64, 700, 2, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Settings window behavior:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                leftLabel, baseY + 8, 206, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            HWND hWindowBehaviorCombo = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                leftControl, baseY, controlWidth, 200,
+                g_settingsInfoPageHwnd, (HMENU)kMainWindowBehaviorComboId, nullptr, nullptr);
+            SendMessageW(hWindowBehaviorCombo, CB_ADDSTRING, 0, (LPARAM)L"Keep preferences window open");
+            SendMessageW(hWindowBehaviorCombo, CB_ADDSTRING, 0, (LPARAM)L"Close automatically when all MIDI devices disconnect");
+
+            bool closeOnDisconnect = false;
+            LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+            g_closeSettingsOnDisconnect = closeOnDisconnect;
+            SendMessageW(hWindowBehaviorCombo, CB_SETCURSEL, closeOnDisconnect ? 1 : 0, 0);
+
+            CreateWindowW(L"STATIC", L"Debug console visibility:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                leftLabel, baseY + rowGap + 8, 206, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            HWND hDebugConsoleCombo = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                leftControl, baseY + rowGap, controlWidth, 200,
+                g_settingsInfoPageHwnd, (HMENU)kMainDebugConsoleComboId, nullptr, nullptr);
+            SendMessageW(hDebugConsoleCombo, CB_ADDSTRING, 0, (LPARAM)L"Show debug console window");
+            SendMessageW(hDebugConsoleCombo, CB_ADDSTRING, 0, (LPARAM)L"Hide debug console window");
+
+            bool showConsole = true;
+            LoadShowDebugConsole(showConsole);
+            SendMessageW(hDebugConsoleCombo, CB_SETCURSEL, showConsole ? 0 : 1, 0);
+
+            CreateWindowW(L"STATIC", L"Application update checks:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                leftLabel, baseY + (rowGap * 2) + 8, 206, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            HWND hUpdateModeCombo = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                leftControl, baseY + (rowGap * 2), controlWidth, 200,
+                g_settingsInfoPageHwnd, (HMENU)kMainUpdateModeComboId, nullptr, nullptr);
+            SendMessageW(hUpdateModeCombo, CB_ADDSTRING, 0, (LPARAM)L"Check GitHub for updates at startup");
+            SendMessageW(hUpdateModeCombo, CB_ADDSTRING, 0, (LPARAM)L"Check manually only");
+
+            bool checkForUpdateOnStart = true;
+            LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+            SendMessageW(hUpdateModeCombo, CB_SETCURSEL, checkForUpdateOnStart ? 0 : 1, 0);
+
+            CreateWindowW(L"STATIC", L"Current application version:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                leftLabel, baseY + (rowGap * 3) + 8, 206, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            wchar_t versionText[128] = {};
+            wsprintfW(versionText, L"%hs", APP_VERSION);
+            CreateWindowW(L"STATIC", versionText,
+                WS_CHILD | WS_VISIBLE,
+                leftControl + 6, baseY + (rowGap * 3) + 8, 180, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Update source:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                leftLabel, baseY + (rowGap * 4) + 8, 206, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"GitHub Releases - paoloantiga70/AhlbornBridge2",
+                WS_CHILD | WS_VISIBLE,
+                leftControl + 6, baseY + (rowGap * 4) + 8, 360, 20, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Check for Update Now",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                leftControl, baseY + (rowGap * 5), 170, rowHeight,
+                g_settingsInfoPageHwnd, (HMENU)kMainCheckNowButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"This first tab uses a cleaner Hauptwerk-style aligned layout. The other tabs can follow the same model.",
+                WS_CHILD | WS_VISIBLE,
+                24, baseY + (rowGap * 6), 700, 18, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
         }
-        g_closeSettingsOnDisconnect = closeOnDisconnect;
-
-        CreateWindowW(L"BUTTON", L"Debug", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 76, 300, 60, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hShowConsoleCheck = CreateWindowW(L"BUTTON",
-            L"Show debug console",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            22, 98, 280, 20, g_settingsInfoPageHwnd, (HMENU)kShowConsoleCheckId, nullptr, nullptr);
-
-        bool showConsole = true;
-        if (LoadShowDebugConsole(showConsole) && showConsole)
-        {
-            SendMessageW(hShowConsoleCheck, BM_SETCHECK, BST_CHECKED, 0);
-        }
-        else
-        {
-            SendMessageW(hShowConsoleCheck, BM_SETCHECK, BST_UNCHECKED, 0);
-        }
-
-        CreateWindowW(L"BUTTON", L"Updates", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 144, 300, 50, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hCheckForUpdateOnStartCheck = CreateWindowW(L"BUTTON",
-            L"Check for updates on start",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            22, 166, 280, 20, g_settingsInfoPageHwnd, (HMENU)kCheckForUpdateOnStartCheckId, nullptr, nullptr);
-
-        bool checkForUpdateOnStart = true;
-        LoadCheckForUpdateOnStart(checkForUpdateOnStart);
-        SendMessageW(hCheckForUpdateOnStartCheck, BM_SETCHECK, checkForUpdateOnStart ? BST_CHECKED : BST_UNCHECKED, 0);
 
         CreateWindowW(L"BUTTON", L"MIDI Input devices...", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, 8, 280, 120, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
@@ -987,6 +1042,55 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
             bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             SaveCheckForUpdateOnStart(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == kMainWindowBehaviorComboId)
+        {
+            HWND hCombo = reinterpret_cast<HWND>(lParam);
+            if (!hCombo)
+            {
+                hCombo = GetDlgItem(g_settingsInfoPageHwnd ? g_settingsInfoPageHwnd : hWnd, kMainWindowBehaviorComboId);
+            }
+
+            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+            bool enabled = (selectedIndex == 1);
+            g_closeSettingsOnDisconnect = enabled;
+            SaveCloseSettingsOnDisconnect(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == kMainDebugConsoleComboId)
+        {
+            HWND hCombo = reinterpret_cast<HWND>(lParam);
+            if (!hCombo)
+            {
+                hCombo = GetDlgItem(g_settingsInfoPageHwnd ? g_settingsInfoPageHwnd : hWnd, kMainDebugConsoleComboId);
+            }
+
+            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+            bool show = (selectedIndex != 1);
+            HWND hConsoleWnd = GetConsoleWindow();
+            if (hConsoleWnd)
+            {
+                ShowWindow(hConsoleWnd, show ? SW_SHOW : SW_HIDE);
+            }
+            SaveShowDebugConsole(show);
+            return 0;
+        }
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == kMainUpdateModeComboId)
+        {
+            HWND hCombo = reinterpret_cast<HWND>(lParam);
+            if (!hCombo)
+            {
+                hCombo = GetDlgItem(g_settingsInfoPageHwnd ? g_settingsInfoPageHwnd : hWnd, kMainUpdateModeComboId);
+            }
+
+            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+            SaveCheckForUpdateOnStart(selectedIndex != 1);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kMainCheckNowButtonId)
+        {
+            CheckForUpdateInteractive(hWnd);
             return 0;
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdSendButtonId)
@@ -1419,9 +1523,9 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
     g_settingsHwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW,
         kSettingsClassName,
-        L"Settings",
+        L"General Preferences",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 460, 601,
+        CW_USEDEFAULT, CW_USEDEFAULT, 780, 610,
         hOwner,
         nullptr,
         hInstance,
