@@ -23,15 +23,20 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "winmm.lib")
 #pragma warning(disable: 4996)
 
 // Global functions ***************************
 bool initMidiState();
+// Dynamic multi-device API (new)
+void SetAssignedMidiInputNames(const std::vector<std::wstring>& names);
+void SetAssignedMidiOutputNames(const std::vector<std::wstring>& names);
+bool RefreshMidiInputDevice();
+// Legacy single-slot wrappers kept for any remaining callers
 bool SwitchMidiInputDevice(UINT deviceId);
 bool SwitchMidiInput2Device(UINT deviceId);
-bool RefreshMidiInputDevice();
 bool SwitchMidiOutputDevice(UINT deviceId);
 bool SwitchMidiOutput2Device(UINT deviceId);
 void CloseMidiInputDeviceOnly();
@@ -42,6 +47,11 @@ bool IsMidiInputDeviceOpen();
 bool IsMidiInput2DeviceOpen();
 bool IsMidiOutputDeviceOpen();
 bool IsMidiOutput2DeviceOpen();
+// Per-slot MIDI activity: returns GetTickCount() of last message on slot i
+// (0=hMidiIn, 1=hMidiIn2, 2+=extras). Returns 0 if never received.
+DWORD GetMidiInputSlotLastMsg(int slotIndex);
+// Per-slot MIDI output activity: returns GetTickCount() of last message sent on slot i.
+DWORD GetMidiOutputSlotLastMsg(int slotIndex);
 void RefreshMidiDeviceStatus();
 void CleanupMidiLocks();
 void CALLBACK MidiInProc(
@@ -85,16 +95,16 @@ constexpr int kNotes = 128;
 constexpr std::chrono::milliseconds feTimeout(500);
 constexpr std::chrono::milliseconds disconnectConfirm(1500);
 
-extern HMIDIIN hMidiIn;
+extern HMIDIIN hMidiIn;   // slot-0 handle kept for watchdog / legacy code
 extern HMIDIIN hMidiIn2;
-extern HMIDIOUT hMidiOut;
+extern HMIDIOUT hMidiOut;  // slot-0 handle kept for legacy code
 extern HMIDIOUT hMidiOut2;
 extern HANDLE hThread;
 extern std::atomic<bool> g_midiRouterEnabled;
 extern bool is_organ_loaded;
-extern std::atomic<bool> g_inputDeviceOpen;
+extern std::atomic<bool> g_inputDeviceOpen;   // true if at least one input open
 extern std::atomic<bool> g_input2DeviceOpen;
-extern std::atomic<bool> g_outputDeviceOpen;
+extern std::atomic<bool> g_outputDeviceOpen;  // true if at least one output open
 extern std::atomic<bool> g_output2DeviceOpen;
 extern std::atomic<bool> g_isLoadingOrgan;
 extern std::atomic<int> g_currentLoadedFavoriteIndex;

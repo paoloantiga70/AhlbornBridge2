@@ -112,6 +112,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(OutDir)Icons" (if not exist "%APPDATA%\AhlbornBridge\Icons" mkdir "%APPDATA%\AhlbornBridge\Icons" &amp; xcopy /E /I /Y "$(OutDir)Icons\*" "%APPDATA%\AhlbornBridge\Icons\")</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -141,6 +144,7 @@
     <ClCompile Include="Midi2Endpoint.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="MidiAssignmentWindow.cpp" />
     <ClCompile Include="Qt.cpp" />
     <ClCompile Include="StreamDeck.cpp" />
     <ClCompile Include="StreamDeck_profiler.cpp" />
@@ -153,6 +157,7 @@
     <ClInclude Include="Hauptwerk.h" />
     <ClInclude Include="Midi.h" />
     <ClInclude Include="Midi2Endpoint.h" />
+    <ClInclude Include="MidiAssignmentWindow.h" />
     <ClInclude Include="Qt.h" />
     <ClInclude Include="StreamDeck.h" />
     <ClInclude Include="StreamDeck_profiler.h" />
@@ -166,7 +171,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <PostBuildEvent>
-      <Command>powershell -NoProfile -Command "$v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern '#define APP_VERSION \"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\""</Command>
+      <Command>powershell -NoProfile -Command "$v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern '#define APP_VERSION \"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\"" &amp; if exist "$(OutDir)Icons" (if not exist "%APPDATA%\AhlbornBridge\Icons" mkdir "%APPDATA%\AhlbornBridge\Icons" &amp; xcopy /E /I /Y "$(OutDir)Icons\*" "%APPDATA%\AhlbornBridge\Icons\")</Command>
     </PostBuildEvent>
     <Link>
       <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>

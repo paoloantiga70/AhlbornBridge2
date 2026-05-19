@@ -318,63 +318,132 @@ static std::string XmlEscape(const std::string& s)
     return out;
 }
 
-static std::vector<std::string> WrapTitleLines(const std::string& text, int maxChars = 10, int maxLines = 6)
+static std::vector<std::string> WrapTitleLines(const std::string& text, int maxChars = 12, int maxLines = 4)
 {
     std::vector<std::string> lines;
+    std::string current;
     std::string word;
+
+    auto flushWord = [&]()
+    {
+        if (word.empty())
+            return;
+
+        if (current.empty())
+        {
+            current = word;
+        }
+        else if ((int)(current.size() + 1 + word.size()) <= maxChars)
+        {
+            current += ' ';
+            current += word;
+        }
+        else
+        {
+            lines.push_back(current);
+            current = word;
+        }
+
+        word.clear();
+    };
+
     for (size_t i = 0; i <= text.size(); ++i)
     {
         char c = (i < text.size()) ? text[i] : '\0';
         if (c == ' ' || c == '\0')
         {
-            if (!word.empty() && (int)lines.size() < maxLines)
-            {
-                if ((int)word.size() > maxChars)
-                    word.resize(maxChars);
-                lines.push_back(word);
-                word.clear();
-            }
+            flushWord();
+            if ((int)lines.size() >= maxLines)
+                break;
         }
         else
         {
             word += c;
         }
     }
+
+    if (!current.empty() && (int)lines.size() < maxLines)
+        lines.push_back(current);
+
+    if (lines.empty())
+        lines.push_back(text.empty() ? std::string("Empty") : text.substr(0, maxChars));
+
+    if ((int)lines.size() > maxLines)
+        lines.resize(maxLines);
+
+    if ((int)lines.size() == maxLines && (int)text.size() > (maxChars * maxLines))
+    {
+        std::string& last = lines.back();
+        if ((int)last.size() > maxChars - 1)
+            last.resize(maxChars - 1);
+        last += "…";
+    }
+
     return lines;
 }
 
-// Build an SVG image for a button with background and word-wrapped title
+// Build an SVG image for a button with improved visual states and title layout
 static std::string BuildButtonSvg(const std::string& title, bool loaded)
 {
+    const bool isEmpty = (title == "Empty");
+    const bool isOffline = (title == "Disconnected.");
+    const bool isReady = !loaded && !isEmpty && !isOffline;
+
     const std::string& bgImage = loaded ? g_bgImageOn : g_bgImageOff;
+    std::string frameColor = loaded ? "#39d353" : isOffline ? "#ffb347" : isEmpty ? "#7d8590" : "#58a6ff";
+    std::string badgeText = loaded ? "LOADED" : isOffline ? "OFFLINE" : isEmpty ? "EMPTY" : "READY";
+    std::string badgeFill = loaded ? "#123c1f" : isOffline ? "#5c3b00" : isEmpty ? "#30363d" : "#0d2d4f";
+    std::string titleColor = loaded ? "#eaffea" : isOffline ? "#fff4db" : isEmpty ? "#e6edf3" : "#ffffff";
+    std::string shadowColor = loaded ? "#0b1f10" : "#111111";
 
     std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>";
-    if (!bgImage.empty())
+    svg += "<rect width='144' height='144' rx='14' fill='#0f1115'/>";
+
+    if (!bgImage.empty() && !isOffline && !isEmpty)
     {
-        svg += "<image width='144' height='144' xlink:href='data:image/png;base64," + bgImage + "'/>";
+        svg += "<image width='144' height='144' xlink:href='data:image/png;base64," + bgImage + "' opacity='0.92'/>";
+        svg += "<rect width='144' height='144' rx='14' fill='rgba(0,0,0,0.28)'/>";
     }
     else
     {
-        std::string bg = loaded ? "#004400" : "#1a1a2e";
-        svg += "<rect width='144' height='144' rx='12' fill='" + bg + "'/>";
+        std::string bg = loaded ? "#16321d" : isOffline ? "#3a2714" : isEmpty ? "#20262d" : "#162235";
+        svg += "<rect x='4' y='4' width='136' height='136' rx='12' fill='" + bg + "'/>";
     }
-    if (!title.empty())
+
+    svg += "<rect x='4' y='4' width='136' height='136' rx='12' fill='none' stroke='" + frameColor + "' stroke-width='3'/>";
+    svg += "<rect x='14' y='12' width='116' height='24' rx='8' fill='" + badgeFill + "' stroke='" + frameColor + "' stroke-width='1.5'/>";
+    svg += "<text x='72' y='29' font-family='Arial' font-size='12' fill='" + frameColor + "' text-anchor='middle' font-weight='bold' letter-spacing='1'>" + badgeText + "</text>";
+
+    auto lines = WrapTitleLines(title, 12, 4);
+    int fontSize = (int)lines.size() >= 4 ? 16 : (int)lines.size() == 3 ? 18 : 20;
+    int lineHeight = fontSize + 4;
+    int totalHeight = (int)lines.size() * lineHeight;
+    int startY = 78 - (totalHeight / 2) + fontSize;
+
+    for (int i = 0; i < (int)lines.size(); ++i)
     {
-        std::string color = loaded ? "#44ff44" : "#ffffff";
-        auto lines = WrapTitleLines(title);
-        int fontSize = 22;
-        int lineHeight = fontSize + 2;
-        int totalHeight = (int)lines.size() * lineHeight;
-        int startY = (144 - totalHeight) / 2 + fontSize;
-        for (int i = 0; i < (int)lines.size(); ++i)
-        {
-            int y = startY + i * lineHeight;
-            svg += "<text x='72' y='" + std::to_string(y) + "' "
-                   "font-family='Arial' font-size='" + std::to_string(fontSize) + "' "
-                   "fill='" + color + "' text-anchor='middle' font-weight='bold'>"
-                   + XmlEscape(lines[i]) + "</text>";
-        }
+        int y = startY + i * lineHeight;
+        svg += "<text x='72' y='" + std::to_string(y + 1) + "' font-family='Arial' font-size='" + std::to_string(fontSize) + "' fill='" + shadowColor + "' text-anchor='middle' font-weight='bold'>" + XmlEscape(lines[i]) + "</text>";
+        svg += "<text x='72' y='" + std::to_string(y) + "' font-family='Arial' font-size='" + std::to_string(fontSize) + "' fill='" + titleColor + "' text-anchor='middle' font-weight='bold'>" + XmlEscape(lines[i]) + "</text>";
     }
+
+    if (isReady)
+    {
+        svg += "<circle cx='123' cy='122' r='7' fill='#58a6ff' stroke='#dbeafe' stroke-width='1.5'/>";
+    }
+    else if (loaded)
+    {
+        svg += "<circle cx='123' cy='122' r='7' fill='#39d353' stroke='#dcffe4' stroke-width='1.5'/>";
+    }
+    else if (isOffline)
+    {
+        svg += "<circle cx='123' cy='122' r='7' fill='#ffb347' stroke='#fff1d6' stroke-width='1.5'/>";
+    }
+    else
+    {
+        svg += "<circle cx='123' cy='122' r='7' fill='#7d8590' stroke='#e6edf3' stroke-width='1.5'/>";
+    }
+
     svg += "</svg>";
     return svg;
 }

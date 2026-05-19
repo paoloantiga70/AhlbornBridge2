@@ -1,4 +1,4 @@
-﻿#include "Midi.h"
+#include "Midi.h"
 #include "StreamDeck.h"
 #include "Xml.h"
 #include "TrayIcon.h"
@@ -7,6 +7,7 @@
 #include "Midi2Endpoint.h"
 #include <cwchar>
 #include <string>
+#include <vector>
 #include <shlobj.h>
 #include <knownfolders.h>
 
@@ -16,6 +17,17 @@ HMIDIOUT hMidiOut = nullptr;
 HMIDIOUT hMidiOut2 = nullptr;
 HANDLE hThread = nullptr;
 CRITICAL_SECTION g_midiOutLock;
+
+// Dynamic multi-device lists (protected by g_midiOutLock for outputs)
+static std::vector<HMIDIIN>  g_midiIns;
+static std::vector<HMIDIOUT> g_midiOuts;
+
+// Per-slot last-message timestamp for activity indicators.
+// Index matches the slot order: 0 = hMidiIn, 1 = hMidiIn2, 2+ = g_midiIns extras.
+static constexpr int kMaxInputSlots  = 16;
+static constexpr int kMaxOutputSlots = 16;
+static std::atomic<DWORD> g_inputSlotLastMsg[kMaxInputSlots]   = {};
+static std::atomic<DWORD> g_outputSlotLastMsg[kMaxOutputSlots] = {};
 
 std::atomic<uint64_t> noteState[kChannels][2] = {};
 std::atomic<uint64_t> outputNoteState[kChannels][2] = {};
@@ -94,15 +106,16 @@ namespace
             while (g_midiOutQueue.TryDequeue(msg))
             {
                 EnterCriticalSection(&g_midiOutLock);
-                HMIDIOUT out = hMidiOut;
-                if (out != nullptr)
+                int slot = 0;
+                for (HMIDIOUT out : g_midiOuts)
                 {
-                    midiOutShortMsg(out, msg);
-                }
-                HMIDIOUT out2 = hMidiOut2;
-                if (out2 != nullptr)
-                {
-                    midiOutShortMsg(out2, msg);
+                    if (out != nullptr)
+                    {
+                        midiOutShortMsg(out, msg);
+                        if (slot < kMaxOutputSlots)
+                            g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
+                    }
+                    ++slot;
                 }
                 LeaveCriticalSection(&g_midiOutLock);
                 dispatched = true;
@@ -117,15 +130,16 @@ namespace
         while (g_midiOutQueue.TryDequeue(msg))
         {
             EnterCriticalSection(&g_midiOutLock);
-            HMIDIOUT out = hMidiOut;
-            if (out != nullptr)
+            int slot = 0;
+            for (HMIDIOUT out : g_midiOuts)
             {
-                midiOutShortMsg(out, msg);
-            }
-            HMIDIOUT out2 = hMidiOut2;
-            if (out2 != nullptr)
-            {
-                midiOutShortMsg(out2, msg);
+                if (out != nullptr)
+                {
+                    midiOutShortMsg(out, msg);
+                    if (slot < kMaxOutputSlots)
+                        g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
+                }
+                ++slot;
             }
             LeaveCriticalSection(&g_midiOutLock);
         }
@@ -244,7 +258,7 @@ namespace
 				case DeferredCmd::LoadInstalledOrgan:
 					{
 						int idx = g_pendingInstalledOrganIndex.load();
-						printf("[Deferred] LoadInstalledOrgan %d â€” loading via GUI automation\n", idx);
+						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
 
 						std::vector<std::wstring> names = LoadInstalledOrganNames();
 						if (idx >= 1 && idx <= static_cast<int>(names.size()) && !names[idx - 1].empty())
@@ -1092,62 +1106,71 @@ namespace
         }
     }
 
-    bool OpenMidiDevice(UINT devIndex)
-    {
-        MIDIINCAPS caps;
-        if (midiInGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
-        {
-            printf("[OpenMidiDevice] : Failed to query device 01 capabilities for device %u.\n", devIndex);
-            g_inputDeviceOpen = false;
-            return false;
-        }
+	bool OpenMidiDevice(UINT devIndex)
+	{
+		MIDIINCAPS caps;
+		if (midiInGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
+		{
+			printf("[OpenMidiDevice] : Failed to query device 01 capabilities for device %u.\n", devIndex);
+			g_inputDeviceOpen = false;
+			return false;
+		}
 
-        printf("[OpenMidiDevice] : Opening Midi Input device 01: [%S]\n", caps.szPname);
+		printf("[OpenMidiDevice] : Opening Midi Input device 01: [%S]\n", caps.szPname);
 
-        if (midiInOpen(&hMidiIn,
-            devIndex,
-            (DWORD_PTR)MidiInProc,
-            0,
-            CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
-        {
-            printf("[OpenMidiDevice] : Failed to open MIDI device 01.\n");
-            g_inputDeviceOpen = false;
-            return false;
-        }
+		if (midiInOpen(&hMidiIn,
+			devIndex,
+			(DWORD_PTR)MidiInProc,
+			0,
+			CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
+		{
+			printf("[OpenMidiDevice] : Failed to open MIDI device 01.\n");
+			g_inputDeviceOpen = false;
+			return false;
+		}
 
-        midiInStart(hMidiIn);
-        g_inputDeviceOpen = true;
-        return true;
-    }
+		midiInStart(hMidiIn);
+		g_inputDeviceOpen = true;
+		// Keep slot-0 in the dynamic vector in sync.
+		if (g_midiIns.empty())
+			g_midiIns.push_back(hMidiIn);
+		else
+			g_midiIns[0] = hMidiIn;
+		return true;
+	}
 
-    bool OpenMidiDevice2(UINT devIndex)
-    {
-        MIDIINCAPS caps;
-        if (midiInGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
-        {
-            printf("[OpenMidiDevice2] : Failed to query device 02 capabilities for device %u.\n", devIndex);
-            g_input2DeviceOpen = false;
-            return false;
-        }
+	bool OpenMidiDevice2(UINT devIndex)
+	{
+		MIDIINCAPS caps;
+		if (midiInGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
+		{
+			printf("[OpenMidiDevice2] : Failed to query device 02 capabilities for device %u.\n", devIndex);
+			g_input2DeviceOpen = false;
+			return false;
+		}
 
-        printf("[OpenMidiDevice2] : Opening Midi Input device 02: [%S]\n", caps.szPname);
+		printf("[OpenMidiDevice2] : Opening Midi Input device 02: [%S]\n", caps.szPname);
 
-        if (midiInOpen(&hMidiIn2,
-            devIndex,
-            (DWORD_PTR)MidiInProc,
-            0,
-            CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
-        {
-            printf("[OpenMidiDevice2] : Failed to open MIDI device 02.\n");
-            g_input2DeviceOpen = false;
-            return false;
-        }
+		if (midiInOpen(&hMidiIn2,
+			devIndex,
+			(DWORD_PTR)MidiInProc,
+			0,
+			CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
+		{
+			printf("[OpenMidiDevice2] : Failed to open MIDI device 02.\n");
+			g_input2DeviceOpen = false;
+			return false;
+		}
 
-        midiInStart(hMidiIn2);
-        g_input2DeviceOpen = true;
+		midiInStart(hMidiIn2);
+		g_input2DeviceOpen = true;
+		if (g_midiIns.size() < 2)
+			g_midiIns.push_back(hMidiIn2);
+		else
+			g_midiIns[1] = hMidiIn2;
 		printf("\n");
-        return true;
-    }
+		return true;
+	}
 
 bool OpenMidiOutputDevice(UINT devIndex)
 {
@@ -1170,6 +1193,12 @@ bool OpenMidiOutputDevice(UINT devIndex)
 
 	printf("\n");
 	g_outputDeviceOpen = true;
+	EnterCriticalSection(&g_midiOutLock);
+	if (g_midiOuts.empty())
+		g_midiOuts.push_back(hMidiOut);
+	else
+		g_midiOuts[0] = hMidiOut;
+	LeaveCriticalSection(&g_midiOutLock);
 	return true;
 }
 
@@ -1194,25 +1223,48 @@ bool OpenMidiOutput2Device(UINT devIndex)
 
 	printf("\n");
 	g_output2DeviceOpen = true;
+	EnterCriticalSection(&g_midiOutLock);
+	if (g_midiOuts.size() < 2)
+		g_midiOuts.push_back(hMidiOut2);
+	else
+		g_midiOuts[1] = hMidiOut2;
+	LeaveCriticalSection(&g_midiOutLock);
 	return true;
 }
 
 	bool IsTopLevelWithChild(HWND hWnd)
-    {
-        if (!hWnd || !IsWindow(hWnd))
-        {
-            return false;
-        }
+	{
+		if (!hWnd || !IsWindow(hWnd))
+		{
+			return false;
+		}
 
-        if (GetWindow(hWnd, GW_OWNER) != nullptr || GetParent(hWnd) != nullptr)
-        {
-            return false;
-        }
+		if (GetWindow(hWnd, GW_OWNER) != nullptr || GetParent(hWnd) != nullptr)
+		{
+			return false;
+		}
 
-        return GetWindow(hWnd, GW_CHILD) != nullptr;
-    }
+		return GetWindow(hWnd, GW_CHILD) != nullptr;
+	}
 
-  
+	// ---------------------------------------------------------------
+	// Interactive MIDI input detection helpers.
+	// ---------------------------------------------------------------
+	std::atomic<int>    g_detectHitIndex{ -1 };
+	std::vector<HMIDIIN> g_detectHandles;
+
+	void CALLBACK DetectMidiInProc(HMIDIIN hIn, UINT wMsg, DWORD_PTR /*inst*/,
+								   DWORD_PTR /*p1*/, DWORD_PTR /*p2*/)
+	{
+		if (wMsg != MIM_DATA) return;
+		if (g_detectHitIndex.load() >= 0) return;
+		for (int i = 0; i < (int)g_detectHandles.size(); ++i)
+		{
+			if (g_detectHandles[i] == hIn)
+			{ g_detectHitIndex.store(i); break; }
+		}
+	}
+
 }
 
 // Public helper so other modules (e.g., tray icon handler) can trigger the
@@ -1255,6 +1307,95 @@ void EnqueueUnloadOrgan()
 {
     g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan0);
 }
+
+// Close all dynamic inputs and reopen from the new name list.
+void SetAssignedMidiInputNames(const std::vector<std::wstring>& names)
+{
+    // Close all open input handles beyond the first two legacy slots.
+    for (size_t i = 2; i < g_midiIns.size(); ++i)
+    {
+        if (g_midiIns[i])
+        {
+            midiInStop(g_midiIns[i]);
+            midiInReset(g_midiIns[i]);
+            midiInClose(g_midiIns[i]);
+        }
+    }
+    g_midiIns.clear();
+
+    // Close legacy slots.
+    if (hMidiIn)  { midiInStop(hMidiIn);  midiInReset(hMidiIn);  midiInClose(hMidiIn);  hMidiIn  = nullptr; }
+    if (hMidiIn2) { midiInStop(hMidiIn2); midiInReset(hMidiIn2); midiInClose(hMidiIn2); hMidiIn2 = nullptr; }
+    g_inputDeviceOpen  = false;
+    g_input2DeviceOpen = false;
+
+    UINT numInDevs = midiInGetNumDevs();
+    bool anyOpened = false;
+    for (size_t slot = 0; slot < names.size(); ++slot)
+    {
+        const std::wstring& name = names[slot];
+        UINT idx = UINT(-1);
+        for (UINT i = 0; i < numInDevs; ++i)
+        {
+            MIDIINCAPS caps = {};
+            if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && name == caps.szPname)
+            { idx = i; break; }
+        }
+        if (idx == UINT(-1)) { printf("[SetAssignedMidiInputNames] '%S' not found\n", name.c_str()); continue; }
+        if (slot == 0)      anyOpened |= OpenMidiDevice(idx);
+        else if (slot == 1) anyOpened |= OpenMidiDevice2(idx);
+        else
+        {
+            HMIDIIN hExtra = nullptr;
+            if (midiInOpen(&hExtra, idx, (DWORD_PTR)MidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
+            { midiInStart(hExtra); g_midiIns.push_back(hExtra); anyOpened = true; }
+        }
+    }
+    if (!anyOpened) g_inputDeviceOpen = false;
+}
+
+// Close all dynamic outputs and reopen from the new name list.
+void SetAssignedMidiOutputNames(const std::vector<std::wstring>& names)
+{
+    EnterCriticalSection(&g_midiOutLock);
+    for (size_t i = 2; i < g_midiOuts.size(); ++i)
+    {
+        if (g_midiOuts[i]) { midiOutReset(g_midiOuts[i]); midiOutClose(g_midiOuts[i]); }
+    }
+    g_midiOuts.clear();
+    if (hMidiOut)  { midiOutReset(hMidiOut);  midiOutClose(hMidiOut);  hMidiOut  = nullptr; }
+    if (hMidiOut2) { midiOutReset(hMidiOut2); midiOutClose(hMidiOut2); hMidiOut2 = nullptr; }
+    LeaveCriticalSection(&g_midiOutLock);
+    g_outputDeviceOpen  = false;
+    g_output2DeviceOpen = false;
+
+    UINT numOutDevs = midiOutGetNumDevs();
+    for (size_t slot = 0; slot < names.size(); ++slot)
+    {
+        const std::wstring& name = names[slot];
+        UINT idx = UINT(-1);
+        for (UINT i = 0; i < numOutDevs; ++i)
+        {
+            MIDIOUTCAPS caps = {};
+            if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && name == caps.szPname)
+            { idx = i; break; }
+        }
+        if (idx == UINT(-1)) { printf("[SetAssignedMidiOutputNames] '%S' not found\n", name.c_str()); continue; }
+        if (slot == 0)      OpenMidiOutputDevice(idx);
+        else if (slot == 1) OpenMidiOutput2Device(idx);
+        else
+        {
+            HMIDIOUT hExtra = nullptr;
+            if (midiOutOpen(&hExtra, idx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR)
+            {
+                EnterCriticalSection(&g_midiOutLock);
+                g_midiOuts.push_back(hExtra);
+                LeaveCriticalSection(&g_midiOutLock);
+            }
+        }
+    }
+}
+
 
 void clearAllNotes()
 {
@@ -1567,139 +1708,364 @@ bool startsWithFe()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Interactive MIDI input detection.
+// Opens all available MIDI input devices in "sniff" mode, waits up to 30
+// seconds for the first MIDI message, then saves the sender as the assigned
+// input.  "AhlbornBridge Virtual Port" is always added as the default
+// output (the bridge writes here; Hauptwerk reads from "Virtual Port (B)").
+// Both assignments are persisted to Settings.xml and written to the
+// Hauptwerk Config.Config_Hauptwerk_xml.
+// ---------------------------------------------------------------------------
+static void DetectMidiInputInteractive()
+{
+    UINT numInDevs = midiInGetNumDevs();
+    if (numInDevs == 0)
+    {
+        printf("[DetectMidi] No MIDI input devices available.\n");
+        return;
+    }
+
+    printf("\n[DetectMidi] *** No MIDI input configured. ***\n");
+    printf("[DetectMidi] Press any key/pedal on your MIDI controller now...\n");
+    printf("[DetectMidi] Listening on %u device(s) for 30 seconds.\n\n", numInDevs);
+    fflush(stdout);
+
+    g_detectHitIndex.store(-1);
+    g_detectHandles.clear();
+
+    for (UINT i = 0; i < numInDevs; ++i)
+    {
+        MIDIINCAPS caps = {};
+        if (midiInGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+        printf("[DetectMidi]   Listening on [%u] %S\n", i, caps.szPname);
+
+        HMIDIIN h = nullptr;
+        if (midiInOpen(&h, i, (DWORD_PTR)DetectMidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
+        {
+            midiInStart(h);
+            g_detectHandles.push_back(h);
+        }
+    }
+
+    // Show a dialog while waiting (keeps the message pump alive and gives user visual feedback)
+    constexpr DWORD kTimeoutMs = 30000;
+
+    struct DetectDlgData
+    {
+        DWORD startTick;
+        DWORD timeoutMs;
+    };
+    DetectDlgData dlgData = { GetTickCount(), kTimeoutMs };
+
+    auto detectDlgProc = [](HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR
+    {
+        switch (msg)
+        {
+        case WM_INITDIALOG:
+        {
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, lp);
+            SetWindowTextW(hDlg, L"AhlbornBridge \u2014 Primo avvio");
+            SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetForegroundWindow(hDlg);
+
+            HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            SetWindowLongPtrW(hDlg, DWLP_USER, (LONG_PTR)hFont);
+
+            HWND hLbl = CreateWindowW(L"STATIC",
+                L"Nessun dispositivo MIDI configurato.\n\n"
+                L"Premere un tasto sulla console/pedaliera\n"
+                L"per rilevare automaticamente il dispositivo MIDI.",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 20, 340, 80, hDlg, (HMENU)101, nullptr, nullptr);
+            SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            HWND hCountdown = CreateWindowW(L"STATIC", L"30",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                150, 110, 80, 40, hDlg, (HMENU)102, nullptr, nullptr);
+            HFONT hBig = CreateFontW(-28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            SendMessageW(hCountdown, WM_SETFONT, (WPARAM)hBig, TRUE);
+            // store big font in static id 103 to delete on destroy
+            CreateWindowW(L"STATIC", L"secondi rimanenti",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                80, 152, 220, 20, hDlg, (HMENU)103, nullptr, nullptr);
+            HWND hSub = GetDlgItem(hDlg, 103);
+            if (hSub) SendMessageW(hSub, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            HWND hSkip = CreateWindowW(L"BUTTON", L"Salta",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                155, 186, 90, 28, hDlg, (HMENU)IDCANCEL, nullptr, nullptr);
+            SendMessageW(hSkip, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            SetTimer(hDlg, 1, 100, nullptr);
+            return TRUE;
+        }
+        case WM_TIMER:
+        {
+            if (wp != 1) break;
+            auto* data = reinterpret_cast<DetectDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+            if (!data) break;
+
+            // Check if MIDI was detected
+            if (g_detectHitIndex.load() >= 0)
+            {
+                KillTimer(hDlg, 1);
+                EndDialog(hDlg, IDOK);
+                return TRUE;
+            }
+
+            DWORD elapsed = GetTickCount() - data->startTick;
+            if (elapsed >= data->timeoutMs)
+            {
+                KillTimer(hDlg, 1);
+                EndDialog(hDlg, IDCANCEL);
+                return TRUE;
+            }
+
+            DWORD remaining = (data->timeoutMs - elapsed + 999) / 1000;
+            wchar_t buf[16];
+            swprintf_s(buf, L"%lu", remaining);
+            HWND hCountdown = GetDlgItem(hDlg, 102);
+            if (hCountdown) SetWindowTextW(hCountdown, buf);
+            return TRUE;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDCANCEL)
+            {
+                KillTimer(hDlg, 1);
+                EndDialog(hDlg, IDCANCEL);
+                return TRUE;
+            }
+            break;
+        case WM_DESTROY:
+        {
+            HFONT hFont = (HFONT)GetWindowLongPtrW(hDlg, DWLP_USER);
+            if (hFont) DeleteObject(hFont);
+            break;
+        }
+        }
+        return FALSE;
+    };
+
+#pragma pack(push, 4)
+    struct { DLGTEMPLATE dt; WORD menu; WORD cls; WORD title; } dlgTpl = {};
+#pragma pack(pop)
+    dlgTpl.dt.style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    dlgTpl.dt.cx = 200;
+    dlgTpl.dt.cy = 130;
+
+    DialogBoxIndirectParamW(GetModuleHandle(nullptr),
+        reinterpret_cast<LPCDLGTEMPLATEW>(&dlgTpl),
+        nullptr, detectDlgProc, reinterpret_cast<LPARAM>(&dlgData));
+
+    // Stop and close all detection handles
+    for (HMIDIIN h : g_detectHandles)
+    {
+        midiInStop(h);
+        midiInReset(h);
+        midiInClose(h);
+    }
+
+    int hit = g_detectHitIndex.load();
+    g_detectHandles.clear();
+    g_detectHitIndex.store(-1);
+
+    if (hit < 0)
+    {
+        printf("[DetectMidi] Timeout: no MIDI input detected. Continuing without assignment.\n");
+        return;
+    }
+
+    // Resolve the device name from its index in the full device list
+    // (g_detectHandles was built in order, skipping devices that failed to open;
+    //  we need to map `hit` back to the real device index).
+    UINT numDevs = midiInGetNumDevs();
+    int openCount = 0;
+    std::wstring detectedName;
+    for (UINT i = 0; i < numDevs; ++i)
+    {
+        MIDIINCAPS caps = {};
+        if (midiInGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+        // Check whether this index was successfully opened (same order as above)
+        HMIDIIN probe = nullptr;
+        // We already closed everything; just count the ones that were opened
+        // in the same order. We track success by counting openCount.
+        // Re-test: if the device caps query succeeded it was attempted;
+        // we can't re-open here, so we just count all caps-successful devices.
+        if (openCount == hit)
+        {
+            detectedName = caps.szPname;
+            printf("[DetectMidi] Detected MIDI input: [%u] %S\n", i, caps.szPname);
+            break;
+        }
+        ++openCount;
+    }
+
+    if (detectedName.empty())
+    {
+        printf("[DetectMidi] Could not resolve device name for hit index %d.\n", hit);
+        return;
+    }
+
+    // Build assignment lists
+    std::vector<std::wstring> inputNames  = { detectedName };
+    std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port" };
+
+    // Persist to Settings.xml
+    SaveAssignedMidiInputNames(inputNames);
+    SaveAssignedMidiOutputNames(outputNames);
+    printf("[DetectMidi] Saved assigned input:  %S\n", detectedName.c_str());
+    printf("[DetectMidi] Saved assigned output: AhlbornBridge Virtual Port\n");
+
+    // Write to Hauptwerk config
+    WriteHauptwerkMidiConfig(inputNames, outputNames);
+
+    // Now open the assigned devices for runtime use
+    SetAssignedMidiInputNames(inputNames);
+    SetAssignedMidiOutputNames(outputNames);
+}
+
 bool initMidiState()
 {
     InitializeCriticalSection(&g_midiOutLock);
 
-    UINT numDevs = midiInGetNumDevs();
-    if (numDevs == 0)
-    {
-        printf("[initMidiState] : No MIDI input devices found.\n");
-        g_inputDeviceOpen = false;
-        return 1;
-    }
+    UINT numInDevs = midiInGetNumDevs();
+    UINT numOutDevs = midiOutGetNumDevs();
 
-    UINT devIndex = 0;
-    UINT savedDeviceId = 0;
-    bool hasSavedDevice = LoadSelectedDeviceId(savedDeviceId) && savedDeviceId < numDevs;
-    if (hasSavedDevice)
-    {
-        devIndex = savedDeviceId;
-    }
-
-    // List available MIDI input devices and prompt the user to choose one.
+    // List available MIDI input devices.
     printf("\n[initMidiState] : Available MIDI input devices:\n\n");
-    for (UINT i = 0; i < numDevs; ++i)
+    for (UINT i = 0; i < numInDevs; ++i)
     {
         MIDIINCAPS caps;
         if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
-        {
             printf("  [%u] %S\n", i, caps.szPname);
-        }
         else
-        {
             printf("  [%u] (unknown)\n", i);
-        }
     }
+    printf("\n");
 
-        printf("\n");
-
-    // List available MIDI output devices
-    UINT numOutDevsDbg = midiOutGetNumDevs();
+    // List available MIDI output devices.
     printf("[initMidiState] : Available MIDI output devices:\n\n");
-    for (UINT i = 0; i < numOutDevsDbg; ++i)
+    for (UINT i = 0; i < numOutDevs; ++i)
     {
         MIDIOUTCAPS caps;
         if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
-        {
             printf("  [%u] %S\n", i, caps.szPname);
-        }
         else
-        {
             printf("  [%u] (unknown)\n", i);
-        }
     }
+    printf("\n");
 
-        printf("\n");
-
-    if (hasSavedDevice)
+    // ---- If no assignments exist yet, run interactive detection ----
     {
-       // printf("Using saved MIDI input device [%u].\n", devIndex);
-    }
-    else
-    {
-        printf("[initMidiState] : Using default MIDI input device [0].\n");
-    }
-
-    if (!OpenMidiDevice(devIndex))
-    {
-        g_inputDeviceOpen = false;
-        return 1;
-    }
-    {
-        bool input1Enabled = true;
-        LoadMidiInput1DeviceEnabled(input1Enabled);
-        if (!input1Enabled)
-            CloseMidiInputDeviceOnly();
-    }
-
-    UINT savedDeviceId2 = 0;
-    if (LoadSelectedInput2DeviceId(savedDeviceId2) && savedDeviceId2 < numDevs)
-    {
-        OpenMidiDevice2(savedDeviceId2);
-        bool input2Enabled = true;
-        LoadMidiInput2DeviceEnabled(input2Enabled);
-        if (!input2Enabled)
-            CloseMidiInput2DeviceOnly();
-    }
-
-    UINT numOutDevs = midiOutGetNumDevs();
-    if (numOutDevs > 0)
-    {
-        UINT savedOutputDeviceId = 0;
-        if (LoadSelectedOutputDeviceId(savedOutputDeviceId) && savedOutputDeviceId < numOutDevs)
+        auto assignedInputs = LoadAssignedMidiInputNames();
+        printf("[initMidiState] Assigned inputs loaded: %zu\n", assignedInputs.size());
+        if (assignedInputs.empty())
         {
-            SwitchMidiOutputDevice(savedOutputDeviceId);
-        }
-        else
-        {
-            SwitchMidiOutputDevice(0);
-        }
-        {
-            bool output1Enabled = true;
-            LoadMidiOutput1DeviceEnabled(output1Enabled);
-            if (!output1Enabled)
-                CloseMidiOutputDeviceOnly();
-        }
+            // Force console visible so the user can see the detection prompt.
+            HWND hConsole = GetConsoleWindow();
+            if (hConsole)
+            {
+                ShowWindow(hConsole, SW_SHOW);
+                SetForegroundWindow(hConsole);
+            }
+            printf("[initMidiState] First launch detected - starting interactive MIDI detection.\n");
+            fflush(stdout);
 
-        UINT savedOutput2DeviceId = 0;
-        if (LoadSelectedOutput2DeviceId(savedOutput2DeviceId) && savedOutput2DeviceId < numOutDevs)
-        {
-            SwitchMidiOutput2Device(savedOutput2DeviceId);
-            bool output2Enabled = true;
-            LoadMidiOutput2DeviceEnabled(output2Enabled);
-            if (!output2Enabled)
-                CloseMidiOutput2DeviceOnly();
+            // DetectMidiInputInteractive persists the assignment and opens
+            // the devices itself, so we can return early after it runs.
+            DetectMidiInputInteractive();
+            bool routerEnabled = false;
+            if (LoadMidiRouterEnabled(routerEnabled))
+                g_midiRouterEnabled = routerEnabled;
+            EnableMidi2Endpoint();
+            RefreshSettingsFile();
+            return true;
         }
     }
-    else
+
+    // ---- Open all assigned MIDI input devices ----
+    auto assignedInputs = LoadAssignedMidiInputNames();
+    {
+        bool anyOpened = false;
+        for (size_t slot = 0; slot < assignedInputs.size(); ++slot)
+        {
+            const std::wstring& name = assignedInputs[slot];
+            UINT idx = UINT(-1);
+            for (UINT i = 0; i < numInDevs; ++i)
+            {
+                MIDIINCAPS caps = {};
+                if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && name == caps.szPname)
+                { idx = i; break; }
+            }
+            if (idx == UINT(-1))
+            { printf("[initMidiState] : Assigned input '%S' not found, skipping.\n", name.c_str()); continue; }
+
+            if (slot == 0)       anyOpened |= OpenMidiDevice(idx);
+            else if (slot == 1)  anyOpened |= OpenMidiDevice2(idx);
+            else
+            {
+                HMIDIIN hExtra = nullptr;
+                if (midiInOpen(&hExtra, idx, (DWORD_PTR)MidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
+                {
+                    midiInStart(hExtra);
+                    g_midiIns.push_back(hExtra);
+                    printf("[initMidiState] : Opened extra input slot %zu: [%S]\n", slot, name.c_str());
+                    anyOpened = true;
+                }
+            }
+        }
+        if (!anyOpened) g_inputDeviceOpen = false;
+    }
+
+    // ---- Open all assigned MIDI output devices ----
+    auto assignedOutputs = LoadAssignedMidiOutputNames();
+    if (assignedOutputs.empty())
     {
         g_outputDeviceOpen = false;
         g_output2DeviceOpen = false;
     }
+    else
+    {
+        for (size_t slot = 0; slot < assignedOutputs.size(); ++slot)
+        {
+            const std::wstring& name = assignedOutputs[slot];
+            UINT idx = UINT(-1);
+            for (UINT i = 0; i < numOutDevs; ++i)
+            {
+                MIDIOUTCAPS caps = {};
+                if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && name == caps.szPname)
+                { idx = i; break; }
+            }
+            if (idx == UINT(-1))
+            { printf("[initMidiState] : Assigned output '%S' not found, skipping.\n", name.c_str()); continue; }
+
+            if (slot == 0)       OpenMidiOutputDevice(idx);
+            else if (slot == 1)  OpenMidiOutput2Device(idx);
+            else
+            {
+                HMIDIOUT hExtra = nullptr;
+                if (midiOutOpen(&hExtra, idx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR)
+                {
+                    EnterCriticalSection(&g_midiOutLock);
+                    g_midiOuts.push_back(hExtra);
+                    LeaveCriticalSection(&g_midiOutLock);
+                    printf("[initMidiState] : Opened extra output slot %zu: [%S]\n", slot, name.c_str());
+                }
+            }
+        }
+    }
 
     bool routerEnabled = false;
     if (LoadMidiRouterEnabled(routerEnabled))
-    {
         g_midiRouterEnabled = routerEnabled;
-    }
+
     printf("[initMidiState] : HAUPTWERK bridge enabled: [%s]\n\n", g_midiRouterEnabled.load() ? "true" : "false");
 
-    // Start the Windows MIDI Services virtual endpoint (graceful no-op if unavailable)
     EnableMidi2Endpoint();
-
     RefreshSettingsFile();
-
     return true;
 }
 
@@ -1933,6 +2299,21 @@ bool IsMidiOutput2DeviceOpen()
     return g_output2DeviceOpen.load();
 }
 
+// Returns the GetTickCount() value of the last MIDI message received on
+// input slot `slotIndex` (0 = hMidiIn, 1 = hMidiIn2, 2+ extras).
+// Returns 0 if the slot has never received a message.
+DWORD GetMidiInputSlotLastMsg(int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= kMaxInputSlots) return 0;
+    return g_inputSlotLastMsg[slotIndex].load(std::memory_order_relaxed);
+}
+
+DWORD GetMidiOutputSlotLastMsg(int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= kMaxOutputSlots) return 0;
+    return g_outputSlotLastMsg[slotIndex].load(std::memory_order_relaxed);
+}
+
 void CleanupMidiLocks()
 {
     DisableMidi2Endpoint();
@@ -1991,14 +2372,29 @@ void clearChannel(int ch)
 }
 
 void CALLBACK MidiInProc(
-    HMIDIIN hMidiIn,
-    UINT wMsg,
-    DWORD_PTR dwInstance,
-    DWORD_PTR dwParam1,
-    DWORD_PTR dwParam2)
+	HMIDIIN hMidiIn,
+	UINT wMsg,
+	DWORD_PTR dwInstance,
+	DWORD_PTR dwParam1,
+	DWORD_PTR dwParam2)
 {
 	if (wMsg != MIM_DATA)
 		return;
+
+	// Stamp the per-slot activity timestamp so the assignment window can
+	// show a live signal indicator for each assigned input.
+	{
+		int slot = -1;
+		if      (hMidiIn == ::hMidiIn)  slot = 0;
+		else if (hMidiIn == ::hMidiIn2) slot = 1;
+		else
+		{
+			for (int i = 0; i < (int)g_midiIns.size() && i + 2 < kMaxInputSlots; ++i)
+				if (g_midiIns[i] == hMidiIn) { slot = i + 2; break; }
+		}
+		if (slot >= 0)
+			g_inputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
+	}
 
 	DWORD msg = (DWORD)dwParam1;
 
@@ -2147,7 +2543,7 @@ void CALLBACK MidiInProc(
 			clearChannel(ch);
        
 		// Esegue Unload organ se viene ricevuto CC ch16, data1= BF_0x50 o BF_0x51, data2 = 0
-		// oppure Cancel se l'organo Ã¨ in caricamento
+		// oppure Cancel se l'organo è in caricamento
 		if (ch == 0x0F && (data1 == BF_0x50 || data1 == BF_0x51) && data2 == 0)
 		{
 			printf("[MidiInProc] : Received MIDI message: CC ch16, data1= 0x%02X, data2 = 0\n", data1);

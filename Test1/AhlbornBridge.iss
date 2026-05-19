@@ -21,8 +21,8 @@ WizardStyle=modern
 ; Includi tutto il contenuto della cartella di build (se metti lo .iss in quella cartella)
 Source: "*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Installa la cartella Icons nella posizione Roaming dell'utente corrente (usata dall'icona del collegamento)
-Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge2\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Installa la cartella Icons nella posizione Roaming dell'utente corrente usata dal runtime e dal collegamento
+Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; File di configurazione da includere esplicitamente
 Source: "Settings.xml"; DestDir: "{app}"; Flags: ignoreversion
@@ -31,7 +31,7 @@ Source: "Settings.xml"; DestDir: "{app}"; Flags: ignoreversion
 ; Source: "Release\AhlbornBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; IconFilename: "{userappdata}\AhlbornBridge2\Icons\AhlbornBridge.ico"
+Name: "{group}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; IconFilename: "{userappdata}\AhlbornBridge\Icons\AhlbornBridge.ico"
 Name: "{group}\Uninstall AhlbornBridge2"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; Tasks: desktopicon
 
@@ -43,7 +43,7 @@ Filename: "{app}\AhlbornBridge.exe"; Description: "Avvia AhlbornBridge2"; Flags:
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
-Type: filesandordirs; Name: "{userappdata}\AhlbornBridge2"
+Type: filesandordirs; Name: "{userappdata}\AhlbornBridge"
 
 ; Note:
 ; - Se l'app richiede Visual C++ Redistributable, includi il controllo o il pacchetto separato.

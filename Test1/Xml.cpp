@@ -81,6 +81,11 @@ namespace
     std::wstring s_cachedStreamDeckMidiIn;
     bool s_streamDeckSettingsLoaded = false;
 
+    // Cached assigned MIDI device name lists (new dynamic multi-device model).
+    std::vector<std::wstring> s_assignedInputNames;
+    std::vector<std::wstring> s_assignedOutputNames;
+    bool s_assignedDevicesLoaded = false;
+
     // Cached Hauptwerk folder paths (detected once at startup).
     std::wstring s_rootHauptwerkApp;
     std::wstring s_rootHauptwerkUserData;
@@ -709,6 +714,68 @@ namespace
 		TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", s_cachedStreamDeckMidiIn);
 	}
 
+	// Parse a <AssignedMidi*s> section: each <Device>name</Device> child.
+	std::vector<std::wstring> ParseDeviceListSection(const std::wstring& section)
+	{
+		std::vector<std::wstring> result;
+		const std::wstring startTag = L"<Device>";
+		const std::wstring endTag = L"</Device>";
+		size_t pos = 0;
+		while (true)
+		{
+			size_t s = section.find(startTag, pos);
+			if (s == std::wstring::npos) break;
+			s += startTag.size();
+			size_t e = section.find(endTag, s);
+			if (e == std::wstring::npos) break;
+			std::wstring name = section.substr(s, e - s);
+			if (!name.empty())
+				result.push_back(name);
+			pos = e + endTag.size();
+		}
+		return result;
+	}
+
+	void EnsureAssignedDevicesLoaded()
+	{
+		if (s_assignedDevicesLoaded) return;
+		s_assignedDevicesLoaded = true;
+
+		std::wstring xml;
+		if (!TryReadSettingsXml(xml)) return;
+
+		// Try new schema first: <AssignedMidiInputs> / <AssignedMidiOutputs>
+		std::wstring section;
+		if (TryGetSection(xml, L"AssignedMidiInputs", section))
+		{
+			s_assignedInputNames = ParseDeviceListSection(section);
+		}
+		if (TryGetSection(xml, L"AssignedMidiOutputs", section))
+		{
+			s_assignedOutputNames = ParseDeviceListSection(section);
+		}
+
+		// Fall back to old SettingsDevices schema for upgrade compatibility
+		if (s_assignedInputNames.empty() && s_assignedOutputNames.empty())
+		{
+			std::wstring midiSection, devicesSection;
+			if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+			{
+				std::wstring name1, name2;
+				TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", name1);
+				TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", name2);
+				if (!name1.empty()) s_assignedInputNames.push_back(name1);
+				if (!name2.empty()) s_assignedInputNames.push_back(name2);
+
+				std::wstring out1, out2;
+				TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", out1);
+				TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", out2);
+				if (!out1.empty()) s_assignedOutputNames.push_back(out1);
+				if (!out2.empty()) s_assignedOutputNames.push_back(out2);
+			}
+		}
+	}
+
 	bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled)
 	{
 		std::wstring settingsDir = GetSettingsDirPath();
@@ -774,6 +841,14 @@ namespace
 		// Ensure Stream Deck settings are loaded (cached on first call).
 		EnsureStreamDeckSettingsLoaded();
 
+		// Build the assigned device list sections.
+		std::wstring assignedInputSection;
+		for (const auto& name : s_assignedInputNames)
+			assignedInputSection += L"    <Device>" + name + L"</Device>\r\n";
+		std::wstring assignedOutputSection;
+		for (const auto& name : s_assignedOutputNames)
+			assignedOutputSection += L"    <Device>" + name + L"</Device>\r\n";
+
 		std::wstring xml = L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
 			L"<Settings>\r\n"
 			L"  <Midi>\r\n"
@@ -785,6 +860,10 @@ namespace
 			L"    </SettingsDevices>\r\n"
 			L"    <MidiRouterEnabled>" + std::to_wstring(routerEnabled ? 1 : 0) + L"</MidiRouterEnabled>\r\n"
 			L"  </Midi>\r\n"
+			L"  <AssignedMidiInputs>\r\n" + assignedInputSection +
+			L"  </AssignedMidiInputs>\r\n"
+			L"  <AssignedMidiOutputs>\r\n" + assignedOutputSection +
+			L"  </AssignedMidiOutputs>\r\n"
 			L"  <Options>\r\n"
 			L"    <CloseSettingsOnDisconnect>" + std::to_wstring(closeSettingsOnDisconnect ? 1 : 0) + L"</CloseSettingsOnDisconnect>\r\n"
 			L"    <ShowDebugConsole>" + std::to_wstring(showDebugConsole ? 1 : 0) + L"</ShowDebugConsole>\r\n"
@@ -836,6 +915,239 @@ namespace
 		return ok != FALSE && bytesWritten == utf8.size();
 	}
 }
+
+// ---------- Public: dynamic multi-device assignment API ----------
+
+std::vector<std::wstring> LoadAssignedMidiInputNames()
+{
+	EnsureAssignedDevicesLoaded();
+	return s_assignedInputNames;
+}
+
+std::vector<std::wstring> LoadAssignedMidiOutputNames()
+{
+	EnsureAssignedDevicesLoaded();
+	return s_assignedOutputNames;
+}
+
+bool SaveAssignedMidiInputNames(const std::vector<std::wstring>& names)
+{
+	EnsureAssignedDevicesLoaded();
+	s_assignedInputNames = names;
+	// Persist: re-read other settings and write the full XML.
+	bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+	bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+	bool showConsole = true; LoadShowDebugConsole(showConsole);
+	bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+	// Build legacy compat names from slot 0/1.
+	std::wstring in1 = names.size() > 0 ? names[0] : L"";
+	std::wstring in2 = names.size() > 1 ? names[1] : L"";
+	std::wstring out1, out2;
+	if (!s_assignedOutputNames.empty()) out1 = s_assignedOutputNames[0];
+	if (s_assignedOutputNames.size() > 1) out2 = s_assignedOutputNames[1];
+	DeviceEnabledStates devEnabled;
+	return WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+}
+
+bool SaveAssignedMidiOutputNames(const std::vector<std::wstring>& names)
+{
+	EnsureAssignedDevicesLoaded();
+	s_assignedOutputNames = names;
+	bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+	bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+	bool showConsole = true; LoadShowDebugConsole(showConsole);
+	bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+	std::wstring in1, in2;
+	if (!s_assignedInputNames.empty()) in1 = s_assignedInputNames[0];
+	if (s_assignedInputNames.size() > 1) in2 = s_assignedInputNames[1];
+	std::wstring out1 = names.size() > 0 ? names[0] : L"";
+	std::wstring out2 = names.size() > 1 ? names[1] : L"";
+	DeviceEnabledStates devEnabled;
+	return WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+}
+
+bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
+                              const std::vector<std::wstring>& outputNames)
+{
+    // Build path to Config.Config_Hauptwerk_xml
+    std::wstring userDataRoot = s_rootHauptwerkUserData;
+    if (userDataRoot.empty())
+    {
+        std::wstring xml;
+        if (TryReadSettingsXml(xml))
+        {
+            std::wstring opts;
+            if (TryGetSection(xml, L"Options", opts))
+                TryGetTagStringValue(opts, L"<RootFolder_HauptwerkUserData>",
+                                     L"</RootFolder_HauptwerkUserData>", userDataRoot);
+        }
+    }
+    if (userDataRoot.empty())
+    {
+        printf("[WriteHauptwerkMidiConfig] RootFolder_HauptwerkUserData not configured.\n");
+        return false;
+    }
+    if (!userDataRoot.empty() && (userDataRoot.back() == L'\\' || userDataRoot.back() == L'/'))
+        userDataRoot.pop_back();
+
+    std::wstring configPath = userDataRoot + L"\\Config0-GeneralSettings\\Config.Config_Hauptwerk_xml";
+
+    // Read existing config
+    std::wstring hwXml = ReadFileToWString(configPath);
+    if (hwXml.empty())
+    {
+        printf("[WriteHauptwerkMidiConfig] Cannot read config: %S\n", configPath.c_str());
+        return false;
+    }
+
+    // --- Parse PreviouslySeenDevice to build id maps ---
+    // Each device entry looks like: <o><typ>2</typ><id>1234</id><nam>Device Name</nam></o>
+    // typ=2 → MIDI input, typ=3 → MIDI output
+    // (Audio/other devices may omit <typ>, meaning a different type; we ignore those.)
+
+    struct SeenDevice { std::wstring id; std::wstring name; };
+    std::vector<SeenDevice> seenInputs, seenOutputs;
+
+    {
+        // Find PreviouslySeenDevice section boundaries
+        const std::wstring kPSD = L"<ObjectList ObjectType=\"PreviouslySeenDevice\">";
+        size_t psdPos = hwXml.find(kPSD);
+        if (psdPos != std::wstring::npos)
+        {
+            // Section ends at the next <ObjectList or end of file
+            size_t psdEnd = hwXml.find(L"<ObjectList", psdPos + kPSD.size());
+            if (psdEnd == std::wstring::npos) psdEnd = hwXml.size();
+            std::wstring psdSection = hwXml.substr(psdPos + kPSD.size(), psdEnd - psdPos - kPSD.size());
+
+            // Walk all <o>...</o> nodes
+            size_t pos = 0;
+            while (pos < psdSection.size())
+            {
+                size_t oStart = psdSection.find(L"<o>", pos);
+                if (oStart == std::wstring::npos) break;
+                size_t oEnd = psdSection.find(L"</o>", oStart);
+                if (oEnd == std::wstring::npos) break;
+                std::wstring node = psdSection.substr(oStart + 3, oEnd - oStart - 3);
+                pos = oEnd + 4;
+
+                std::wstring typ, id, nam;
+                TryGetTagStringValue(node, L"<typ>", L"</typ>", typ);
+                TryGetTagStringValue(node, L"<id>",  L"</id>",  id);
+                TryGetTagStringValue(node, L"<nam>", L"</nam>", nam);
+                if (id.empty() || nam.empty()) continue;
+
+                if (typ == L"2")
+                    seenInputs.push_back({ id, nam });
+                else if (typ == L"3")
+                    seenOutputs.push_back({ id, nam });
+            }
+        }
+    }
+    printf("[WriteHauptwerkMidiConfig] PreviouslySeenDevice: %zu inputs, %zu outputs found.\n",
+           seenInputs.size(), seenOutputs.size());
+
+    // --- Build new <o> node lists ---
+    // EnabledMIDIInputPort  → always "AhlbornBridge Virtual Port (B)" (typ=2 in PreviouslySeenDevice)
+    // EnabledMIDIOutputPort → the physical assigned input devices (typ=3 in PreviouslySeenDevice)
+    auto buildNode = [](const std::wstring& name, const std::vector<SeenDevice>& seen) -> std::wstring
+    {
+        std::wstring id;
+        for (const auto& dev : seen)
+        {
+            if (dev.name == name)
+            {
+                id = dev.id;
+                printf("[WriteHauptwerkMidiConfig] Matched: '%S' id=%S\n",
+                       dev.name.c_str(), dev.id.c_str());
+                break;
+            }
+        }
+        if (id.empty())
+            printf("[WriteHauptwerkMidiConfig] Not in PreviouslySeenDevice, writing with empty id: '%S'\n",
+                   name.c_str());
+        return L"\r\n<o><id>" + id + L"</id><nam>" + name + L"</nam></o>";
+    };
+
+    // Fixed input port for Hauptwerk: AhlbornBridge Virtual Port (B)
+    const std::wstring kHWInput = L"AhlbornBridge Virtual Port (B)";
+    std::wstring newInputNodes = buildNode(kHWInput, seenInputs);
+
+    // Output ports for Hauptwerk: the physical assigned input devices (searched as typ=3)
+    std::wstring newOutputNodes;
+    for (const auto& name : inputNames)
+        newOutputNodes += buildNode(name, seenOutputs);
+
+    // --- Replace EnabledMIDIInputPort section content ---
+    auto replaceSection = [&](std::wstring& xml, const std::wstring& objectType,
+                              const std::wstring& newNodes) -> bool
+    {
+        const std::wstring kOpen = L"<ObjectList ObjectType=\"" + objectType + L"\">";
+        size_t secStart = xml.find(kOpen);
+        if (secStart == std::wstring::npos)
+        {
+            printf("[WriteHauptwerkMidiConfig] Section '%S' not found.\n", objectType.c_str());
+            return false;
+        }
+        size_t contentStart = secStart + kOpen.size();
+        // Content ends at next <ObjectList (or </ObjectList> if present)
+        size_t nextOL = xml.find(L"<ObjectList", contentStart);
+        // Also check for </ObjectList>
+        size_t closeOL = xml.find(L"</ObjectList>", contentStart);
+        size_t contentEnd;
+        if (closeOL != std::wstring::npos && (nextOL == std::wstring::npos || closeOL < nextOL))
+            contentEnd = closeOL;
+        else if (nextOL != std::wstring::npos)
+            contentEnd = nextOL;
+        else
+            contentEnd = xml.size();
+
+        // Count existing <o> nodes being removed
+        std::wstring oldContent = xml.substr(contentStart, contentEnd - contentStart);
+        int oldCount = 0;
+        size_t p = 0;
+        while ((p = oldContent.find(L"<o>", p)) != std::wstring::npos) { ++oldCount; p += 3; }
+
+        // Count new <o> nodes being written
+        int newCount = 0;
+        p = 0;
+        while ((p = newNodes.find(L"<o>", p)) != std::wstring::npos) { ++newCount; p += 3; }
+
+        printf("[WriteHauptwerkMidiConfig] Section '%S': removed %d old port(s), writing %d new port(s).\n",
+               objectType.c_str(), oldCount, newCount);
+
+        xml = xml.substr(0, contentStart) + newNodes + L"\r\n" + xml.substr(contentEnd);
+        return true;
+    };
+
+    if (!replaceSection(hwXml, L"EnabledMIDIInputPort",  newInputNodes))
+        printf("[WriteHauptwerkMidiConfig] Warning: EnabledMIDIInputPort not replaced.\n");
+    if (!replaceSection(hwXml, L"EnabledMIDIOutputPort", newOutputNodes))
+        printf("[WriteHauptwerkMidiConfig] Warning: EnabledMIDIOutputPort not replaced.\n");
+
+    // --- Write back as UTF-8 ---
+    int utf8Size = WideCharToMultiByte(CP_UTF8, 0, hwXml.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Size <= 0)
+    {
+        printf("[WriteHauptwerkMidiConfig] UTF-8 conversion failed.\n");
+        return false;
+    }
+    std::string utf8(utf8Size - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, hwXml.c_str(), -1, utf8.data(), utf8Size, nullptr, nullptr);
+
+    HANDLE fh = CreateFileW(configPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE)
+    {
+        printf("[WriteHauptwerkMidiConfig] Cannot write config (error %lu).\n", GetLastError());
+        return false;
+    }
+    DWORD written = 0;
+    BOOL ok = WriteFile(fh, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(fh);
+    printf("[WriteHauptwerkMidiConfig] Written %lu bytes to %S\n", written, configPath.c_str());
+    return ok != FALSE && written == utf8.size();
+}
+
 bool SaveSelectedDeviceId(UINT deviceId)
 {
     std::wstring input2Name, outputName, output2Name;

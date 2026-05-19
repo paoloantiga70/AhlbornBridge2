@@ -1,4 +1,5 @@
 #include "TrayIcon.h"
+#include "MidiAssignmentWindow.h"
 #include "Midi.h"
 #include "Xml.h"
 #include "Hauptwerk.h"
@@ -29,6 +30,7 @@ static HWND g_settingsTabHwnd = nullptr;
 static HWND g_settingsMidiPageHwnd = nullptr;
 static HWND g_settingsInfoPageHwnd = nullptr;
 static HWND g_settingsOrganInfoPageHwnd = nullptr;
+static HWND g_settingsHauptwerkPageHwnd = nullptr;
 static HWND g_settingsOrganInfoGroupHwnd = nullptr;
 static HWND g_settingsAboutPageHwnd = nullptr;
 static HWND g_settingsStreamDeckPageHwnd = nullptr;
@@ -562,10 +564,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         TabCtrl_InsertItem(g_settingsTabHwnd, 1, &tabItem);
         tabItem.pszText = const_cast<wchar_t*>(L"Organ Info...");
         TabCtrl_InsertItem(g_settingsTabHwnd, 2, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"Stream Deck");
+        tabItem.pszText = const_cast<wchar_t*>(L"Hauptwerk");
         TabCtrl_InsertItem(g_settingsTabHwnd, 3, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        tabItem.pszText = const_cast<wchar_t*>(L"Stream Deck");
         TabCtrl_InsertItem(g_settingsTabHwnd, 4, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        TabCtrl_InsertItem(g_settingsTabHwnd, 5, &tabItem);
 
         RECT tabRect = {};
         GetClientRect(g_settingsTabHwnd, &tabRect);
@@ -583,6 +587,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             hWnd, nullptr, nullptr, nullptr);
 
         g_settingsOrganInfoPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
+            tabRect.left, tabRect.top,
+            tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+            hWnd, nullptr, nullptr, nullptr);
+
+        g_settingsHauptwerkPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
             tabRect.left, tabRect.top,
             tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
             hWnd, nullptr, nullptr, nullptr);
@@ -649,6 +658,40 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             organRect.right - organRect.left, organRect.bottom - organRect.top,
             g_settingsOrganInfoPageHwnd, nullptr, nullptr, nullptr);
         UpdateOrganInfoGroupTitle();
+
+        {
+            CreateWindowW(L"BUTTON", L"Hauptwerk Integration", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 700, 180, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Hauptwerk preferences",
+                WS_CHILD | WS_VISIBLE,
+                24, 32, 220, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"This tab is reserved for Hauptwerk-specific options and routing behavior.",
+                WS_CHILD | WS_VISIBLE,
+                24, 52, 620, 18, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", nullptr,
+                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                24, 78, 660, 2, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Status:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                30, 96, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Ready for additional Hauptwerk settings.",
+                WS_CHILD | WS_VISIBLE,
+                164, 96, 420, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Tip:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                30, 126, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Next step: add model, ports and profile mapping options here.",
+                WS_CHILD | WS_VISIBLE,
+                164, 126, 500, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+        }
 
         {
             const int leftLabel = 26;
@@ -880,6 +923,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         CreateWindowW(L"STATIC", L"FE", WS_CHILD | WS_VISIBLE,
             48, 481, 120, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
+        // "Assign Devices…" opens the separate MIDI assignment window
+        constexpr int kAssignDevicesBtnId = 2030;
+        CreateWindowW(L"BUTTON", L"Assign Devices\u2026",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            10, 518, 170, 26, g_settingsMidiPageHwnd, (HMENU)kAssignDevicesBtnId, nullptr, nullptr);
+
         SetTimer(hWnd, kLedTimerId, kLedTimerIntervalMs, nullptr);
         return 0;
     }
@@ -1000,6 +1049,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 ClearOutputNotes();
             }
             SaveMidiRouterEnabled(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == 2030)
+        {
+            HINSTANCE hInst = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hWnd, GWLP_HINSTANCE));
+            ShowMidiAssignmentWindow(hInst, hWnd);
             return 0;
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kAutoCloseCheckId)
@@ -1143,13 +1198,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             {
                 ShowWindow(g_settingsOrganInfoPageHwnd, sel == 2 ? SW_SHOW : SW_HIDE);
             }
+            if (g_settingsHauptwerkPageHwnd)
+            {
+                ShowWindow(g_settingsHauptwerkPageHwnd, sel == 3 ? SW_SHOW : SW_HIDE);
+            }
             if (g_settingsStreamDeckPageHwnd)
             {
-                ShowWindow(g_settingsStreamDeckPageHwnd, sel == 3 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_settingsStreamDeckPageHwnd, sel == 4 ? SW_SHOW : SW_HIDE);
             }
             if (g_settingsAboutPageHwnd)
             {
-                ShowWindow(g_settingsAboutPageHwnd, sel == 4 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_settingsAboutPageHwnd, sel == 5 ? SW_SHOW : SW_HIDE);
             }
             if (sel == 2)
             {
@@ -1208,6 +1267,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_settingsMidiPageHwnd = nullptr;
         g_settingsInfoPageHwnd = nullptr;
         g_settingsOrganInfoPageHwnd = nullptr;
+        g_settingsHauptwerkPageHwnd = nullptr;
         g_settingsOrganInfoGroupHwnd = nullptr;
         g_settingsAboutPageHwnd = nullptr;
         g_settingsStreamDeckPageHwnd = nullptr;
@@ -1347,8 +1407,14 @@ void ShowTrayMenu(HWND hWnd, POINT pt)
     if (!hMenu)
         return;
 
+    bool showConsole = true;
+    LoadShowDebugConsole(showConsole);
+
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_MIDI_ASSIGN, L"Assign MIDI devices\u2026");
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_UPDATE, L"Check for Updates");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_TOGGLE_CONSOLE,
+        showConsole ? L"Hide debug console" : L"Show debug console");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
 
@@ -1412,9 +1478,25 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		case ID_TRAY_SETTINGS:
 			ShowSettingsWindow((HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE), hWnd);
 			return 0;
+		case ID_TRAY_MIDI_ASSIGN:
+			ShowMidiAssignmentWindow((HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE), hWnd);
+			return 0;
 		case ID_TRAY_UPDATE:
 			CheckForUpdateInteractive(hWnd);
 			return 0;
+		case ID_TRAY_TOGGLE_CONSOLE:
+		{
+			bool showConsole = true;
+			LoadShowDebugConsole(showConsole);
+			showConsole = !showConsole;
+			HWND hConsoleWnd = GetConsoleWindow();
+			if (hConsoleWnd)
+			{
+				ShowWindow(hConsoleWnd, showConsole ? SW_SHOW : SW_HIDE);
+			}
+			SaveShowDebugConsole(showConsole);
+			return 0;
+		}
 		case ID_TRAY_EXIT:
 			// User requested application exit from tray menu.
 			DestroyWindow(hWnd);

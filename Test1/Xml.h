@@ -4,6 +4,22 @@
 #include <string>
 #include <vector>
 
+// ---------- Dynamic multi-device assignment (new API) ----------
+// Load/save ordered lists of assigned device names for inputs and outputs.
+std::vector<std::wstring> LoadAssignedMidiInputNames();
+std::vector<std::wstring> LoadAssignedMidiOutputNames();
+bool SaveAssignedMidiInputNames(const std::vector<std::wstring>& names);
+bool SaveAssignedMidiOutputNames(const std::vector<std::wstring>& names);
+
+// Write the Hauptwerk Config.Config_Hauptwerk_xml to reflect the given
+// MIDI input and output device names.  Looks up each name in the
+// PreviouslySeenDevice list (typ=2 for inputs, typ=3 for outputs) to find
+// the matching id, then replaces EnabledMIDIInputPort / EnabledMIDIOutputPort.
+// Returns true if the file was written successfully.
+bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
+                              const std::vector<std::wstring>& outputNames);
+
+// ---------- Legacy wrappers (kept for backward compat) ----------
 bool SaveSelectedDeviceId(UINT deviceId);
 bool LoadSelectedDeviceId(UINT& deviceId);
 bool SaveSelectedInput2DeviceId(UINT deviceId);

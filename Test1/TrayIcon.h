@@ -6,6 +6,8 @@ constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT ID_TRAY_SETTINGS = 1001;
 constexpr UINT ID_TRAY_EXIT = 1002;
 constexpr UINT ID_TRAY_UPDATE = 1003;
+constexpr UINT ID_TRAY_TOGGLE_CONSOLE  = 1004;
+constexpr UINT ID_TRAY_MIDI_ASSIGN     = 1005;
 
 
 bool CreateTrayIcon(HINSTANCE hInstance, HWND hWnd);
