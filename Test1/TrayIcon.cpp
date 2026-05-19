@@ -34,13 +34,7 @@ static HWND g_settingsHauptwerkPageHwnd = nullptr;
 static HWND g_settingsOrganInfoGroupHwnd = nullptr;
 static HWND g_settingsAboutPageHwnd = nullptr;
 static HWND g_settingsStreamDeckPageHwnd = nullptr;
-static HWND g_inputLedStripHwnd = nullptr;
-static HWND g_outputLedStripHwnd = nullptr;
 static HWND g_feLedHwnd = nullptr;
-static HWND g_inputStatusLedHwnd = nullptr;
-static HWND g_inputStatus2LedHwnd = nullptr;
-static HWND g_outputStatusLedHwnd = nullptr;
-static HWND g_outputStatus2LedHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -59,15 +53,17 @@ constexpr int kMainCheckNowButtonId = 404;
 
 namespace
 {
-    void HandleMidiDeviceChange(HWND hWnd);
+    void HandleMidiDeviceChange(HWND hWnd)
+    {
+        RefreshMidiDeviceStatus();
+        RefreshSettingsFile();
+        if (g_feLedHwnd)
+        {
+            InvalidateRect(g_feLedHwnd, nullptr, FALSE);
+        }
+    }
+
     void UpdateOrganInfoGroupTitle();
-
-    DWORD g_inputRefreshUntil = 0;
-
-    bool g_inputDeviceError   = false;
-    bool g_input2DeviceError  = false;
-    bool g_outputDeviceError  = false;
-    bool g_output2DeviceError = false;
 
     bool EnsureGdiplusStarted()
     {
@@ -100,115 +96,6 @@ namespace
         {
             switch (message)
             {
-            case WM_LBUTTONUP:
-            {
-                LONG_PTR controlId = GetWindowLongPtrW(hWnd, GWLP_ID);
-                HWND parent = GetParent(hWnd);
-                if (controlId == 107) // Input 01
-                {
-                    if (IsMidiInputDeviceOpen())
-                    {
-                        CloseMidiInputDeviceOnly();
-                        g_inputDeviceError = false;
-                    }
-                    else
-                    {
-                        g_inputRefreshUntil = GetTickCount() + kInputRefreshDurationMs;
-                        UINT deviceId = 0;
-                        LoadSelectedDeviceId(deviceId);
-                        bool ok = SwitchMidiInputDevice(deviceId);
-                        g_inputDeviceError = !ok;
-                    }
-                    HandleMidiDeviceChange(parent);
-                    {
-                        bool nowOpen = IsMidiInputDeviceOpen();
-                        SaveMidiInput1DeviceEnabled(nowOpen);
-                        if (g_settingsMidiPageHwnd)
-                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 101), nowOpen ? TRUE : FALSE);
-                    }
-                    return 0;
-                }
-                if (controlId == 110) // Input 02
-                {
-                    if (IsMidiInput2DeviceOpen())
-                    {
-                        CloseMidiInput2DeviceOnly();
-                        g_input2DeviceError = false;
-                    }
-                    else
-                    {
-                        UINT deviceId = 0;
-                        LoadSelectedInput2DeviceId(deviceId);
-                        bool ok = SwitchMidiInput2Device(deviceId);
-                        g_input2DeviceError = !ok;
-                    }
-                    HandleMidiDeviceChange(parent);
-                    {
-                        bool nowOpen = IsMidiInput2DeviceOpen();
-                        SaveMidiInput2DeviceEnabled(nowOpen);
-                        if (g_settingsMidiPageHwnd)
-                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 109), nowOpen ? TRUE : FALSE);
-                    }
-                    return 0;
-                }
-                if (controlId == 108) // Output 01
-                {
-                    if (IsMidiOutputDeviceOpen())
-                    {
-                        CloseMidiOutputDeviceOnly();
-                        g_outputDeviceError = false;
-                    }
-                    else
-                    {
-                        UINT deviceId = 0;
-                        LoadSelectedOutputDeviceId(deviceId);
-                        bool ok = SwitchMidiOutputDevice(deviceId);
-                        g_outputDeviceError = !ok;
-                    }
-                    HandleMidiDeviceChange(parent);
-                    {
-                        bool nowOpen = IsMidiOutputDeviceOpen();
-                        SaveMidiOutput1DeviceEnabled(nowOpen);
-                        if (g_settingsMidiPageHwnd)
-                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 102), nowOpen ? TRUE : FALSE);
-                    }
-                    return 0;
-                }
-                if (controlId == 112) // Output 02
-                {
-                    if (IsMidiOutput2DeviceOpen())
-                    {
-                        CloseMidiOutput2DeviceOnly();
-                        g_output2DeviceError = false;
-                    }
-                    else
-                    {
-                        UINT deviceId = 0;
-                        LoadSelectedOutput2DeviceId(deviceId);
-                        bool ok = SwitchMidiOutput2Device(deviceId);
-                        g_output2DeviceError = !ok;
-                    }
-                    HandleMidiDeviceChange(parent);
-                    {
-                        bool nowOpen = IsMidiOutput2DeviceOpen();
-                        SaveMidiOutput2DeviceEnabled(nowOpen);
-                        if (g_settingsMidiPageHwnd)
-                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 111), nowOpen ? TRUE : FALSE);
-                    }
-                    return 0;
-                }
-                break;
-            }
-            case WM_SETCURSOR:
-            {
-                LONG_PTR controlId = GetWindowLongPtrW(hWnd, GWLP_ID);
-                if (controlId == 107 || controlId == 108 || controlId == 110 || controlId == 112)
-                {
-                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
-                    return TRUE;
-                }
-                break;
-            }
             case WM_ERASEBKGND:
                 return 1;
             case WM_PAINT:
@@ -227,48 +114,8 @@ namespace
                 constexpr int margin = 4;
                 int y = margin;
                 LONG_PTR controlId = GetWindowLongPtrW(hWnd, GWLP_ID);
-                bool isOutput = controlId == 105;
                 bool isFe = controlId == 106;
-                bool isInputStatus = controlId == 107;
-                bool isOutputStatus = controlId == 108;
-                bool isInput2Status = controlId == 110;
-                bool isOutput2Status = controlId == 112;
-
-                if (isInputStatus || isOutputStatus || isInput2Status || isOutput2Status)
-                {
-                    RECT ledRect{ margin, y, margin + ledSize, y + ledSize };
-                    bool isOpen = isInputStatus ? IsMidiInputDeviceOpen()
-                                : isInput2Status ? IsMidiInput2DeviceOpen()
-                                : isOutput2Status ? IsMidiOutput2DeviceOpen()
-                                : IsMidiOutputDeviceOpen();
-                    bool hasError = isInputStatus   ? g_inputDeviceError
-                                  : isInput2Status  ? g_input2DeviceError
-                                  : isOutput2Status ? g_output2DeviceError
-                                  : g_outputDeviceError;
-                    COLORREF color = isOpen    ? RGB(0, 200, 0)   // verde  = aperto
-                                   : hasError  ? RGB(220, 0, 0)   // rosso  = errore
-                                   : RGB(80, 80, 80);             // grigio = chiuso
-                    if (isInputStatus && g_inputRefreshUntil != 0)
-                    {
-                        DWORD tick = GetTickCount();
-                        if (tick >= g_inputRefreshUntil)
-                        {
-                            g_inputRefreshUntil = 0;
-                        }
-                        else
-                        {
-                            bool showAlt = (tick / kInputRefreshBlinkIntervalMs) % 2 == 0;
-                            COLORREF altColor = isOpen ? RGB(255, 200, 0) : RGB(255, 120, 0);
-                            color = showAlt ? altColor : color;
-                        }
-                    }
-                    HBRUSH brush = CreateSolidBrush(color);
-                    HBRUSH oldBrush = reinterpret_cast<HBRUSH>(SelectObject(memDc, brush));
-                    Ellipse(memDc, ledRect.left, ledRect.top, ledRect.right, ledRect.bottom);
-                    SelectObject(memDc, oldBrush);
-                    DeleteObject(brush);
-                }
-                else if (isFe)
+                if (isFe)
                 {
                     RECT ledRect{ margin, y, margin + ledSize, y + ledSize };
                     COLORREF color = RGB(0, 0, 0);
@@ -296,22 +143,6 @@ namespace
                     Ellipse(memDc, ledRect.left, ledRect.top, ledRect.right, ledRect.bottom);
                     SelectObject(memDc, oldBrush);
                     DeleteObject(brush);
-                }
-                else
-                {
-
-                    for (int ch = 0; ch < kChannels; ++ch)
-                    {
-                        int x = margin + ch * (ledSize + spacing);
-                        RECT ledRect{ x, y, x + ledSize, y + ledSize };
-                        bool active = isOutput ? IsOutputChannelActive(ch) : IsChannelActive(ch);
-                        COLORREF color = active ? RGB(0, 200, 0) : RGB(0, 0, 0);
-                        HBRUSH brush = CreateSolidBrush(color);
-                        HBRUSH oldBrush = reinterpret_cast<HBRUSH>(SelectObject(memDc, brush));
-                        Ellipse(memDc, ledRect.left, ledRect.top, ledRect.right, ledRect.bottom);
-                        SelectObject(memDc, oldBrush);
-                        DeleteObject(brush);
-                    }
                 }
 
                 BitBlt(hdc, 0, 0, rect.right - rect.left, rect.bottom - rect.top, memDc, 0, 0, SRCCOPY);
@@ -441,30 +272,6 @@ namespace
             {
                 SendMessageW(hOutput2Combo, CB_SETCURSEL, static_cast<WPARAM>(currentSel), 0);
             }
-        }
-    }
-
-    void HandleMidiDeviceChange(HWND hWnd)
-    {
-        RefreshMidiDeviceStatus();
-        RefreshMidiComboSelections(hWnd);
-        RefreshSettingsFile();
-
-        if (g_inputStatusLedHwnd)
-        {
-            InvalidateRect(g_inputStatusLedHwnd, nullptr, FALSE);
-        }
-        if (g_inputStatus2LedHwnd)
-        {
-            InvalidateRect(g_inputStatus2LedHwnd, nullptr, FALSE);
-        }
-        if (g_outputStatusLedHwnd)
-        {
-            InvalidateRect(g_outputStatusLedHwnd, nullptr, FALSE);
-        }
-        if (g_outputStatus2LedHwnd)
-        {
-            InvalidateRect(g_outputStatus2LedHwnd, nullptr, FALSE);
         }
     }
 
@@ -789,274 +596,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 24, baseY + (rowGap * 6), 700, 18, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
         }
 
-        CreateWindowW(L"BUTTON", L"MIDI Input devices...", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 8, 280, 120, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        CreateWindowW(L"STATIC", L"Device 01", WS_CHILD | WS_VISIBLE,
-            22, 30, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hCombo = CreateWindowW(L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 48, 232, 200, g_settingsMidiPageHwnd, (HMENU)101, nullptr, nullptr);
-
-        g_inputStatusLedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            260, 50, 16, 16, g_settingsMidiPageHwnd, (HMENU)107, nullptr, nullptr);
-
-        PopulateMidiInputs(hCombo);
-        UINT savedDeviceId = 0;
-        int count = static_cast<int>(SendMessageW(hCombo, CB_GETCOUNT, 0, 0));
-        if (count > 0 && LoadSelectedDeviceId(savedDeviceId) && savedDeviceId < static_cast<UINT>(count))
-        {
-            SendMessageW(hCombo, CB_SETCURSEL, static_cast<WPARAM>(savedDeviceId), 0);
-        }
-        {
-            bool input1Enabled = true;
-            LoadMidiInput1DeviceEnabled(input1Enabled);
-            EnableWindow(hCombo, input1Enabled ? TRUE : FALSE);
-        }
-
-        CreateWindowW(L"STATIC", L"Device 02", WS_CHILD | WS_VISIBLE,
-            22, 80, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hCombo2 = CreateWindowW(L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 98, 232, 200, g_settingsMidiPageHwnd, (HMENU)109, nullptr, nullptr);
-
-        g_inputStatus2LedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            260, 100, 16, 16, g_settingsMidiPageHwnd, (HMENU)110, nullptr, nullptr);
-
-        PopulateMidiInputs(hCombo2);
-        UINT savedDeviceId2 = 0;
-        int count2 = static_cast<int>(SendMessageW(hCombo2, CB_GETCOUNT, 0, 0));
-        if (count2 > 0 && LoadSelectedInput2DeviceId(savedDeviceId2) && savedDeviceId2 < static_cast<UINT>(count2))
-        {
-            SendMessageW(hCombo2, CB_SETCURSEL, static_cast<WPARAM>(savedDeviceId2), 0);
-        }
-        {
-            bool input2Enabled = true;
-            LoadMidiInput2DeviceEnabled(input2Enabled);
-            EnableWindow(hCombo2, input2Enabled ? TRUE : FALSE);
-        }
-
-        CreateWindowW(L"BUTTON", L"MIDI Output devices...", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 141, 280, 120, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        CreateWindowW(L"STATIC", L"Device 01", WS_CHILD | WS_VISIBLE,
-            22, 163, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hOutputCombo = CreateWindowW(L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 181, 232, 200, g_settingsMidiPageHwnd, (HMENU)102, nullptr, nullptr);
-
-        g_outputStatusLedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            260, 183, 16, 16, g_settingsMidiPageHwnd, (HMENU)108, nullptr, nullptr);
-
-        PopulateMidiOutputs(hOutputCombo);
-        UINT savedOutputDeviceId = 0;
-        int outputCount = static_cast<int>(SendMessageW(hOutputCombo, CB_GETCOUNT, 0, 0));
-        if (outputCount > 0 && LoadSelectedOutputDeviceId(savedOutputDeviceId)
-            && savedOutputDeviceId < static_cast<UINT>(outputCount))
-        {
-            SendMessageW(hOutputCombo, CB_SETCURSEL, static_cast<WPARAM>(savedOutputDeviceId), 0);
-        }
-        {
-            bool output1Enabled = true;
-            LoadMidiOutput1DeviceEnabled(output1Enabled);
-            EnableWindow(hOutputCombo, output1Enabled ? TRUE : FALSE);
-        }
-
-        CreateWindowW(L"STATIC", L"Device 02", WS_CHILD | WS_VISIBLE,
-            22, 213, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hOutput2Combo = CreateWindowW(L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 231, 232, 200, g_settingsMidiPageHwnd, (HMENU)111, nullptr, nullptr);
-
-        g_outputStatus2LedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            260, 233, 16, 16, g_settingsMidiPageHwnd, (HMENU)112, nullptr, nullptr);
-
-        PopulateMidiOutputs(hOutput2Combo);
-        UINT savedOutput2DeviceId = 0;
-        int output2Count = static_cast<int>(SendMessageW(hOutput2Combo, CB_GETCOUNT, 0, 0));
-        if (output2Count > 0 && LoadSelectedOutput2DeviceId(savedOutput2DeviceId)
-            && savedOutput2DeviceId < static_cast<UINT>(output2Count))
-        {
-            SendMessageW(hOutput2Combo, CB_SETCURSEL, static_cast<WPARAM>(savedOutput2DeviceId), 0);
-        }
-        {
-            bool output2Enabled = true;
-            LoadMidiOutput2DeviceEnabled(output2Enabled);
-            EnableWindow(hOutput2Combo, output2Enabled ? TRUE : FALSE);
-        }
-
-        CreateWindowW(L"BUTTON", L"Router", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 269, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        HWND hRouterCheck = CreateWindowW(L"BUTTON", L"Enable MIDI routing", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            22, 289, 240, 20, g_settingsMidiPageHwnd, (HMENU)103, nullptr, nullptr);
-
-        bool routerEnabled = false;
-        if (LoadMidiRouterEnabled(routerEnabled) && routerEnabled)
-        {
-            SendMessageW(hRouterCheck, BM_SETCHECK, BST_CHECKED, 0);
-        }
-        g_midiRouterEnabled = routerEnabled;
-
-        CreateWindowW(L"BUTTON", L"Ahlborn 250 SL (PORT)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 327, 280, 60, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        g_inputLedStripHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            22, 349, 256, 20, g_settingsMidiPageHwnd, (HMENU)104, nullptr, nullptr);
-
-        CreateWindowW(L"BUTTON", L"Hauptwerk midi input (PORT)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 393, 280, 60, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        g_outputLedStripHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            22, 415, 256, 20, g_settingsMidiPageHwnd, (HMENU)105, nullptr, nullptr, reinterpret_cast<LPVOID>(1));
-
         CreateWindowW(L"BUTTON", L"FE (Active sensing)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 459, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 10, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         g_feLedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            22, 479, 20, 20, g_settingsMidiPageHwnd, (HMENU)106, nullptr, nullptr);
+            22, 30, 20, 20, g_settingsMidiPageHwnd, (HMENU)106, nullptr, nullptr);
 
         CreateWindowW(L"STATIC", L"FE", WS_CHILD | WS_VISIBLE,
-            48, 481, 120, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
-
-        // "Assign Devices…" opens the separate MIDI assignment window
-        constexpr int kAssignDevicesBtnId = 2030;
-        CreateWindowW(L"BUTTON", L"Assign Devices\u2026",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 518, 170, 26, g_settingsMidiPageHwnd, (HMENU)kAssignDevicesBtnId, nullptr, nullptr);
+            48, 32, 120, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         SetTimer(hWnd, kLedTimerId, kLedTimerIntervalMs, nullptr);
         return 0;
     }
     case WM_COMMAND:
     {
-        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == 101)
-        {
-            HWND hCombo = reinterpret_cast<HWND>(lParam);
-            if (!hCombo)
-            {
-                hCombo = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, 101);
-            }
-
-            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
-            if (selectedIndex >= 0)
-            {
-                UINT numDevs = midiInGetNumDevs();
-                if (static_cast<UINT>(selectedIndex) < numDevs)
-                {
-                    UINT deviceId = static_cast<UINT>(selectedIndex);
-                    SaveSelectedDeviceId(deviceId);
-                    SwitchMidiInputDevice(deviceId);
-                    if (g_inputStatusLedHwnd)
-                    {
-                        InvalidateRect(g_inputStatusLedHwnd, nullptr, FALSE);
-                    }
-                }
-            }
-            return 0;
-        }
-        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == 109)
-        {
-            HWND hCombo2 = reinterpret_cast<HWND>(lParam);
-            if (!hCombo2)
-            {
-                hCombo2 = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, 109);
-            }
-
-            int selectedIndex = static_cast<int>(SendMessageW(hCombo2, CB_GETCURSEL, 0, 0));
-            if (selectedIndex >= 0)
-            {
-                UINT numDevs = midiInGetNumDevs();
-                if (static_cast<UINT>(selectedIndex) < numDevs)
-                {
-                    UINT deviceId = static_cast<UINT>(selectedIndex);
-                    SaveSelectedInput2DeviceId(deviceId);
-                    SwitchMidiInput2Device(deviceId);
-                    if (g_inputStatus2LedHwnd)
-                    {
-                        InvalidateRect(g_inputStatus2LedHwnd, nullptr, FALSE);
-                    }
-                }
-            }
-            return 0;
-        }
-        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == 102)
-        {
-            HWND hCombo = reinterpret_cast<HWND>(lParam);
-            if (!hCombo)
-            {
-                hCombo = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, 102);
-            }
-
-            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
-            if (selectedIndex >= 0)
-            {
-                UINT numDevs = midiOutGetNumDevs();
-                if (static_cast<UINT>(selectedIndex) < numDevs)
-                {
-                    UINT deviceId = static_cast<UINT>(selectedIndex);
-                    SaveSelectedOutputDeviceId(deviceId);
-                    SwitchMidiOutputDevice(deviceId);
-                    if (g_outputStatusLedHwnd)
-                    {
-                        InvalidateRect(g_outputStatusLedHwnd, nullptr, FALSE);
-                    }
-                }
-            }
-            return 0;
-        }
-        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == 111)
-        {
-            HWND hCombo = reinterpret_cast<HWND>(lParam);
-            if (!hCombo)
-            {
-                hCombo = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, 111);
-            }
-
-            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
-            if (selectedIndex >= 0)
-            {
-                UINT numDevs = midiOutGetNumDevs();
-                if (static_cast<UINT>(selectedIndex) < numDevs)
-                {
-                    UINT deviceId = static_cast<UINT>(selectedIndex);
-                    SaveSelectedOutput2DeviceId(deviceId);
-                    SwitchMidiOutput2Device(deviceId);
-                    if (g_outputStatus2LedHwnd)
-                    {
-                        InvalidateRect(g_outputStatus2LedHwnd, nullptr, FALSE);
-                    }
-                }
-            }
-            return 0;
-        }
-        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == 103)
-        {
-            HWND hCheck = reinterpret_cast<HWND>(lParam);
-            if (!hCheck)
-            {
-                hCheck = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, 103);
-            }
-
-            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            g_midiRouterEnabled = enabled;
-            if (!enabled)
-            {
-                ClearOutputNotes();
-            }
-            SaveMidiRouterEnabled(enabled);
-            return 0;
-        }
-        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == 2030)
-        {
-            HINSTANCE hInst = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hWnd, GWLP_HINSTANCE));
-            ShowMidiAssignmentWindow(hInst, hWnd);
-            return 0;
-        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kAutoCloseCheckId)
         {
             HWND hCheck = reinterpret_cast<HWND>(lParam);
@@ -1220,33 +773,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
     case WM_TIMER:
         if (wParam == kLedTimerId)
         {
-            if (g_inputLedStripHwnd)
-            {
-                InvalidateRect(g_inputLedStripHwnd, nullptr, FALSE);
-            }
-            if (g_outputLedStripHwnd)
-            {
-                InvalidateRect(g_outputLedStripHwnd, nullptr, FALSE);
-            }
             if (g_feLedHwnd)
             {
                 InvalidateRect(g_feLedHwnd, nullptr, FALSE);
-            }
-            if (g_inputStatusLedHwnd)
-            {
-                InvalidateRect(g_inputStatusLedHwnd, nullptr, FALSE);
-            }
-            if (g_inputStatus2LedHwnd)
-            {
-                InvalidateRect(g_inputStatus2LedHwnd, nullptr, FALSE);
-            }
-            if (g_outputStatusLedHwnd)
-            {
-                InvalidateRect(g_outputStatusLedHwnd, nullptr, FALSE);
-            }
-            if (g_outputStatus2LedHwnd)
-            {
-                InvalidateRect(g_outputStatus2LedHwnd, nullptr, FALSE);
             }
             UpdateOrganInfoGroupTitle();
         }
@@ -1256,13 +785,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         return 0;
     case WM_DESTROY:
         KillTimer(hWnd, kLedTimerId);
-        g_inputLedStripHwnd = nullptr;
-        g_outputLedStripHwnd = nullptr;
         g_feLedHwnd = nullptr;
-        g_inputStatusLedHwnd = nullptr;
-        g_inputStatus2LedHwnd = nullptr;
-        g_outputStatusLedHwnd = nullptr;
-        g_outputStatus2LedHwnd = nullptr;
         g_settingsTabHwnd = nullptr;
         g_settingsMidiPageHwnd = nullptr;
         g_settingsInfoPageHwnd = nullptr;
