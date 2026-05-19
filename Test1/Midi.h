@@ -75,6 +75,8 @@ bool IsOutputChannelActive(int ch);
 void ClearOutputNotes();
 // Enqueue a raw MIDI message for the output worker thread.
 bool EnqueueMidiOutMessage(DWORD msg);
+// Set the output device name used by the Active Sensing sender; empty = use default "Default App Loopback (A)".
+void SetActiveSensingOutputName(const std::wstring& name);
 // Request the tray icon to enter the "starting Hauptwerk" flashing state.
 void TriggerTrayIconStartupFlash();
 // Stop the tray icon flashing animation.
@@ -111,6 +113,8 @@ extern std::atomic<bool> g_input2DeviceOpen;
 extern std::atomic<bool> g_outputDeviceOpen;  // true if at least one output open
 extern std::atomic<bool> g_output2DeviceOpen;
 extern std::atomic<bool> g_isLoadingOrgan;
+extern std::atomic<bool> g_activeSensingEnabled;
+extern std::wstring g_activeSensingOutputName;
 extern std::atomic<int> g_currentLoadedFavoriteIndex;
 extern std::atomic<int> g_currentLoadedInstalledOrganIndex;
 

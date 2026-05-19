@@ -72,8 +72,25 @@ if (FAILED(hr))
 		printf("[Startup] Hauptwerk paths not configured, OrganFolderWatcher not started.\n");
 	}
 	StartStreamDeckPipeServer(); // Named pipe IPC for Stream Deck plugin
+
+	// Load Active Sensing settings BEFORE initMidiState so that
+	// RefreshSettingsFile() inside it does not overwrite the saved value.
+	{
+		bool activeSensingEnabled = true;
+		LoadActiveSensingEnabled(activeSensingEnabled);
+		g_activeSensingEnabled.store(activeSensingEnabled);
+	}
+
 	initMidiState(); // Initialize MIDI state
 	printf("[Startup] MIDI state initialized.\n");
+
+	// Apply the Active Sensing output name (lock is ready after initMidiState).
+	{
+		std::wstring activeSensingOutputName;
+		LoadActiveSensingOutputName(activeSensingOutputName);
+		SetActiveSensingOutputName(activeSensingOutputName);
+	}
+
 	startsWithFe();  // Start the MIDI processing thread
 	printf("[Startup] MIDI processing thread started.\n");
 

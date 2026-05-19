@@ -35,6 +35,7 @@ static HWND g_settingsOrganInfoGroupHwnd = nullptr;
 static HWND g_settingsAboutPageHwnd = nullptr;
 static HWND g_settingsStreamDeckPageHwnd = nullptr;
 static HWND g_feLedHwnd = nullptr;
+static HWND g_activeSensingOutputComboHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -48,6 +49,8 @@ constexpr int kSdSendButtonId = 304;
 constexpr int kSdPluginUpdateButtonId = 305;
 constexpr int kMainWindowBehaviorComboId = 401;
 constexpr int kMainDebugConsoleComboId = 402;
+constexpr int kActiveSensingCheckId = 403;
+constexpr int kActiveSensingOutputComboId = 404;
 constexpr int kMainUpdateModeComboId = 403;
 constexpr int kMainCheckNowButtonId = 404;
 
@@ -597,7 +600,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         }
 
         CreateWindowW(L"BUTTON", L"FE (Active sensing)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 10, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 10, 500, 106, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         g_feLedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
             22, 30, 20, 20, g_settingsMidiPageHwnd, (HMENU)106, nullptr, nullptr);
@@ -605,11 +608,78 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         CreateWindowW(L"STATIC", L"FE", WS_CHILD | WS_VISIBLE,
             48, 32, 120, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
+        {
+            bool activeSensingEnabled = true;
+            LoadActiveSensingEnabled(activeSensingEnabled);
+            g_activeSensingEnabled.store(activeSensingEnabled);
+            HWND hActiveSensingCheck = CreateWindowW(L"BUTTON", L"Enable Active Sensing sender (0xFE every 200 ms)",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                22, 52, 460, 18, g_settingsMidiPageHwnd, (HMENU)kActiveSensingCheckId, nullptr, nullptr);
+            SendMessageW(hActiveSensingCheck, BM_SETCHECK, activeSensingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        {
+            CreateWindowW(L"STATIC", L"Output port:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                22, 80, 100, 18, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+
+            g_activeSensingOutputComboHwnd = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                128, 76, 370, 200, g_settingsMidiPageHwnd,
+                (HMENU)kActiveSensingOutputComboId, nullptr, nullptr);
+
+            // Populate with all available MIDI output devices
+            std::wstring savedOutputName;
+            LoadActiveSensingOutputName(savedOutputName);
+            if (savedOutputName.empty())
+                savedOutputName = L"Default App Loopback (A)";
+
+            UINT numOutDevs = midiOutGetNumDevs();
+            int selIdx = 0;
+            for (UINT i = 0; i < numOutDevs; ++i)
+            {
+                MIDIOUTCAPS caps = {};
+                if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+                {
+                    int idx = static_cast<int>(SendMessageW(g_activeSensingOutputComboHwnd,
+                        CB_ADDSTRING, 0, (LPARAM)caps.szPname));
+                    if (std::wstring(caps.szPname) == savedOutputName)
+                        selIdx = idx;
+                }
+            }
+            SendMessageW(g_activeSensingOutputComboHwnd, CB_SETCURSEL, selIdx, 0);
+        }
+
         SetTimer(hWnd, kLedTimerId, kLedTimerIntervalMs, nullptr);
         return 0;
     }
     case WM_COMMAND:
     {
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kActiveSensingCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, kActiveSensingCheckId);
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveActiveSensingEnabled(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == kActiveSensingOutputComboId)
+        {
+            HWND hCombo = reinterpret_cast<HWND>(lParam);
+            if (!hCombo) hCombo = g_activeSensingOutputComboHwnd;
+            if (hCombo)
+            {
+                int sel = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+                if (sel != CB_ERR)
+                {
+                    wchar_t buf[256] = {};
+                    SendMessageW(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+                    SaveActiveSensingOutputName(buf);
+                }
+            }
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kAutoCloseCheckId)
         {
             HWND hCheck = reinterpret_cast<HWND>(lParam);
@@ -786,6 +856,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
     case WM_DESTROY:
         KillTimer(hWnd, kLedTimerId);
         g_feLedHwnd = nullptr;
+        g_activeSensingOutputComboHwnd = nullptr;
         g_settingsTabHwnd = nullptr;
         g_settingsMidiPageHwnd = nullptr;
         g_settingsInfoPageHwnd = nullptr;
@@ -1141,4 +1212,195 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
         ShowWindow(g_settingsHwnd, SW_SHOW);
         UpdateWindow(g_settingsHwnd);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ahlborn Splash (generic fade window)
+// ---------------------------------------------------------------------------
+namespace {
+    static std::atomic<bool> g_splashActive{ false };
+
+    static std::wstring BuildSplashImagePath(const wchar_t* filename)
+    {
+        PWSTR path = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &path)) && path != nullptr)
+        {
+            std::wstring result(path);
+            CoTaskMemFree(path);
+            result += L"\\AhlbornBridge\\Icons\\";
+            result += filename;
+            return result;
+        }
+        return {};
+    }
+
+    struct SplashThreadParam
+    {
+        HINSTANCE hInstance;
+        std::wstring imagePath;
+    };
+
+    static LRESULT CALLBACK SplashWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg)
+        {
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    static DWORD WINAPI SplashThread(LPVOID param)
+    {
+        auto* p = reinterpret_cast<SplashThreadParam*>(param);
+        HINSTANCE hInst = p->hInstance;
+        std::wstring imgPath = std::move(p->imagePath);
+        delete p;
+
+        if (imgPath.empty())
+        {
+            g_splashActive = false;
+            return 0;
+        }
+
+        // Load image with GDI+ to get its real size.
+        Gdiplus::GdiplusStartupInput gsi;
+        ULONG_PTR gdipToken = 0;
+        Gdiplus::GdiplusStartup(&gdipToken, &gsi, nullptr);
+
+        Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromFile(imgPath.c_str());
+        if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok)
+        {
+            delete bmp;
+            Gdiplus::GdiplusShutdown(gdipToken);
+            g_splashActive = false;
+            return 0;
+        }
+
+        int imgW = static_cast<int>(bmp->GetWidth())  / 2;
+        int imgH = static_cast<int>(bmp->GetHeight()) / 2;
+
+        // Register a minimal window class for the splash.
+        constexpr wchar_t kSplashClass[] = L"AhlbornSplashWnd";
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = SplashWndProc;
+        wc.hInstance     = hInst;
+        wc.lpszClassName = kSplashClass;
+        RegisterClassExW(&wc);
+
+        // Centre on primary monitor.
+        int screenW = GetSystemMetrics(SM_CXSCREEN);
+        int screenH = GetSystemMetrics(SM_CYSCREEN);
+        int x = (screenW - imgW) / 2;
+        int y = (screenH - imgH) / 2;
+
+        HWND hWnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            kSplashClass, L"", WS_POPUP,
+            x, y, imgW, imgH,
+            nullptr, nullptr, hInst, nullptr);
+
+        if (!hWnd)
+        {
+            delete bmp;
+            Gdiplus::GdiplusShutdown(gdipToken);
+            g_splashActive = false;
+            return 0;
+        }
+
+        // Build a memory DC with the image pre-painted (ARGB).
+        HDC hdcScreen = GetDC(nullptr);
+        HDC hdcMem    = CreateCompatibleDC(hdcScreen);
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth       = imgW;
+        bmi.bmiHeader.biHeight      = -imgH;
+        bmi.bmiHeader.biPlanes      = 1;
+        bmi.bmiHeader.biBitCount    = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HBITMAP hBitmap = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HBITMAP hOldBmp = reinterpret_cast<HBITMAP>(SelectObject(hdcMem, hBitmap));
+
+        {
+            Gdiplus::Graphics g(hdcMem);
+            g.DrawImage(bmp, 0, 0, imgW, imgH);
+        }
+        delete bmp;
+
+        POINT ptSrc = { 0, 0 };
+        SIZE  szWnd = { imgW, imgH };
+        POINT ptDst = { x, y };
+
+        // Max opacity: 220/255 (~86%) so the image appears slightly transparent at peak.
+        constexpr int   kMaxAlpha    = 220;
+        constexpr int   kTotalMs     = 4000; // total duration
+        constexpr int   kSteps       = 100;  // 100 steps: 0..99 fade-in, 99..0 fade-out
+        constexpr int   kSleepMs     = kTotalMs / (kSteps * 2); // ~20 ms per step
+
+        // Single loop: first half = fade-in, second half = fade-out.
+        // Peak is exactly at the midpoint (step == kSteps).
+        for (int i = 0; i <= kSteps * 2; ++i)
+        {
+            int half = (i <= kSteps) ? i : (kSteps * 2 - i);
+            BYTE alpha = static_cast<BYTE>((half * kMaxAlpha) / kSteps);
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+            UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
+            ShowWindow(hWnd, SW_SHOW);
+            Sleep(kSleepMs);
+        }
+
+        DestroyWindow(hWnd);
+
+        // Drain any messages posted to this thread.
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {}
+
+        SelectObject(hdcMem, hOldBmp);
+        DeleteObject(hBitmap);
+        DeleteDC(hdcMem);
+        ReleaseDC(nullptr, hdcScreen);
+        Gdiplus::GdiplusShutdown(gdipToken);
+
+        g_splashActive = false;
+        return 0;
+    }
+
+    static void ShowSplash(const wchar_t* filename)
+    {
+        bool expected = false;
+        if (!g_splashActive.compare_exchange_strong(expected, true))
+            return;
+
+        auto* p = new SplashThreadParam{ GetModuleHandleW(nullptr), BuildSplashImagePath(filename) };
+        HANDLE h = CreateThread(nullptr, 0, SplashThread, p, 0, nullptr);
+        if (h) CloseHandle(h);
+        else
+        {
+            delete p;
+            g_splashActive = false;
+        }
+    }
+} // namespace
+
+void ShowAhlbornStartedSplash()
+{
+    ShowSplash(L"ahlborn_started.png");
+}
+
+void ShowAhlbornClosedSplash()
+{
+    ShowSplash(L"ahlborn_closed.png");
 }

@@ -18,6 +18,10 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner);
 void PopulateMidiInputs(HWND hCombo);
 void PopulateMidiOutputs(HWND hCombo);
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+// Show a fade-out splash window with ahlborn_started.png for a few seconds.
+void ShowAhlbornStartedSplash();
+// Show a fade-out splash window with ahlborn_closed.png for a few seconds.
+void ShowAhlbornClosedSplash();
 bool UpdateTrayIconFromFile(const wchar_t* iconPath);
 bool UpdateTrayIconTooltip(const wchar_t* tooltip);
 void CloseSettingsWindowIfAutoClose();

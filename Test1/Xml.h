@@ -38,6 +38,10 @@ bool SaveShowDebugConsole(bool enabled);
 bool LoadShowDebugConsole(bool& enabled);
 bool SaveCheckForUpdateOnStart(bool enabled);
 bool LoadCheckForUpdateOnStart(bool& enabled);
+bool SaveActiveSensingEnabled(bool enabled);
+bool LoadActiveSensingEnabled(bool& enabled);
+bool SaveActiveSensingOutputName(const std::wstring& name);
+bool LoadActiveSensingOutputName(std::wstring& name);
 void RefreshSettingsFile();
 
 // Force a re-read of the standby organ names from the Hauptwerk config.

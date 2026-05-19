@@ -47,6 +47,11 @@ std::atomic<bool> g_input2DeviceOpen{ false };
 std::atomic<bool> g_outputDeviceOpen{ false };
 std::atomic<bool> g_output2DeviceOpen{ false };
 std::atomic<bool> g_isLoadingOrgan{ false };
+std::atomic<bool> g_activeSensingEnabled{ true };
+std::wstring g_activeSensingOutputName;          // protected by g_activeSensingNameLock
+static CRITICAL_SECTION g_activeSensingNameLock;
+static bool g_activeSensingNameLockInit = false;
+static std::atomic<bool> s_activeSensingReopenNeeded{ false };
 std::atomic<int> g_currentLoadedFavoriteIndex{ 0 };
 std::atomic<int> g_currentLoadedInstalledOrganIndex{ 0 };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
@@ -151,6 +156,113 @@ namespace
         if (!g_midiOutWorkerThread)
         {
             g_midiOutWorkerThread = CreateThread(nullptr, 0, MidiOutWorkerThread, nullptr, 0, nullptr);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Active Sensing sender.
+    // Opens the device whose name is stored in g_activeSensingOutputName
+    // (default: "Default App Loopback (A)") and sends MIDI 0xFE every
+    // 200 ms to simulate the Ahlborn console being powered on.
+    // ---------------------------------------------------------------
+    HANDLE g_activeSensingSenderThread = nullptr;
+
+    // Name of the device currently open in the sender thread.
+    static std::wstring s_activeSensingOpenedName;
+
+    static std::wstring GetActiveSensingTargetName()
+    {
+        if (!g_activeSensingNameLockInit)
+            return L"Default App Loopback (A)";
+        EnterCriticalSection(&g_activeSensingNameLock);
+        std::wstring name = g_activeSensingOutputName;
+        LeaveCriticalSection(&g_activeSensingNameLock);
+        if (name.empty())
+            name = L"Default App Loopback (A)";
+        return name;
+    }
+
+    static HMIDIOUT OpenMidiOutByName(const std::wstring& targetName)
+    {
+        UINT numDevs = midiOutGetNumDevs();
+        for (UINT i = 0; i < numDevs; ++i)
+        {
+            MIDIOUTCAPS caps = {};
+            if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+            {
+                if (std::wstring(caps.szPname) == targetName)
+                {
+                    HMIDIOUT h = nullptr;
+                    if (midiOutOpen(&h, i, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR)
+                    {
+                        printf("[ActiveSensingSender] Opened output: [%S]\n", caps.szPname);
+                        return h;
+                    }
+                    printf("[ActiveSensingSender] Failed to open: [%S]\n", caps.szPname);
+                    return nullptr;
+                }
+            }
+        }
+        printf("[ActiveSensingSender] Output '%S' not found.\n", targetName.c_str());
+        return nullptr;
+    }
+
+    DWORD WINAPI ActiveSensingSenderThread(LPVOID)
+    {
+        constexpr DWORD kIntervalMs = 200;
+        constexpr DWORD kRetryMs    = 2000;
+
+        HMIDIOUT hOut = nullptr;
+
+        while (running)
+        {
+            if (!g_activeSensingEnabled.load(std::memory_order_relaxed))
+            {
+                Sleep(kIntervalMs);
+                continue;
+            }
+
+            // Reopen if the target device has changed
+            if (s_activeSensingReopenNeeded.exchange(false) && hOut)
+            {
+                midiOutClose(hOut);
+                hOut = nullptr;
+                s_activeSensingOpenedName.clear();
+            }
+
+            if (!hOut)
+            {
+                std::wstring target = GetActiveSensingTargetName();
+                hOut = OpenMidiOutByName(target);
+                if (!hOut)
+                {
+                    Sleep(kRetryMs);
+                    continue;
+                }
+                s_activeSensingOpenedName = target;
+            }
+
+            if (midiOutShortMsg(hOut, ACTIVE_SENSING) != MMSYSERR_NOERROR)
+            {
+                midiOutClose(hOut);
+                hOut = nullptr;
+                s_activeSensingOpenedName.clear();
+            }
+
+            Sleep(kIntervalMs);
+        }
+
+        if (hOut)
+            midiOutClose(hOut);
+
+        return 0;
+    }
+
+    void StartActiveSensingSender()
+    {
+        if (!g_activeSensingSenderThread)
+        {
+            g_activeSensingSenderThread = CreateThread(nullptr, 0, ActiveSensingSenderThread, nullptr, 0, nullptr);
         }
     }
 
@@ -1616,6 +1728,7 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 printf("\n>>> *************************** >>>\n");
                 printf(">>> AHLBORN 250 SL DISCONNECTED >>>\n");
                 printf(">>> *************************** >>>\n");
+                ShowAhlbornClosedSplash();
 
                 StopTrayIconFlashingInternal();
 				UpdateTrayIconTooltip(L"AHLBORN 250 SL (OFF)");
@@ -1654,6 +1767,7 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 printf("\n>>> ************************ >>>\n");
                 printf(">>> AHLBORN 250 SL CONNECTED >>>\n");
                 printf(">>> ************************ >>>\n");
+                ShowAhlbornStartedSplash();
                 g_hauptwerkKeyHeld = false;
                 if (feMessageAlive && g_hauptwerkMainWindow == nullptr)
                     {
@@ -1710,6 +1824,7 @@ bool startsWithFe()
         nullptr);
 
     StartMidiOutWorker();
+    StartActiveSensingSender();
     StartDeferredCmdWorker();
     StartHauptwerkTitleMonitor();
     StartStreamDeckMonitor();
@@ -1953,6 +2068,8 @@ static void DetectMidiInputInteractive()
 bool initMidiState()
 {
     InitializeCriticalSection(&g_midiOutLock);
+    InitializeCriticalSection(&g_activeSensingNameLock);
+    g_activeSensingNameLockInit = true;
 
     UINT numInDevs = midiInGetNumDevs();
     UINT numOutDevs = midiOutGetNumDevs();
@@ -2730,4 +2847,15 @@ void CALLBACK MidiInProc(
 	default:
 		break;
 	}
+}
+
+void SetActiveSensingOutputName(const std::wstring& name)
+{
+	if (!g_activeSensingNameLockInit)
+		return;
+	EnterCriticalSection(&g_activeSensingNameLock);
+	g_activeSensingOutputName = name;
+	LeaveCriticalSection(&g_activeSensingNameLock);
+	s_activeSensingReopenNeeded.store(true);
+	printf("[ActiveSensingSender] Target output changed to: [%S]\n", name.empty() ? L"Default App Loopback (A)" : name.c_str());
 }
