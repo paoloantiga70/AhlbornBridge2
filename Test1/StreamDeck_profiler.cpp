@@ -333,12 +333,12 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         || action.actionUUID == "com.ahlbornbridge.organ.load");
     if (isTwoStateAction)
     {
-        // Organ load plugin renders titles in SVG — never show native SD title for it
         bool showTitle = !action.title.empty()
             && action.actionUUID != "com.ahlbornbridge.organ.load";
         std::string titleField = showTitle ? "\"Title\":\"" + action.title + "\"," : "";
         auto buildMidiState = [&](const std::string& color, const std::string& img) {
-            std::string imgField = img.empty() ? "" : "\"Image\":\"" + img + "\",";
+            bool includeImage = !img.empty() && action.actionUUID != "com.ahlbornbridge.organ.load";
+            std::string imgField = includeImage ? "\"Image\":\"" + img + "\"," : "";
             return
                 "{" + imgField +
                 "\"FontFamily\":\"" + action.fontFamily + "\",\"FontSize\":" + fontSizeStr + ",\"FontStyle\":\"Regular\","

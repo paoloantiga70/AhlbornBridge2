@@ -401,8 +401,8 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded)
 
     if (!bgImage.empty() && !isOffline && !isEmpty)
     {
-        svg += "<image width='144' height='144' xlink:href='data:image/png;base64," + bgImage + "' opacity='0.92'/>";
-        svg += "<rect width='144' height='144' rx='14' fill='rgba(0,0,0,0.28)'/>";
+        svg += "<image width='144' height='144' preserveAspectRatio='xMidYMid slice' href='data:image/png;base64," + bgImage + "' xlink:href='data:image/png;base64," + bgImage + "' opacity='0.96'/>";
+        svg += "<rect width='144' height='144' rx='14' fill='#000000' fill-opacity='0.18'/>";
     }
     else
     {
@@ -453,16 +453,17 @@ static std::string Base64Encode(const std::string& input)
     static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
     out.reserve(((input.size() + 2) / 3) * 4);
-    int i = 0, len = (int)input.size();
-    while (i < len) {
+    size_t i = 0;
+    while (i < input.size()) {
+        size_t remaining = input.size() - i;
         uint32_t a = (uint8_t)input[i++];
-        uint32_t b = (i < len) ? (uint8_t)input[i++] : 0;
-        uint32_t c = (i < len) ? (uint8_t)input[i++] : 0;
+        uint32_t b = (remaining > 1) ? (uint8_t)input[i++] : 0;
+        uint32_t c = (remaining > 2) ? (uint8_t)input[i++] : 0;
         uint32_t triple = (a << 16) | (b << 8) | c;
         out += table[(triple >> 18) & 0x3F];
         out += table[(triple >> 12) & 0x3F];
-        out += (i - 2 < len) ? table[(triple >> 6) & 0x3F] : '=';
-        out += (i - 1 < len) ? table[triple & 0x3F] : '=';
+        out += (remaining > 1) ? table[(triple >> 6) & 0x3F] : '=';
+        out += (remaining > 2) ? table[triple & 0x3F] : '=';
     }
     return out;
 }

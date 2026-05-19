@@ -7,42 +7,121 @@ param(
     [Parameter(Mandatory)][string]$OutDir
 )
 
-# --- 1. Patch ISS installer script ---
-$versionFile = Join-Path $ProjectDir "PluginVersion.h"
-$v = (Select-String -Path $versionFile -Pattern '#define PLUGIN_VERSION "(.+?)"').Matches[0].Groups[1].Value
-$iss = Get-Content (Join-Path $ProjectDir "AhlbornBridgeSD.iss") -Raw
-$iss = $iss -replace '@PLUGIN_VERSION@', $v
-$srcBase = Join-Path $ProjectDir "com.ahlbornbridge.organ.sdPlugin"
-$iss = $iss -replace '\{#SourceBase\}', $srcBase
-Set-Content (Join-Path $OutDir "AhlbornBridgeSD.iss") $iss -NoNewline
-Write-Host "Patched ISS with plugin version $v"
+$ErrorActionPreference = 'Stop'
 
-# --- 2. Deploy to Stream Deck plugin folder ---
-$dest = [Environment]::GetFolderPath('ApplicationData') + '\Elgato\StreamDeck\Plugins\com.ahlbornbridge.organ.sdPlugin'
-if (-not (Test-Path $dest)) {
-    Write-Host "Plugin folder not found at $dest - skipping deploy"
-    exit 0
+function Get-PluginVersion {
+    param([Parameter(Mandatory)][string]$VersionFile)
+
+    $match = Select-String -Path $VersionFile -Pattern '#define PLUGIN_VERSION "(.+?)"'
+    if (-not $match.Matches.Count) {
+        throw "Could not read plugin version from $VersionFile"
+    }
+
+    return $match.Matches[0].Groups[1].Value
 }
 
-# Remember StreamDeck.exe path before killing it
-$sdPath = ""
-$sdProc = Get-Process StreamDeck -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($sdProc) {
-    $sdPath = $sdProc.Path
-}
-if (-not $sdPath -or -not (Test-Path $sdPath)) {
-    # Search common install locations
-    @(
+function Get-StreamDeckExecutablePath {
+    $sdProc = Get-Process StreamDeck -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($sdProc -and $sdProc.Path -and (Test-Path $sdProc.Path)) {
+        return $sdProc.Path
+    }
+
+    foreach ($candidate in @(
         "$env:ProgramFiles\Elgato\StreamDeck\StreamDeck.exe",
         "${env:ProgramFiles(x86)}\Elgato\StreamDeck\StreamDeck.exe",
         "$env:LOCALAPPDATA\Elgato\StreamDeck\StreamDeck.exe"
-    ) | ForEach-Object { if (Test-Path $_) { $sdPath = $_; return } }
+    )) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return ""
 }
 
-# Stop Stream Deck + plugin process so files aren't locked
+function Get-InnoSetupCompilerPath {
+    foreach ($candidate in @(
+        "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return ""
+}
+
+function Copy-PluginPackage {
+    param(
+        [Parameter(Mandatory)][string]$SourceBase,
+        [Parameter(Mandatory)][string]$BuiltExe,
+        [Parameter(Mandatory)][string]$DestinationRoot
+    )
+
+    if (Test-Path $DestinationRoot) {
+        Remove-Item $DestinationRoot -Recurse -Force
+    }
+
+    New-Item -Path $DestinationRoot -ItemType Directory -Force | Out-Null
+    Copy-Item $BuiltExe $DestinationRoot -Force
+    Copy-Item (Join-Path $SourceBase 'manifest.json') $DestinationRoot -Force
+    Copy-Item (Join-Path $SourceBase 'property_inspector.html') $DestinationRoot -Force
+    Copy-Item (Join-Path $SourceBase 'images') (Join-Path $DestinationRoot 'images') -Recurse -Force
+}
+
+$versionFile = Join-Path $ProjectDir 'PluginVersion.h'
+$srcBase = Join-Path $ProjectDir 'com.ahlbornbridge.organ.sdPlugin'
+$builtExe = Join-Path $OutDir 'AhlbornBridgeSD.exe'
+$packagedPluginDir = Join-Path $OutDir 'com.ahlbornbridge.organ.sdPlugin'
+$zipPath = Join-Path $OutDir 'AhlbornBridgeSD2.sdPlugin.zip'
+$issSource = Join-Path $ProjectDir 'AhlbornBridgeSD.iss'
+$issPatched = Join-Path $OutDir 'AhlbornBridgeSD.iss'
+
+if (-not (Test-Path $versionFile)) { throw "Missing $versionFile" }
+if (-not (Test-Path $srcBase)) { throw "Missing plugin package source folder $srcBase" }
+if (-not (Test-Path $builtExe)) { throw "Missing built plugin executable $builtExe" }
+
+$v = Get-PluginVersion -VersionFile $versionFile
+
+# --- 1. Patch ISS installer script ---
+$iss = Get-Content $issSource -Raw
+$iss = $iss -replace '@PLUGIN_VERSION@', $v
+$iss = $iss -replace [Regex]::Escape('{#SourceBase}'), [System.Text.RegularExpressions.Regex]::Escape($srcBase).Replace('\\', '\')
+Set-Content $issPatched $iss -NoNewline
+Write-Host "Patched ISS with plugin version $v"
+
+# --- 2. Create deployable plugin package in the build output ---
+Copy-PluginPackage -SourceBase $srcBase -BuiltExe $builtExe -DestinationRoot $packagedPluginDir
+Write-Host "Created deployable package folder $packagedPluginDir"
+
+if (Test-Path $zipPath) {
+    Remove-Item $zipPath -Force
+}
+Compress-Archive -Path $packagedPluginDir -DestinationPath $zipPath -CompressionLevel Optimal
+Write-Host "Created plugin archive $zipPath"
+
+# --- 3. Compile installer if Inno Setup is available ---
+$isccPath = Get-InnoSetupCompilerPath
+if ($isccPath) {
+    Write-Host "Building Inno Setup package with $isccPath"
+    & $isccPath $issPatched | Out-Host
+} else {
+    Write-Host 'Inno Setup compiler not found - skipped installer build'
+}
+
+# --- 4. Deploy to the local Stream Deck plugin folder if available ---
+$pluginsRoot = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Elgato\StreamDeck\Plugins'
+$dest = Join-Path $pluginsRoot 'com.ahlbornbridge.organ.sdPlugin'
+if (-not (Test-Path $pluginsRoot)) {
+    Write-Host "Stream Deck plugins folder not found at $pluginsRoot - skipped local deployment"
+    exit 0
+}
+
+$sdPath = Get-StreamDeckExecutablePath
 $wasRunning = $false
 if (Get-Process StreamDeck -ErrorAction SilentlyContinue) {
-    Write-Host "Stopping Stream Deck..."
+    Write-Host 'Stopping Stream Deck...'
     Stop-Process -Name StreamDeck -Force -ErrorAction SilentlyContinue
     $wasRunning = $true
     Start-Sleep -Seconds 2
@@ -52,16 +131,9 @@ if (Get-Process AhlbornBridgeSD -ErrorAction SilentlyContinue) {
     Start-Sleep -Milliseconds 500
 }
 
-# Copy files
-Copy-Item (Join-Path $OutDir "AhlbornBridgeSD.exe") $dest -Force
-Copy-Item (Join-Path $srcBase "manifest.json") $dest -Force
-Copy-Item (Join-Path $srcBase "property_inspector.html") $dest -Force
-$imagesDir = Join-Path $dest "images"
-if (-not (Test-Path $imagesDir)) { New-Item $imagesDir -ItemType Directory -Force | Out-Null }
-Copy-Item (Join-Path $srcBase "images\*") $imagesDir -Force -Recurse
+Copy-PluginPackage -SourceBase $srcBase -BuiltExe $builtExe -DestinationRoot $dest
 Write-Host "Deployed plugin v$v to $dest"
 
-# Restart Stream Deck if it was running
 if ($wasRunning -and $sdPath -and (Test-Path $sdPath)) {
     Write-Host "Restarting Stream Deck from $sdPath"
     Start-Process $sdPath

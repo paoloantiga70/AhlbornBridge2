@@ -41,6 +41,9 @@ bool FindAndInvokeInPopup(HWND hwndReal, const wchar_t* menuName, const wchar_t*
 // Naviga: Menu -> Sottomenu -> Voce (2 livelli)
 bool ClickMenu(HWND hwndReal, const wchar_t* menuName, const wchar_t* subItemName);
 
+// Attende finché una voce top-level della menu bar diventa disponibile.
+bool WaitForMenuBarItem(HWND hwndReal, const wchar_t* menuName, DWORD timeoutMs = 15000);
+
 // Chiude i menu popup aperti inviando Escape
 void DismissMenus(HWND hwnd);
 

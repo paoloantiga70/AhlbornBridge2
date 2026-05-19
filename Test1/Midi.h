@@ -52,6 +52,10 @@ bool IsMidiOutput2DeviceOpen();
 DWORD GetMidiInputSlotLastMsg(int slotIndex);
 // Per-slot MIDI output activity: returns GetTickCount() of last message sent on slot i.
 DWORD GetMidiOutputSlotLastMsg(int slotIndex);
+// Returns the last activity timestamp for the currently open input/output handle
+// that matches the given device name. Returns 0 if not open or never active.
+DWORD GetMidiInputLastMsgByDeviceName(const std::wstring& deviceName);
+DWORD GetMidiOutputLastMsgByDeviceName(const std::wstring& deviceName);
 void RefreshMidiDeviceStatus();
 void CleanupMidiLocks();
 void CALLBACK MidiInProc(

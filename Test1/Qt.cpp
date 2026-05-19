@@ -508,6 +508,40 @@ bool ClickMenu(HWND hwndReal, const wchar_t* menuName, const wchar_t* subItemNam
     return false;
 }
 
+bool WaitForMenuBarItem(HWND hwndReal, const wchar_t* menuName, DWORD timeoutMs)
+{
+    if (!hwndReal || !menuName || !*menuName)
+        return false;
+
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < timeoutMs)
+    {
+        IAccessible* pRoot = nullptr;
+        HRESULT hr = AccessibleObjectFromWindow(
+            hwndReal, OBJID_CLIENT, IID_IAccessible, (void**)&pRoot);
+        if (SUCCEEDED(hr) && pRoot)
+        {
+            IAccessible* menuBar = FindChildByRoleAndName(pRoot, ROLE_SYSTEM_MENUBAR, nullptr, 2);
+            pRoot->Release();
+
+            if (menuBar)
+            {
+                IAccessible* menuItem = FindChildByRoleAndName(menuBar, ROLE_SYSTEM_MENUITEM, menuName, 1);
+                menuBar->Release();
+                if (menuItem)
+                {
+                    menuItem->Release();
+                    return true;
+                }
+            }
+        }
+
+        Sleep(200);
+    }
+
+    return false;
+}
+
 // ============================================================
 // Chiude i menu popup aperti inviando Escape
 // ============================================================

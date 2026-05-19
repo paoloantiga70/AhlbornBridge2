@@ -260,6 +260,24 @@ namespace
 						int idx = g_pendingInstalledOrganIndex.load();
 						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
 
+                        if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+                        {
+                            printf("[Deferred] Hauptwerk is not running - starting it before organ load.\n");
+                            LaunchHauptwerkAndDismissWelcome();
+
+                            if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+                            {
+                                printf("[Deferred] Hauptwerk could not be started or main window not detected.\n");
+                                break;
+                            }
+                        }
+
+                        if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 15000))
+                        {
+                            printf("[Deferred] Hauptwerk started but menu 'Organ' is not ready yet.\n");
+                            break;
+                        }
+
 						std::vector<std::wstring> names = LoadInstalledOrganNames();
 						if (idx >= 1 && idx <= static_cast<int>(names.size()) && !names[idx - 1].empty())
 						{
@@ -1912,15 +1930,20 @@ static void DetectMidiInputInteractive()
     // Build assignment lists
     std::vector<std::wstring> inputNames  = { detectedName };
     std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port" };
+    std::vector<std::wstring> hauptwerkOutputNames = { detectedName };
 
     // Persist to Settings.xml
     SaveAssignedMidiInputNames(inputNames);
     SaveAssignedMidiOutputNames(outputNames);
+    SaveFixedHauptwerkOutputName(detectedName);
     printf("[DetectMidi] Saved assigned input:  %S\n", detectedName.c_str());
     printf("[DetectMidi] Saved assigned output: AhlbornBridge Virtual Port\n");
+    printf("[DetectMidi] Saved fixed Hauptwerk output: %S\n", detectedName.c_str());
 
-    // Write to Hauptwerk config
-    WriteHauptwerkMidiConfig(inputNames, outputNames);
+    // Write to Hauptwerk config.
+    // On first install, Hauptwerk must use the auto-detected physical device
+    // as MIDI output; the internal bridge port remains app-internal only.
+    WriteHauptwerkMidiConfig(inputNames, hauptwerkOutputNames);
 
     // Now open the assigned devices for runtime use
     SetAssignedMidiInputNames(inputNames);
@@ -2022,16 +2045,29 @@ bool initMidiState()
 
     // ---- Open all assigned MIDI output devices ----
     auto assignedOutputs = LoadAssignedMidiOutputNames();
-    if (assignedOutputs.empty())
+    std::vector<std::wstring> runtimeOutputs;
+    auto appendRuntimeOutput = [&](const std::wstring& name)
+    {
+        if (name.empty())
+            return;
+        if (std::find(runtimeOutputs.begin(), runtimeOutputs.end(), name) != runtimeOutputs.end())
+            return;
+        runtimeOutputs.push_back(name);
+    };
+    appendRuntimeOutput(LoadPrimaryHauptwerkOutputName());
+    for (const auto& name : assignedOutputs)
+        appendRuntimeOutput(name);
+
+    if (runtimeOutputs.empty())
     {
         g_outputDeviceOpen = false;
         g_output2DeviceOpen = false;
     }
     else
     {
-        for (size_t slot = 0; slot < assignedOutputs.size(); ++slot)
+        for (size_t slot = 0; slot < runtimeOutputs.size(); ++slot)
         {
-            const std::wstring& name = assignedOutputs[slot];
+            const std::wstring& name = runtimeOutputs[slot];
             UINT idx = UINT(-1);
             for (UINT i = 0; i < numOutDevs; ++i)
             {
@@ -2312,6 +2348,82 @@ DWORD GetMidiOutputSlotLastMsg(int slotIndex)
 {
     if (slotIndex < 0 || slotIndex >= kMaxOutputSlots) return 0;
     return g_outputSlotLastMsg[slotIndex].load(std::memory_order_relaxed);
+}
+
+DWORD GetMidiInputLastMsgByDeviceName(const std::wstring& deviceName)
+{
+    if (deviceName.empty())
+        return 0;
+
+    auto matchHandle = [&](HMIDIIN handle, int slot) -> DWORD
+    {
+        if (!handle || slot < 0 || slot >= kMaxInputSlots)
+            return 0;
+
+        UINT id = 0;
+        MIDIINCAPSW caps{};
+        if (midiInGetID(handle, &id) == MMSYSERR_NOERROR &&
+            midiInGetDevCapsW(id, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+            deviceName == caps.szPname)
+        {
+            return g_inputSlotLastMsg[slot].load(std::memory_order_relaxed);
+        }
+
+        return 0;
+    };
+
+    DWORD last = matchHandle(::hMidiIn, 0);
+    if (last != 0) return last;
+
+    last = matchHandle(::hMidiIn2, 1);
+    if (last != 0) return last;
+
+    for (int i = 0; i < (int)g_midiIns.size() && i + 2 < kMaxInputSlots; ++i)
+    {
+        last = matchHandle(g_midiIns[i], i + 2);
+        if (last != 0) return last;
+    }
+
+    return 0;
+}
+
+DWORD GetMidiOutputLastMsgByDeviceName(const std::wstring& deviceName)
+{
+    if (deviceName.empty())
+        return 0;
+
+    auto matchHandle = [&](HMIDIOUT handle, int slot) -> DWORD
+    {
+        if (!handle || slot < 0 || slot >= kMaxOutputSlots)
+            return 0;
+
+        UINT id = 0;
+        MIDIOUTCAPSW caps{};
+        if (midiOutGetID(handle, &id) == MMSYSERR_NOERROR &&
+            midiOutGetDevCapsW(id, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+            deviceName == caps.szPname)
+        {
+            return g_outputSlotLastMsg[slot].load(std::memory_order_relaxed);
+        }
+
+        return 0;
+    };
+
+    EnterCriticalSection(&g_midiOutLock);
+    DWORD last = matchHandle(hMidiOut, 0);
+    if (last == 0)
+        last = matchHandle(hMidiOut2, 1);
+    if (last == 0)
+    {
+        for (int i = 0; i < (int)g_midiOuts.size() && i < kMaxOutputSlots; ++i)
+        {
+            last = matchHandle(g_midiOuts[i], i);
+            if (last != 0) break;
+        }
+    }
+    LeaveCriticalSection(&g_midiOutLock);
+
+    return last;
 }
 
 void CleanupMidiLocks()

@@ -296,6 +296,7 @@ void StartStreamDeckPipeServer()
     g_pipeLockInitialized = true;
     g_pipeStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_pipeServerThread = CreateThread(nullptr, 0, PipeServerThread, nullptr, 0, nullptr);
+    std::thread([]() { UpdateStreamDeckProfileTitles(); }).detach();
     printf("[Startup] StreamDeck pipe server started.\n");
 }
 
@@ -379,7 +380,7 @@ static void UpdateStreamDeckProfileTitles()
 
         std::string updated = content;
 
-        // For each organ button, find organIndex and update Title fields in States
+        // For each organ button, find organIndex and update Title/ShowTitle fields in States
         size_t searchPos = 0;
         while (true)
         {
@@ -455,6 +456,45 @@ static void UpdateStreamDeckProfileTitles()
                     bracketEnd += delta;
                 }
                 pos = valueStart + newTitle.size() + 1;
+            }
+
+            std::string imageKey = "\"Image\":\"";
+            pos = bracketStart;
+            while (pos < bracketEnd)
+            {
+                size_t imagePos = updated.find(imageKey, pos);
+                if (imagePos == std::string::npos || imagePos >= bracketEnd) break;
+
+                size_t valueStart = imagePos + imageKey.size();
+                size_t valueEnd = valueStart;
+                while (valueEnd < updated.size())
+                {
+                    if (updated[valueEnd] == '\\') { valueEnd += 2; continue; }
+                    if (updated[valueEnd] == '"') break;
+                    ++valueEnd;
+                }
+                if (valueEnd >= updated.size()) break;
+
+                size_t removeEnd = valueEnd + 1;
+                if (removeEnd < updated.size() && updated[removeEnd] == ',')
+                    ++removeEnd;
+
+                updated.erase(imagePos, removeEnd - imagePos);
+                bracketEnd -= (removeEnd - imagePos);
+                pos = imagePos;
+            }
+
+            std::string showTitleFalse = "\"ShowTitle\":false";
+            std::string showTitleTrue = "\"ShowTitle\":true";
+            pos = bracketStart;
+            while (pos < bracketEnd)
+            {
+                size_t showTitlePos = updated.find(showTitleTrue, pos);
+                if (showTitlePos == std::string::npos || showTitlePos >= bracketEnd) break;
+                updated.replace(showTitlePos, showTitleTrue.size(), showTitleFalse);
+                int delta = (int)showTitleFalse.size() - (int)showTitleTrue.size();
+                bracketEnd += delta;
+                pos = showTitlePos + showTitleFalse.size();
             }
 
             searchPos = bracketEnd;

@@ -22,6 +22,8 @@ static const wchar_t kMidiAssignClassName[] = L"AhlbornMidiAssignWindow";
 constexpr UINT kActivityTimerId   = 1;
 constexpr UINT kActivityIntervalMs = 16; // ~60fps refresh
 constexpr DWORD kActivityWindowMs  = 120; // LED stays green for 120 ms after last msg
+constexpr int kInternalBridgeSectionHeight = 84;
+constexpr int kBridgeToggleHeight = 22;
 
 enum
 {
@@ -38,14 +40,19 @@ enum
 	IDC_BTN_REM_OUT   = 2016,
 	IDC_BTN_UP_OUT    = 2017,
 	IDC_BTN_DOWN_OUT  = 2018,
+	IDC_TV_INTERNAL    = 2019,
+	IDC_CHK_BRIDGE_ENABLED = 2022,
 
 	IDC_BTN_APPLY  = 2020,
 	IDC_BTN_CANCEL = 2021,
 };
 
 static HWND g_assignHwnd = nullptr;
+static HWND g_internalBridgeLv = nullptr;
 static std::vector<std::wstring> g_initialAssignedInputs;
 static std::vector<std::wstring> g_initialAssignedOutputs;
+static std::wstring g_fixedInputName;
+static std::wstring g_fixedOutputName;
 
 // Shared ImageList used for LED icons in the "Assigned Inputs" listview
 static HIMAGELIST g_ledImgList = nullptr; // indices: 0=grey, 1=green
@@ -238,7 +245,58 @@ static bool IsInternalMidiPort(const std::wstring& name)
 
 static bool IsFixedAssignedOutputName(const std::wstring& name)
 {
-	return name == L"AhlbornBridge Virtual Port";
+	return name == L"AhlbornBridge Virtual Port"
+		|| (!g_fixedOutputName.empty() && name == g_fixedOutputName)
+		|| (!g_fixedOutputName.empty() && name == g_fixedOutputName + L" [fixed]");
+}
+
+static bool IsFixedAssignedInputName(const std::wstring& name)
+{
+	return !g_fixedInputName.empty()
+		&& (name == g_fixedInputName || name == g_fixedInputName + L" [fixed]");
+}
+
+static std::wstring GetFixedInputDisplayName()
+{
+	return g_fixedInputName.empty() ? std::wstring{} : g_fixedInputName + L" [fixed]";
+}
+
+static std::wstring GetFixedOutputDisplayName()
+{
+	return g_fixedOutputName.empty() ? std::wstring{} : g_fixedOutputName + L" [fixed]";
+}
+
+static std::vector<std::wstring> CollectAssignedInputNames(HWND hLv)
+{
+	std::vector<std::wstring> names;
+	int n = ListView_GetItemCount(hLv);
+	for (int i = 0; i < n; ++i)
+	{
+		std::wstring name = LvGetItemName(hLv, i, true);
+		if (name.empty())
+			continue;
+		if (IsFixedAssignedInputName(name))
+			name = g_fixedInputName;
+		names.push_back(name);
+	}
+	return names;
+}
+
+static std::vector<std::wstring> CollectPersistedOutputNames(HWND hLv)
+{
+	std::vector<std::wstring> names;
+	names.push_back(L"AhlbornBridge Virtual Port");
+
+	int n = ListView_GetItemCount(hLv);
+	for (int i = 0; i < n; ++i)
+	{
+		std::wstring name = LvGetItemName(hLv, i, true);
+		if (name.empty() || IsFixedAssignedOutputName(name) || IsInternalMidiPort(name))
+			continue;
+		names.push_back(name);
+	}
+
+	return names;
 }
 
 static void PopulateInputViews(HWND hAvail, HWND hAssign)
@@ -258,7 +316,12 @@ static void PopulateInputViews(HWND hAvail, HWND hAssign)
 			LvAddItem(hAvail, name.c_str());
 	}
 	for (auto& name : assigned)
-		LvAddLedItem(hAssign, name.c_str());
+	{
+		if (!g_fixedInputName.empty() && name == g_fixedInputName)
+			LvAddLedItem(hAssign, GetFixedInputDisplayName().c_str());
+		else
+			LvAddLedItem(hAssign, name.c_str());
+	}
 }
 
 static void PopulateAvailableOutputView(
@@ -266,6 +329,7 @@ static void PopulateAvailableOutputView(
 	const std::vector<std::wstring>& assignedOutputs,
 	const std::vector<std::wstring>& assignedInputs)
 {
+	(void)assignedInputs;
 	ListView_DeleteAllItems(hAvail);
 
 	UINT n = midiOutGetNumDevs();
@@ -274,11 +338,25 @@ static void PopulateAvailableOutputView(
 		MIDIOUTCAPS caps = {};
 		if (midiOutGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
 		std::wstring name = caps.szPname;
-		if (name == L"AhlbornBridge Virtual Port") continue;
-		if (std::find(assignedInputs.begin(), assignedInputs.end(), name) != assignedInputs.end()) continue;
+		if (IsInternalMidiPort(name)) continue;
+		if (!g_fixedOutputName.empty() && name == g_fixedOutputName) continue;
 		if (std::find(assignedOutputs.begin(), assignedOutputs.end(), name) != assignedOutputs.end()) continue;
 		LvAddItem(hAvail, name.c_str());
 	}
+}
+
+static std::vector<std::wstring> CollectAssignedOutputNames(HWND hLv)
+{
+	std::vector<std::wstring> names;
+	int n = ListView_GetItemCount(hLv);
+	for (int i = 0; i < n; ++i)
+	{
+		std::wstring name = LvGetItemName(hLv, i, true);
+		if (name.empty() || IsFixedAssignedOutputName(name) || IsInternalMidiPort(name))
+			continue;
+		names.push_back(name);
+	}
+	return names;
 }
 
 static void PopulateOutputViews(HWND hAvail, HWND hAssign)
@@ -288,8 +366,76 @@ static void PopulateOutputViews(HWND hAvail, HWND hAssign)
 	auto assignedOutputs = LoadAssignedMidiOutputNames();
 	auto assignedInputs  = LoadAssignedMidiInputNames();
 	PopulateAvailableOutputView(hAvail, assignedOutputs, assignedInputs);
+	if (!g_fixedOutputName.empty())
+		LvAddLedItem(hAssign, GetFixedOutputDisplayName().c_str());
 	for (auto& name : assignedOutputs)
+	{
+		if (IsInternalMidiPort(name))
+			continue;
 		LvAddLedItem(hAssign, name.c_str());
+	}
+}
+
+static void PopulateInternalBridgePortsView(HWND hLv)
+{
+	ListView_DeleteAllItems(hLv);
+	std::vector<std::wstring> ports;
+
+	auto appendUnique = [&](const std::wstring& name)
+	{
+		if (!IsInternalMidiPort(name))
+			return;
+		if (std::find(ports.begin(), ports.end(), name) != ports.end())
+			return;
+		ports.push_back(name);
+	};
+
+	UINT inCount = midiInGetNumDevs();
+	for (UINT i = 0; i < inCount; ++i)
+	{
+		MIDIINCAPS caps = {};
+		if (midiInGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+		appendUnique(caps.szPname);
+	}
+
+	UINT outCount = midiOutGetNumDevs();
+	for (UINT i = 0; i < outCount; ++i)
+	{
+		MIDIOUTCAPS caps = {};
+		if (midiOutGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+		appendUnique(caps.szPname);
+	}
+
+	for (const auto& name : ports)
+		LvAddLedItem(hLv, name.c_str());
+}
+
+static void RefreshInternalBridgePortLeds(HWND hLv)
+{
+	if (!g_ledImgList || !hLv) return;
+	int n = ListView_GetItemCount(hLv);
+	DWORD now = GetTickCount();
+	const bool bridgeEnabled = g_midiRouterEnabled.load();
+	for (int i = 0; i < n; ++i)
+	{
+		std::wstring name = LvGetItemName(hLv, i, true);
+		DWORD lastIn = GetMidiInputLastMsgByDeviceName(name);
+		DWORD lastOut = GetMidiOutputLastMsgByDeviceName(name);
+		DWORD last = (lastIn > lastOut) ? lastIn : lastOut;
+		if (bridgeEnabled && name == L"AhlbornBridge Virtual Port (B)")
+		{
+			DWORD mirrored = GetMidiOutputLastMsgByDeviceName(L"AhlbornBridge Virtual Port");
+			if (mirrored > last)
+				last = mirrored;
+		}
+		int imgIdx = (last != 0 && (now - last) < kActivityWindowMs) ? 1 : 0;
+		LVITEMW lvi = {};
+		lvi.mask = LVIF_IMAGE;
+		lvi.iItem = i;
+		lvi.iSubItem = 0;
+		lvi.iImage = imgIdx;
+		ListView_SetItem(hLv, &lvi);
+	}
 }
 
 static void SyncOutputAvailabilityFromCurrentUi()
@@ -302,7 +448,12 @@ static void SyncOutputAvailabilityFromCurrentUi()
 	if (!hAvailOut || !hAssignIn || !hAssignOut) return;
 
 	auto assignedInputs  = LvCollectNames(hAssignIn, true);
-	auto assignedOutputs = LvCollectNames(hAssignOut, true);
+	for (auto& name : assignedInputs)
+	{
+		if (IsFixedAssignedInputName(name))
+			name = g_fixedInputName;
+	}
+	auto assignedOutputs = CollectAssignedOutputNames(hAssignOut);
 	PopulateAvailableOutputView(hAvailOut, assignedOutputs, assignedInputs);
 }
 
@@ -314,12 +465,53 @@ static void UpdateApplyButtonState(HWND hWnd)
 	HWND hCancel    = GetDlgItem(hWnd, IDC_BTN_CANCEL);
 	if (!hAssignIn || !hAssignOut || !hApply || !hCancel) return;
 
-	auto currentInputs  = LvCollectNames(hAssignIn, true);
-	auto currentOutputs = LvCollectNames(hAssignOut, true);
+	auto currentInputs  = CollectAssignedInputNames(hAssignIn);
+	auto currentOutputs = CollectPersistedOutputNames(hAssignOut);
 	bool hasChanges = currentInputs != g_initialAssignedInputs
 		|| currentOutputs != g_initialAssignedOutputs;
 	EnableWindow(hApply, hasChanges ? TRUE : FALSE);
 	SetWindowTextW(hCancel, hasChanges ? L"Cancel" : L"Close");
+}
+
+static void ApplyCurrentInputAssignments(HWND hWnd)
+{
+	HWND hAssignIn = GetDlgItem(hWnd, IDC_TV_ASSIGN_IN);
+	if (!hAssignIn) return;
+
+	auto inputs = CollectAssignedInputNames(hAssignIn);
+	auto outputs = LoadAssignedMidiOutputNames();
+	SaveAssignedMidiInputNames(inputs);
+	SetAssignedMidiInputNames(inputs);
+	WriteHauptwerkMidiConfig(inputs, outputs);
+	g_initialAssignedInputs = inputs;
+	UpdateApplyButtonState(hWnd);
+	SyncOutputAvailabilityFromCurrentUi();
+}
+
+static void ApplyCurrentOutputAssignments(HWND hWnd)
+{
+	HWND hAssignIn = GetDlgItem(hWnd, IDC_TV_ASSIGN_IN);
+	HWND hAssignOut = GetDlgItem(hWnd, IDC_TV_ASSIGN_OUT);
+	if (!hAssignIn || !hAssignOut) return;
+
+	auto inputs = CollectAssignedInputNames(hAssignIn);
+	auto outputs = CollectPersistedOutputNames(hAssignOut);
+	SaveAssignedMidiOutputNames(outputs);
+	SetAssignedMidiOutputNames(outputs);
+	WriteHauptwerkMidiConfig(inputs, outputs);
+	g_initialAssignedOutputs = outputs;
+	UpdateApplyButtonState(hWnd);
+	SyncOutputAvailabilityFromCurrentUi();
+}
+
+static void UpdateBridgeCheckboxText(HWND hWnd)
+{
+	HWND hCheck = GetDlgItem(hWnd, IDC_CHK_BRIDGE_ENABLED);
+	if (!hCheck) return;
+	SetWindowTextW(hCheck,
+		g_midiRouterEnabled.load()
+		? L"Bridge enabled (MIDI flows to Hauptwerk)"
+		: L"Bridge disabled (MIDI flow interrupted)");
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +558,11 @@ static HWND g_lvs[4] = {}; // avail_in, assign_in, avail_out, assign_out
 static bool IsFixedAssignedOutputItem(HWND hLv, int index, bool hasLedCol)
 {
 	return hLv == g_lvs[3] && index >= 0 && IsFixedAssignedOutputName(LvGetItemName(hLv, index, hasLedCol));
+}
+
+static bool IsFixedAssignedInputItem(HWND hLv, int index, bool hasLedCol)
+{
+	return hLv == g_lvs[1] && index >= 0 && IsFixedAssignedInputName(LvGetItemName(hLv, index, hasLedCol));
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +648,25 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		iy += sectionGap;
 
 		int totalW = margin + colW + 8 + arrowW + 8 + colW + 6 + arrowW + margin;
+
+		CreateWindowW(L"STATIC", L"Internal bridge ports", WS_CHILD | WS_VISIBLE | SS_LEFT,
+			margin, iy, 400, 18, hWnd, nullptr, hInst, nullptr);
+		iy += 22;
+		HWND hInternal = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEW, nullptr,
+			WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
+			margin, iy, totalW - margin * 2, kInternalBridgeSectionHeight, hWnd, (HMENU)(UINT_PTR)IDC_TV_INTERNAL, hInst, nullptr);
+		ListView_SetExtendedListViewStyleEx(hInternal, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
+		LvSetupReportMode(hInternal, true);
+		iy += kInternalBridgeSectionHeight + sectionGap;
+
+		HWND hBridgeCheck = CreateWindowW(L"BUTTON", L"",
+			WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+			margin, iy, totalW - margin * 2, kBridgeToggleHeight,
+			hWnd, (HMENU)IDC_CHK_BRIDGE_ENABLED, hInst, nullptr);
+		Button_SetCheck(hBridgeCheck, g_midiRouterEnabled.load() ? BST_CHECKED : BST_UNCHECKED);
+		UpdateBridgeCheckboxText(hWnd);
+		iy += kBridgeToggleHeight + sectionGap;
+
 		CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
 			totalW - btnW*2 - 10, iy, btnW, btnH, hWnd, (HMENU)IDC_BTN_APPLY,  hInst, nullptr);
 		CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -460,11 +676,16 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		g_lvs[1] = GetDlgItem(hWnd, IDC_TV_ASSIGN_IN);
 		g_lvs[2] = GetDlgItem(hWnd, IDC_TV_AVAIL_OUT);
 		g_lvs[3] = GetDlgItem(hWnd, IDC_TV_ASSIGN_OUT);
+		g_internalBridgeLv = hInternal;
+		auto assignedInputs = LoadAssignedMidiInputNames();
+		g_fixedInputName = assignedInputs.empty() ? std::wstring{} : assignedInputs.front();
+		g_fixedOutputName = LoadPrimaryHauptwerkOutputName();
 
 		PopulateInputViews (g_lvs[0], g_lvs[1]);
 		PopulateOutputViews(g_lvs[2], g_lvs[3]);
-		g_initialAssignedInputs  = LvCollectNames(g_lvs[1], true);
-		g_initialAssignedOutputs = LvCollectNames(g_lvs[3], true);
+		PopulateInternalBridgePortsView(hInternal);
+		g_initialAssignedInputs  = CollectAssignedInputNames(g_lvs[1]);
+		g_initialAssignedOutputs = CollectPersistedOutputNames(g_lvs[3]);
 		UpdateApplyButtonState(hWnd);
 
 		SetTimer(hWnd, kActivityTimerId, kActivityIntervalMs, nullptr);
@@ -476,6 +697,7 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		{
 			RefreshInputLeds(GetDlgItem(hWnd, IDC_TV_ASSIGN_IN));
 			RefreshOutputLeds(GetDlgItem(hWnd, IDC_TV_ASSIGN_OUT));
+			RefreshInternalBridgePortLeds(g_internalBridgeLv);
 		}
 		return 0;
 
@@ -489,26 +711,75 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 
 		switch (id)
 		{
-		case IDC_BTN_ADD_IN:   MoveSelected(hAvailIn,  false, hAssignIn, true);  SyncOutputAvailabilityFromCurrentUi(); UpdateApplyButtonState(hWnd); return 0;
-		case IDC_BTN_REM_IN:   MoveSelected(hAssignIn, true,  hAvailIn,  false); SyncOutputAvailabilityFromCurrentUi(); UpdateApplyButtonState(hWnd); return 0;
-		case IDC_BTN_UP_IN:    LvMoveItem(hAssignIn,  true,  true);              UpdateApplyButtonState(hWnd); return 0;
-		case IDC_BTN_DOWN_IN:  LvMoveItem(hAssignIn,  false, true);              UpdateApplyButtonState(hWnd); return 0;
-		case IDC_BTN_ADD_OUT:  MoveSelected(hAvailOut, false, hAssignOut, true);  SyncOutputAvailabilityFromCurrentUi(); UpdateApplyButtonState(hWnd); return 0;
+		case IDC_BTN_ADD_IN:
+			MoveSelected(hAvailIn, false, hAssignIn, true);
+			ApplyCurrentInputAssignments(hWnd);
+			return 0;
+		case IDC_BTN_REM_IN:
+		{
+			int sel = LvGetSelected(hAssignIn);
+			if (IsFixedAssignedInputItem(hAssignIn, sel, true)) return 0;
+			MoveSelected(hAssignIn, true, hAvailIn, false);
+			ApplyCurrentInputAssignments(hWnd);
+			return 0;
+		}
+		case IDC_BTN_UP_IN:
+		{
+			int sel = LvGetSelected(hAssignIn);
+			if (IsFixedAssignedInputItem(hAssignIn, sel, true) || IsFixedAssignedInputItem(hAssignIn, sel - 1, true)) return 0;
+			LvMoveItem(hAssignIn, true, true);
+			ApplyCurrentInputAssignments(hWnd);
+			return 0;
+		}
+		case IDC_BTN_DOWN_IN:
+		{
+			int sel = LvGetSelected(hAssignIn);
+			if (IsFixedAssignedInputItem(hAssignIn, sel, true) || IsFixedAssignedInputItem(hAssignIn, sel + 1, true)) return 0;
+			LvMoveItem(hAssignIn, false, true);
+			ApplyCurrentInputAssignments(hWnd);
+			return 0;
+		}
+		case IDC_BTN_ADD_OUT:
+			MoveSelected(hAvailOut, false, hAssignOut, true);
+			ApplyCurrentOutputAssignments(hWnd);
+			return 0;
 		case IDC_BTN_REM_OUT:
 		{
 			int sel = LvGetSelected(hAssignOut);
 			if (IsFixedAssignedOutputItem(hAssignOut, sel, true)) return 0;
 			MoveSelected(hAssignOut, true, hAvailOut, false);
-			SyncOutputAvailabilityFromCurrentUi();
-			UpdateApplyButtonState(hWnd);
+			ApplyCurrentOutputAssignments(hWnd);
 			return 0;
 		}
-		case IDC_BTN_UP_OUT:   LvMoveItem(hAssignOut, true,  true);               UpdateApplyButtonState(hWnd); return 0;
-		case IDC_BTN_DOWN_OUT: LvMoveItem(hAssignOut, false, true);               UpdateApplyButtonState(hWnd); return 0;
+		case IDC_BTN_UP_OUT:
+		{
+			int sel = LvGetSelected(hAssignOut);
+			if (IsFixedAssignedOutputItem(hAssignOut, sel, true) || IsFixedAssignedOutputItem(hAssignOut, sel - 1, true)) return 0;
+			LvMoveItem(hAssignOut, true, true);
+			ApplyCurrentOutputAssignments(hWnd);
+			return 0;
+		}
+		case IDC_BTN_DOWN_OUT:
+		{
+			int sel = LvGetSelected(hAssignOut);
+			if (IsFixedAssignedOutputItem(hAssignOut, sel, true) || IsFixedAssignedOutputItem(hAssignOut, sel + 1, true)) return 0;
+			LvMoveItem(hAssignOut, false, true);
+			ApplyCurrentOutputAssignments(hWnd);
+			return 0;
+		}
+		case IDC_CHK_BRIDGE_ENABLED:
+		{
+			bool enabled = Button_GetCheck(reinterpret_cast<HWND>(lParam)) == BST_CHECKED;
+			g_midiRouterEnabled = enabled;
+			SaveMidiRouterEnabled(enabled);
+			UpdateBridgeCheckboxText(hWnd);
+			RefreshInternalBridgePortLeds(g_internalBridgeLv);
+			return 0;
+		}
 		case IDC_BTN_APPLY:
 		{
-			auto inputs  = LvCollectNames(hAssignIn,  true);
-			auto outputs = LvCollectNames(hAssignOut, true);
+			auto inputs  = CollectAssignedInputNames(hAssignIn);
+			auto outputs = CollectPersistedOutputNames(hAssignOut);
 			SaveAssignedMidiInputNames(inputs);
 			SaveAssignedMidiOutputNames(outputs);
 			SetAssignedMidiInputNames(inputs);
@@ -530,6 +801,9 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		KillTimer(hWnd, kActivityTimerId);
 		g_initialAssignedInputs.clear();
 		g_initialAssignedOutputs.clear();
+		g_internalBridgeLv = nullptr;
+		g_fixedInputName.clear();
+		g_fixedOutputName.clear();
 		for (int i = 0; i < 4; ++i)
 		{
 			g_lvs[i] = nullptr;
@@ -569,12 +843,14 @@ void ShowMidiAssignmentWindow(HINSTANCE hInstance, HWND hOwner)
 		RegisterClassW(&wc);
 	}
 
-	const int tvH = 160, sectionGap = 24, btnH = 24, margin = 12;
+	const int tvH = 160, sectionGap = 24, btnH = 24, margin = 12, internalH = kInternalBridgeSectionHeight;
 	const int colW = 190, arrowW = 28;
 	const int headerPerSection = 22 + 18;
 	int clientH = margin
 				+ 2 * (headerPerSection + tvH)
-				+ 2 * sectionGap
+				+ 4 * sectionGap
+				+ 22 + internalH
+				+ kBridgeToggleHeight
 				+ btnH + margin + 8;
 	int clientW = margin + colW + 8 + arrowW + 8 + colW + 6 + arrowW + margin + 8;
 

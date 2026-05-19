@@ -10,6 +10,8 @@ std::vector<std::wstring> LoadAssignedMidiInputNames();
 std::vector<std::wstring> LoadAssignedMidiOutputNames();
 bool SaveAssignedMidiInputNames(const std::vector<std::wstring>& names);
 bool SaveAssignedMidiOutputNames(const std::vector<std::wstring>& names);
+bool SaveFixedHauptwerkOutputName(const std::wstring& name);
+std::wstring LoadFixedHauptwerkOutputName();
 
 // Write the Hauptwerk Config.Config_Hauptwerk_xml to reflect the given
 // MIDI input and output device names.  Looks up each name in the
@@ -65,6 +67,10 @@ bool InitHauptwerkPaths();
 
 // Load the saved Hauptwerk application root folder from Settings.xml.
 bool LoadHauptwerkAppPath(std::wstring& path);
+
+// Returns the physical MIDI output fixed at first installation and always
+// preserved in Hauptwerk's EnabledMIDIOutputPort list.
+std::wstring LoadPrimaryHauptwerkOutputName();
 
 // Start/stop a background thread that monitors the OrganDefinitions folder
 // for file additions or removals and automatically calls ReloadInstalledOrgans().
