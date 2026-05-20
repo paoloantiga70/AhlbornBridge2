@@ -53,6 +53,13 @@ constexpr int kActiveSensingCheckId = 403;
 constexpr int kActiveSensingOutputComboId = 404;
 constexpr int kMainUpdateModeComboId = 403;
 constexpr int kMainCheckNowButtonId = 404;
+constexpr int kHwOrganListId      = 500;
+constexpr int kHwAudioDevComboId  = 501;
+constexpr int kHwAutoButtonId     = 502;
+constexpr int kHwSaveButtonId     = 503;
+
+static HWND g_hwOrganListHwnd   = nullptr;
+static HWND g_hwAudioDevCombo   = nullptr;
 
 namespace
 {
@@ -67,6 +74,142 @@ namespace
     }
 
     void UpdateOrganInfoGroupTitle();
+
+    void PopulateHauptwerkAudioTab()
+    {
+        if (!g_hwOrganListHwnd || !g_hwAudioDevCombo)
+            return;
+
+        // --- Populate organ ListView ---
+        ListView_DeleteAllItems(g_hwOrganListHwnd);
+        auto assignments = LoadOrganAudioAssignments();
+        for (int i = 0; i < static_cast<int>(assignments.size()); ++i)
+        {
+            const auto& a = assignments[i];
+            std::wstring label = a.displayName.empty() ? a.organName : a.displayName;
+
+            LVITEMW lvi = {};
+            lvi.mask    = LVIF_TEXT | LVIF_PARAM;
+            lvi.iItem   = i;
+            lvi.iSubItem = 0;
+            lvi.pszText = const_cast<wchar_t*>(label.c_str());
+            lvi.lParam  = static_cast<LPARAM>(a.channels);
+            ListView_InsertItem(g_hwOrganListHwnd, &lvi);
+
+            wchar_t chBuf[16] = {};
+            if (a.channels > 0)
+                wsprintfW(chBuf, L"%d", a.channels);
+            else
+                lstrcpyW(chBuf, L"?");
+            ListView_SetItemText(g_hwOrganListHwnd, i, 1, chBuf);
+            ListView_SetItemText(g_hwOrganListHwnd, i, 2,
+                const_cast<wchar_t*>(a.audioDeviceName.c_str()));
+        }
+
+        // --- Populate audio device combobox from <Audio><Devices> in Settings.xml ---
+        SendMessageW(g_hwAudioDevCombo, CB_RESETCONTENT, 0, 0);
+        // We read the cached audio device names by parsing Settings.xml through Xml public API.
+        // LoadOrganAudioAssignments already reads Settings.xml; reuse its raw XML via a
+        // dedicated helper. For now enumerate via a simple file read.
+        {
+            wchar_t appDataBuf[MAX_PATH] = {};
+            SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appDataBuf);
+            std::wstring settingsPath = std::wstring(appDataBuf) + L"\\AhlbornBridge\\Settings.xml";
+            HANDLE fh = CreateFileW(settingsPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (fh != INVALID_HANDLE_VALUE)
+            {
+                DWORD sz = GetFileSize(fh, nullptr);
+                if (sz != INVALID_FILE_SIZE && sz > 0)
+                {
+                    std::string raw(sz, '\0');
+                    DWORD rd = 0;
+                    if (ReadFile(fh, raw.data(), sz, &rd, nullptr) && rd > 0)
+                    {
+                        int wsz = MultiByteToWideChar(CP_UTF8, 0, raw.data(), static_cast<int>(rd), nullptr, 0);
+                        std::wstring wxml(wsz, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0, raw.data(), static_cast<int>(rd), wxml.data(), wsz);
+
+                        // Find <Devices>...</Devices> inside <Audio>
+                        auto findSection = [&](const std::wstring& src, const std::wstring& tag) -> std::wstring {
+                            std::wstring open = L"<" + tag + L">";
+                            std::wstring close = L"</" + tag + L">";
+                            size_t s = src.find(open);
+                            if (s == std::wstring::npos) return {};
+                            s += open.size();
+                            size_t e = src.find(close, s);
+                            if (e == std::wstring::npos) return {};
+                            return src.substr(s, e - s);
+                        };
+                        std::wstring audioSec = findSection(wxml, L"Audio");
+                        std::wstring devSec   = findSection(audioSec, L"Devices");
+                        size_t pos = 0;
+                        while (true)
+                        {
+                            size_t s = devSec.find(L"<Device", pos);
+                            if (s == std::wstring::npos) break;
+                            size_t gt = devSec.find(L'>', s);
+                            if (gt == std::wstring::npos) break;
+                            size_t e = devSec.find(L"</Device>", gt + 1);
+                            if (e == std::wstring::npos) break;
+                            std::wstring devName = devSec.substr(gt + 1, e - gt - 1);
+                            SendMessageW(g_hwAudioDevCombo, CB_ADDSTRING, 0,
+                                reinterpret_cast<LPARAM>(devName.c_str()));
+                            pos = e + 9;
+                        }
+                    }
+                }
+                CloseHandle(fh);
+            }
+        }
+    }
+
+    void HandleHauptwerkAudioSave()
+    {
+        if (!g_hwOrganListHwnd || !g_hwAudioDevCombo)
+            return;
+
+        int sel = ListView_GetNextItem(g_hwOrganListHwnd, -1, LVNI_SELECTED);
+        if (sel < 0)
+        {
+            MessageBoxW(g_settingsHwnd, L"Select an organ from the list first.",
+                L"AhlbornBridge", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        // Get organ display name (col 0) - we need internal name from assignments
+        auto assignments = LoadOrganAudioAssignments();
+        if (sel >= static_cast<int>(assignments.size()))
+            return;
+
+        // Get selected device from combo
+        int devSel = static_cast<int>(SendMessageW(g_hwAudioDevCombo, CB_GETCURSEL, 0, 0));
+        if (devSel < 0)
+        {
+            MessageBoxW(g_settingsHwnd, L"Select an audio device from the dropdown first.",
+                L"AhlbornBridge", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        wchar_t devBuf[256] = {};
+        SendMessageW(g_hwAudioDevCombo, CB_GETLBTEXT, static_cast<WPARAM>(devSel),
+            reinterpret_cast<LPARAM>(devBuf));
+
+        SaveOrganAudioAssignment(assignments[sel].organName, devBuf);
+
+        // Refresh list
+        PopulateHauptwerkAudioTab();
+
+        // Re-select the same row
+        LVITEMW lvi = {};
+        lvi.mask  = LVIF_STATE;
+        lvi.state = LVIS_SELECTED | LVIS_FOCUSED;
+        lvi.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+        ListView_SetItem(g_hwOrganListHwnd, &lvi);
+        ListView_SetItemState(g_hwOrganListHwnd, sel, LVIS_SELECTED | LVIS_FOCUSED,
+            LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(g_hwOrganListHwnd, sel, FALSE);
+    }
+
 
     bool EnsureGdiplusStarted()
     {
@@ -470,37 +613,54 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         UpdateOrganInfoGroupTitle();
 
         {
-            CreateWindowW(L"BUTTON", L"Hauptwerk Integration", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                10, 8, 700, 180, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
-
-            CreateWindowW(L"STATIC", L"Hauptwerk preferences",
-                WS_CHILD | WS_VISIBLE,
-                24, 32, 220, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+            // --- Hauptwerk tab: Audio Output Assignment UI ---
+            CreateWindowW(L"BUTTON", L"Audio Output Assignment", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 700, 340, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
 
             CreateWindowW(L"STATIC",
-                L"This tab is reserved for Hauptwerk-specific options and routing behavior.",
+                L"Assign an audio output device to each installed organ.\n"
+                L"Organs with 2 channels use \"Hauptwerk VST Link\" by default; others use the ASIO device.",
                 WS_CHILD | WS_VISIBLE,
-                24, 52, 620, 18, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+                24, 28, 670, 32, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
 
-            CreateWindowW(L"STATIC", nullptr,
-                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                24, 78, 660, 2, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+            // ListView: Organ | Channels | Audio Device
+            g_hwOrganListHwnd = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
+                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                24, 68, 660, 200, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHwOrganListId, nullptr, nullptr);
+            ListView_SetExtendedListViewStyle(g_hwOrganListHwnd,
+                LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-            CreateWindowW(L"STATIC", L"Status:",
+            LVCOLUMNW col = {};
+            col.mask = LVCF_TEXT | LVCF_WIDTH;
+            col.cx = 260; col.pszText = const_cast<wchar_t*>(L"Organ");
+            ListView_InsertColumn(g_hwOrganListHwnd, 0, &col);
+            col.cx = 70;  col.pszText = const_cast<wchar_t*>(L"Channels");
+            ListView_InsertColumn(g_hwOrganListHwnd, 1, &col);
+            col.cx = 310; col.pszText = const_cast<wchar_t*>(L"Audio Device");
+            ListView_InsertColumn(g_hwOrganListHwnd, 2, &col);
+
+            // Label + combobox for device selection
+            CreateWindowW(L"STATIC", L"Audio device:",
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                30, 96, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+                24, 280, 100, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
 
-            CreateWindowW(L"STATIC", L"Ready for additional Hauptwerk settings.",
-                WS_CHILD | WS_VISIBLE,
-                164, 96, 420, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+            g_hwAudioDevCombo = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                130, 276, 390, 200, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHwAudioDevComboId, nullptr, nullptr);
 
-            CreateWindowW(L"STATIC", L"Tip:",
-                WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                30, 126, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+            CreateWindowW(L"BUTTON", L"Apply Auto",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                532, 276, 70, 24, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHwAutoButtonId, nullptr, nullptr);
 
-            CreateWindowW(L"STATIC", L"Next step: add model, ports and profile mapping options here.",
-                WS_CHILD | WS_VISIBLE,
-                164, 126, 500, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+            CreateWindowW(L"BUTTON", L"Save",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                610, 276, 60, 24, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHwSaveButtonId, nullptr, nullptr);
+
+            PopulateHauptwerkAudioTab();
         }
 
         {
@@ -796,6 +956,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CheckForPluginUpdateInteractive(hWnd);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHwAutoButtonId)
+        {
+            ApplyAutoOrganAudioAssignments();
+            PopulateHauptwerkAudioTab();
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHwSaveButtonId)
+        {
+            HandleHauptwerkAudioSave();
+            return 0;
+        }
         break;
     }
     case WM_DEVICECHANGE:
@@ -805,8 +976,31 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         }
         return 0;
     case WM_NOTIFY:
-        if (reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE
-            && reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_settingsTabHwnd)
+    {
+        LPNMHDR pnmh = reinterpret_cast<LPNMHDR>(lParam);
+        // Organ ListView selection change -> sync combobox to current device
+        if (pnmh->idFrom == kHwOrganListId && pnmh->code == LVN_ITEMCHANGED)
+        {
+            LPNMLISTVIEW pnmlv = reinterpret_cast<LPNMLISTVIEW>(lParam);
+            if ((pnmlv->uNewState & LVIS_SELECTED) && g_hwOrganListHwnd && g_hwAudioDevCombo)
+            {
+                wchar_t devBuf[256] = {};
+                ListView_GetItemText(g_hwOrganListHwnd, pnmlv->iItem, 2, devBuf, 256);
+                int cnt = static_cast<int>(SendMessageW(g_hwAudioDevCombo, CB_GETCOUNT, 0, 0));
+                for (int i = 0; i < cnt; ++i)
+                {
+                    wchar_t cb[256] = {};
+                    SendMessageW(g_hwAudioDevCombo, CB_GETLBTEXT, i, reinterpret_cast<LPARAM>(cb));
+                    if (lstrcmpW(cb, devBuf) == 0)
+                    {
+                        SendMessageW(g_hwAudioDevCombo, CB_SETCURSEL, i, 0);
+                        break;
+                    }
+                }
+            }
+            return 0;
+        }
+        if (pnmh->code == TCN_SELCHANGE && pnmh->hwndFrom == g_settingsTabHwnd)
         {
             int sel = TabCtrl_GetCurSel(g_settingsTabHwnd);
             if (g_settingsMidiPageHwnd)
@@ -840,6 +1034,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             return 0;
         }
         break;
+    } // end case WM_NOTIFY
     case WM_TIMER:
         if (wParam == kLedTimerId)
         {
@@ -1006,6 +1201,10 @@ void ShowTrayMenu(HWND hWnd, POINT pt)
 
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings");
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_MIDI_ASSIGN, L"Assign MIDI devices\u2026");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING | (g_activeSensingEnabled.load() ? MF_CHECKED : MF_UNCHECKED),
+        ID_TRAY_TOGGLE_ACTIVE_SENSING, L"Active Sensing sender");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_UPDATE, L"Check for Updates");
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_TOGGLE_CONSOLE,
         showConsole ? L"Hide debug console" : L"Show debug console");
@@ -1089,6 +1288,13 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 				ShowWindow(hConsoleWnd, showConsole ? SW_SHOW : SW_HIDE);
 			}
 			SaveShowDebugConsole(showConsole);
+			return 0;
+		}
+		case ID_TRAY_TOGGLE_ACTIVE_SENSING:
+		{
+			bool enabled = !g_activeSensingEnabled.load();
+			g_activeSensingEnabled = enabled;
+			SaveActiveSensingEnabled(enabled);
 			return 0;
 		}
 		case ID_TRAY_EXIT:

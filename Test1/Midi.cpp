@@ -11,6 +11,9 @@
 #include <shlobj.h>
 #include <knownfolders.h>
 
+// Forward declaration (defined later in this file)
+void CloseHauptwerkProcess();
+
 HMIDIIN hMidiIn = nullptr;
 HMIDIIN hMidiIn2 = nullptr;
 HMIDIOUT hMidiOut = nullptr;
@@ -372,29 +375,62 @@ namespace
 						int idx = g_pendingInstalledOrganIndex.load();
 						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
 
-                        if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
-                        {
-                            printf("[Deferred] Hauptwerk is not running - starting it before organ load.\n");
-                            LaunchHauptwerkAndDismissWelcome();
+						if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+						{
+							printf("[Deferred] Hauptwerk is not running - starting it before organ load.\n");
+							LaunchHauptwerkAndDismissWelcome();
 
-                            if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
-                            {
-                                printf("[Deferred] Hauptwerk could not be started or main window not detected.\n");
-                                break;
-                            }
-                        }
+							if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+							{
+								printf("[Deferred] Hauptwerk could not be started or main window not detected.\n");
+								break;
+							}
+						}
 
-                        if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 15000))
-                        {
-                            printf("[Deferred] Hauptwerk started but menu 'Organ' is not ready yet.\n");
-                            break;
-                        }
+						if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 15000))
+						{
+							printf("[Deferred] Hauptwerk started but menu 'Organ' is not ready yet.\n");
+							break;
+						}
 
 						std::vector<std::wstring> names = LoadInstalledOrganNames();
 						if (idx >= 1 && idx <= static_cast<int>(names.size()) && !names[idx - 1].empty())
 						{
 							const std::wstring& name = names[idx - 1];
 							printf("[Deferred] Organ name: %S\n", name.c_str());
+
+							// Check if audio config needs to change before loading
+							if (NeedsAudioConfigChange(name))
+							{
+								printf("[Deferred] Audio device mismatch for organ '%S' — updating config and restarting Hauptwerk.\n", name.c_str());
+								g_hauptwerkOrganTitle = name;
+								WriteHauptwerkAudioConfig();
+
+								// Close Hauptwerk and wait for it to exit
+								CloseHauptwerkProcess();
+								printf("[Deferred] Waiting for Hauptwerk to exit...\n");
+								for (int w = 0; w < 50 && IsProcessRunningByName(L"Hauptwerk.exe"); ++w)
+									Sleep(200);
+
+								// Relaunch Hauptwerk
+								printf("[Deferred] Relaunching Hauptwerk...\n");
+								LaunchHauptwerkAndDismissWelcome();
+								if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+								{
+									printf("[Deferred] Hauptwerk could not be relaunched.\n");
+									break;
+								}
+								if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 20000))
+								{
+									printf("[Deferred] Hauptwerk relaunched but menu 'Organ' is not ready.\n");
+									break;
+								}
+							}
+							else
+							{
+								printf("[Deferred] Audio device already correct for organ '%S' — no restart needed.\n", name.c_str());
+							}
+
 							if (!LoadOrganByName(g_hauptwerkMainWindow, name))
 							{
 								printf("Bridge is unchecked!!..\n");
@@ -416,6 +452,43 @@ namespace
 					{
 						int organIdx = static_cast<int>(cmdVal - base) + 1;
 						printf("[Deferred] Loading favorite organ %d...\n", organIdx);
+
+						// Pre-set the organ title from the standby list and check audio config
+						std::vector<std::wstring> standbyNames = LoadStandbyOrganNames();
+						if (organIdx >= 1 && organIdx <= static_cast<int>(standbyNames.size()) && !standbyNames[organIdx - 1].empty())
+						{
+							const std::wstring& favName = standbyNames[organIdx - 1];
+
+							if (NeedsAudioConfigChange(favName))
+							{
+								printf("[Deferred] Audio device mismatch for favorite organ '%S' — updating config and restarting Hauptwerk.\n", favName.c_str());
+								g_hauptwerkOrganTitle = favName;
+								WriteHauptwerkAudioConfig();
+
+								CloseHauptwerkProcess();
+								printf("[Deferred] Waiting for Hauptwerk to exit...\n");
+								for (int w = 0; w < 50 && IsProcessRunningByName(L"Hauptwerk.exe"); ++w)
+									Sleep(200);
+
+								printf("[Deferred] Relaunching Hauptwerk...\n");
+								LaunchHauptwerkAndDismissWelcome();
+								if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+								{
+									printf("[Deferred] Hauptwerk could not be relaunched.\n");
+									break;
+								}
+								if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 20000))
+								{
+									printf("[Deferred] Hauptwerk relaunched but menu 'Organ' is not ready.\n");
+									break;
+								}
+							}
+							else
+							{
+								printf("[Deferred] Audio device already correct for favorite organ '%S' — no restart needed.\n", favName.c_str());
+							}
+						}
+
 						std::wstring label = std::to_wstring(organIdx) + L": ";
 						if (!ClickMenuPath(g_hauptwerkMainWindow,
 							{ L"Organ", L"Load favorite organ", label.c_str() }))
@@ -2059,6 +2132,9 @@ static void DetectMidiInputInteractive()
     // On first install, Hauptwerk must use the auto-detected physical device
     // as MIDI output; the internal bridge port remains app-internal only.
     WriteHauptwerkMidiConfig(inputNames, hauptwerkOutputNames);
+
+    // Configure the fixed audio output preset in Hauptwerk config.
+    WriteHauptwerkAudioConfig();
 
     // Now open the assigned devices for runtime use
     SetAssignedMidiInputNames(inputNames);

@@ -82,6 +82,14 @@ namespace
     std::wstring s_cachedFixedHauptwerkOutput;
     bool s_streamDeckSettingsLoaded = false;
 
+    // Cached audio output devices (all entries from AudioOutputDevice in Hauptwerk config,
+    // persisted to <Audio><Devices> in Settings.xml).
+    // Each entry: "<Device id=\"NNN\">name</Device>"
+    std::wstring s_cachedAudioDevices;  // raw XML fragment
+    std::wstring s_cachedAsioDevId;     // id of first ASIO: device (convenience)
+    std::wstring s_cachedAsioDevName;   // name of first ASIO: device
+    bool s_audioSettingsLoaded = false;
+
     // Cached assigned MIDI device name lists (new dynamic multi-device model).
     std::vector<std::wstring> s_assignedInputNames;
     std::vector<std::wstring> s_assignedOutputNames;
@@ -111,6 +119,16 @@ namespace
             s_cachedInstalledOrgans = ReadHauptwerkInstalledOrgans();
         }
     }
+
+    void SetCachedInstalledOrgans(const std::wstring& fragment)
+    {
+        s_cachedInstalledOrgans = fragment;
+        s_installedOrgansLoaded = true;
+    }
+} // end anonymous namespace
+
+// Re-open anonymous namespace to keep prior code intact then close immediately.
+namespace {
 
     bool TryReadSettingsXml(std::wstring& xml)
     {
@@ -743,47 +761,102 @@ namespace
 
 			name = name.substr(0, name.size() - kSuffixLen);
 
-			// Read Identification_Name from inside the organ definition XML file
-			std::wstring displayName;
-			{
-				std::wstring organFilePath = sampleSetsRoot + L"\\OrganDefinitions\\" + std::wstring(fd.cFileName);
-				HANDLE fh = CreateFileW(organFilePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-					nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-				if (fh != INVALID_HANDLE_VALUE)
+				// Read the entire organ definition file once
+				std::wstring displayName, uniqueOrganID, outputDevice;
+				int numberChannels = 0;
 				{
-					DWORD fileSize = GetFileSize(fh, nullptr);
-					if (fileSize != INVALID_FILE_SIZE && fileSize > 0)
+					std::wstring organFilePath = sampleSetsRoot + L"\\OrganDefinitions\\" + std::wstring(fd.cFileName);
+					HANDLE fh = CreateFileW(organFilePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+						nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+					if (fh != INVALID_HANDLE_VALUE)
 					{
-						// Read only the first 128KB — Identification_Name is near the start of the file
-						DWORD readSize = (std::min)(fileSize, static_cast<DWORD>(131072));
-						std::string raw(readSize, '\0');
-						DWORD bytesRead = 0;
-						if (ReadFile(fh, raw.data(), readSize, &bytesRead, nullptr) && bytesRead > 0)
+						DWORD fileSize = GetFileSize(fh, nullptr);
+						if (fileSize != INVALID_FILE_SIZE && fileSize > 0)
 						{
-							int wideSize = MultiByteToWideChar(CP_UTF8, 0, raw.data(),
-								static_cast<int>(bytesRead), nullptr, 0);
-							if (wideSize > 0)
+							std::string raw(fileSize, '\0');
+							DWORD bytesRead = 0;
+							if (ReadFile(fh, raw.data(), fileSize, &bytesRead, nullptr) && bytesRead > 0)
 							{
-								std::wstring hwXml(wideSize, L'\0');
-								MultiByteToWideChar(CP_UTF8, 0, raw.data(),
-									static_cast<int>(bytesRead), hwXml.data(), wideSize);
-								TryGetTagStringValue(hwXml,
-									L"<Identification_Name>",
-									L"</Identification_Name>",
-									displayName);
+								int wideSize = MultiByteToWideChar(CP_UTF8, 0, raw.data(),
+									static_cast<int>(bytesRead), nullptr, 0);
+								if (wideSize > 0)
+								{
+									std::wstring hwXml(wideSize, L'\0');
+									MultiByteToWideChar(CP_UTF8, 0, raw.data(),
+										static_cast<int>(bytesRead), hwXml.data(), wideSize);
+
+									TryGetTagStringValue(hwXml, L"<Identification_Name>", L"</Identification_Name>", displayName);
+									TryGetTagStringValue(hwXml, L"<Identification_UniqueOrganID>", L"</Identification_UniqueOrganID>", uniqueOrganID);
+									TryGetTagStringValue(hwXml, L"<Output_Device>", L"</Output_Device>", outputDevice);
+
+									// Compute Number_Channels from ObjectList ObjectType="StopRank":
+									// find the first <a> value in the first <o> child, then count how many
+									// <o> children share that same first <a> value; result * 2 = channels.
+									const std::wstring kObjListOpen = L"<ObjectList ObjectType=\"StopRank\">";
+									const std::wstring kObjListClose = L"</ObjectList>";
+									size_t olStart = hwXml.find(kObjListOpen);
+									if (olStart != std::wstring::npos)
+									{
+										olStart += kObjListOpen.size();
+										size_t olEnd = hwXml.find(kObjListClose, olStart);
+										if (olEnd == std::wstring::npos)
+											olEnd = hwXml.size();
+
+										std::wstring olSection = hwXml.substr(olStart, olEnd - olStart);
+
+										// Extract first <a> value from the first <o> node
+										std::wstring firstAValue;
+										size_t firstO = olSection.find(L"<o>");
+										if (firstO != std::wstring::npos)
+										{
+											size_t aStart = olSection.find(L"<a>", firstO);
+											size_t aEnd = olSection.find(L"</a>", aStart);
+											if (aStart != std::wstring::npos && aEnd != std::wstring::npos)
+												firstAValue = olSection.substr(aStart + 3, aEnd - aStart - 3);
+										}
+
+										// Count <o> nodes whose first <a> matches firstAValue
+										if (!firstAValue.empty())
+										{
+											int matchCount = 0;
+											size_t pos2 = 0;
+											while (true)
+											{
+												size_t oPos = olSection.find(L"<o>", pos2);
+												if (oPos == std::wstring::npos) break;
+												size_t oEnd = olSection.find(L"</o>", oPos);
+												if (oEnd == std::wstring::npos) break;
+												std::wstring oNode = olSection.substr(oPos + 3, oEnd - oPos - 3);
+												size_t aS = oNode.find(L"<a>");
+												size_t aE = oNode.find(L"</a>", aS);
+												if (aS != std::wstring::npos && aE != std::wstring::npos)
+												{
+													std::wstring aVal = oNode.substr(aS + 3, aE - aS - 3);
+													if (aVal == firstAValue)
+														++matchCount;
+												}
+												pos2 = oEnd + 4;
+											}
+											numberChannels = matchCount * 2;
+										}
+									}
+								}
 							}
 						}
+						CloseHandle(fh);
 					}
-					CloseHandle(fh);
 				}
-			}
 
-			std::wstring idStr = (id < 10 ? L"0" : L"") + std::to_wstring(id);
-			std::wstring displayAttr = displayName.empty() ? L"" : L" displayName=\"" + displayName + L"\"";
-			result += L"    <Organ id=\"" + idStr + L"\"" + displayAttr + L">" + name + L"</Organ>\r\n";
-			printf("ReadHauptwerkInstalledOrgans: [%02d] %S (displayName: %S)\n", id, name.c_str(),
-				displayName.empty() ? L"(none)" : displayName.c_str());
-			++id;
+				std::wstring idStr = (id < 10 ? L"0" : L"") + std::to_wstring(id);
+				std::wstring displayAttr = displayName.empty() ? L"" : L" displayName=\"" + displayName + L"\"";
+				result += L"    <Organ id=\"" + idStr + L"\"" + displayAttr + L">" + name + L"\r\n";
+				result += L"       <o><Identification_UniqueOrganID>" + uniqueOrganID + L"</Identification_UniqueOrganID></o>\r\n";
+				result += L"       <o><Number_Channels>" + (numberChannels > 0 ? std::to_wstring(numberChannels) : L"") + L"</Number_Channels></o>\r\n";
+				result += L"       <o><Output_Device>" + outputDevice + L"</Output_Device></o>\r\n";
+				result += L"    </Organ>\r\n";
+				printf("ReadHauptwerkInstalledOrgans: [%02d] %S (displayName: %S, channels: %d)\n", id, name.c_str(),
+					displayName.empty() ? L"(none)" : displayName.c_str(), numberChannels);
+				++id;
 		} while (FindNextFileW(hFind, &fd));
 
 		FindClose(hFind);
@@ -801,7 +874,29 @@ namespace
 		TryGetTagStringValue(section, L"<CC>", L"</CC>", s_cachedStreamDeckCC);
 		TryGetTagStringValue(section, L"<MidiOut>", L"</MidiOut>", s_cachedStreamDeckMidiOut);
 		TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", s_cachedStreamDeckMidiIn);
-        TryGetTagStringValue(section, L"<FixedHauptwerkOutput>", L"</FixedHauptwerkOutput>", s_cachedFixedHauptwerkOutput);
+		TryGetTagStringValue(section, L"<FixedHauptwerkOutput>", L"</FixedHauptwerkOutput>", s_cachedFixedHauptwerkOutput);
+	}
+
+	void EnsureAudioSettingsLoaded()
+	{
+		if (s_audioSettingsLoaded) return;
+		s_audioSettingsLoaded = true;
+		std::wstring xml;
+		if (!TryReadSettingsXml(xml)) return;
+		std::wstring section;
+		if (!TryGetSection(xml, L"Audio", section)) return;
+		TryGetTagStringValue(section, L"<AsioDevId>",   L"</AsioDevId>",   s_cachedAsioDevId);
+		TryGetTagStringValue(section, L"<AsioDevName>", L"</AsioDevName>", s_cachedAsioDevName);
+		// Rebuild the cached devices fragment from <Devices>...</Devices>
+		std::wstring devSection;
+		if (TryGetSection(section, L"Devices", devSection))
+		{
+			// Strip leading/trailing blank lines only (preserve indentation spaces)
+			size_t first = devSection.find_first_not_of(L"\r\n");
+			size_t last  = devSection.find_last_not_of(L"\r\n");
+			if (first != std::wstring::npos)
+				s_cachedAudioDevices = devSection.substr(first, last - first + 1) + L"\r\n";
+		}
 	}
 
 	// Parse a <AssignedMidi*s> section: each <Device>name</Device> child.
@@ -899,28 +994,7 @@ namespace
 				outputDevices += L"    <Device id=\"" + std::to_wstring(i) + L"\">" + std::wstring(outCaps.szPname) + L"</Device>\r\n";
 		}
 
-		// Resolve current device indices so we can store them as id attributes.
-		auto buildDeviceTag = [](const wchar_t* tag, const std::wstring& name, bool isOutput, bool enabled) -> std::wstring
-		{
-			UINT idx = 0;
-			bool found = false;
-			if (!name.empty())
-				found = isOutput ? FindMidiOutputDeviceIndex(name, idx) : FindMidiInputDeviceIndex(name, idx);
-			std::wstring s = L"      <";
-			s += tag;
-			if (found)
-				s += L" id=\"" + std::to_wstring(idx) + L"\"";
-			s += L" enabled=\"";
-			s += enabled ? L"1" : L"0";
-			s += L"\">";
-			s += name;
-			s += L"</";
-			s += tag;
-			s += L">\r\n";
-			return s;
-		};
-
-        std::wstring standbyOrgans;
+		std::wstring standbyOrgans;
         std::wstring installedOrgans;
 
         if (!bootstrapDefaults)
@@ -935,6 +1009,9 @@ namespace
 
             // Ensure Stream Deck settings are loaded (cached on first call).
             EnsureStreamDeckSettingsLoaded();
+
+            // Ensure audio settings are loaded (cached on first call).
+            EnsureAudioSettingsLoaded();
         }
 
         // Build the assigned device list sections and the actual Hauptwerk snapshot.
@@ -950,22 +1027,22 @@ namespace
 		std::wstring xml = L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
 			L"<Settings>\r\n"
 			L"  <Midi>\r\n"
-			L"    <SettingsDevices>\r\n"
-			+ buildDeviceTag(L"MidiInputDevice01", inputDeviceName, false, devEnabled.input1)
-				+ buildDeviceTag(L"MidiInputDevice02", input2DeviceName, false, devEnabled.input2)
-				+ buildDeviceTag(L"MidiOutputDevice01", outputDeviceName, true, devEnabled.output1)
-				+ buildDeviceTag(L"MidiOutputDevice02", output2DeviceName, true, devEnabled.output2) +
-			L"    </SettingsDevices>\r\n"
-			L"    <MidiRouterEnabled>" + std::to_wstring(routerEnabled ? 1 : 0) + L"</MidiRouterEnabled>\r\n"
+			L"    <MidiOptions>\r\n"
+			L"      <MidiRouterEnabled>" + std::to_wstring(routerEnabled ? 1 : 0) + L"</MidiRouterEnabled>\r\n"
+			L"    </MidiOptions>\r\n"
+			L"    <CurrentMidiInputDevices>\r\n"
+			L"    </CurrentMidiInputDevices>\r\n"
+			L"    <CurrentMidiOutputDevices>\r\n" + outputDevices +
+			L"    </CurrentMidiOutputDevices>\r\n"
+			L"    <AssignedMidiInputs>\r\n" + assignedInputSection +
+			L"    </AssignedMidiInputs>\r\n"
+			L"    <AssignedMidiOutputs>\r\n" + assignedOutputSection +
+			L"    </AssignedMidiOutputs>\r\n"
+			L"    <HauptwerkMidiInputsActual>\r\n" + actualHauptwerkInputSection +
+			L"    </HauptwerkMidiInputsActual>\r\n"
+			L"    <HauptwerkMidiOutputsActual>\r\n" + actualHauptwerkOutputSection +
+			L"    </HauptwerkMidiOutputsActual>\r\n"
 			L"  </Midi>\r\n"
-			L"  <AssignedMidiInputs>\r\n" + assignedInputSection +
-			L"  </AssignedMidiInputs>\r\n"
-			L"  <AssignedMidiOutputs>\r\n" + assignedOutputSection +
-			L"  </AssignedMidiOutputs>\r\n"
-            L"  <HauptwerkMidiInputsActual>\r\n" + actualHauptwerkInputSection +
-            L"  </HauptwerkMidiInputsActual>\r\n"
-            L"  <HauptwerkMidiOutputsActual>\r\n" + actualHauptwerkOutputSection +
-            L"  </HauptwerkMidiOutputsActual>\r\n"
 			L"  <Options>\r\n"
 			L"    <CloseSettingsOnDisconnect>" + std::to_wstring(closeSettingsOnDisconnect ? 1 : 0) + L"</CloseSettingsOnDisconnect>\r\n"
 			L"    <ShowDebugConsole>" + std::to_wstring(showDebugConsole ? 1 : 0) + L"</ShowDebugConsole>\r\n"
@@ -977,20 +1054,22 @@ namespace
 			L"    <RootFolder_HauptwerkSampleSetsAndComponents>" + s_rootHauptwerkSampleSets + L"</RootFolder_HauptwerkSampleSetsAndComponents>\r\n"
 			L"    <RootFolder_HauptwerkInternalWorkingFiles>" + s_rootHauptwerkWorkingFiles + L"</RootFolder_HauptwerkInternalWorkingFiles>\r\n"
 			L"  </Options>\r\n"
-			L"  <CurrentMidiInputDevices>\r\n" + inputDevices +
-			L"  </CurrentMidiInputDevices>\r\n"
-			L"  <CurrentMidiOutputDevices>\r\n" + outputDevices +
-			L"  </CurrentMidiOutputDevices>\r\n"
 			L"  <StandbyeOrgans>\r\n" + standbyOrgans +
 			L"  </StandbyeOrgans>\r\n"
 			L"  <InstalledOrgans>\r\n" + installedOrgans +
 			L"  </InstalledOrgans>\r\n"
 			L"  <StreamDeck>\r\n"
-			L"    <CC>" + s_cachedStreamDeckCC + L"</CC>\r\n"
-			L"    <MidiOut>" + s_cachedStreamDeckMidiOut + L"</MidiOut>\r\n"
-			L"    <MidiIn>" + s_cachedStreamDeckMidiIn + L"</MidiIn>\r\n"
-        L"    <FixedHauptwerkOutput>" + s_cachedFixedHauptwerkOutput + L"</FixedHauptwerkOutput>\r\n"
+				L"    <CC>" + s_cachedStreamDeckCC + L"</CC>\r\n"
+				L"    <MidiOut>" + s_cachedStreamDeckMidiOut + L"</MidiOut>\r\n"
+				L"    <MidiIn>" + s_cachedStreamDeckMidiIn + L"</MidiIn>\r\n"
+			L"    <FixedHauptwerkOutput>" + s_cachedFixedHauptwerkOutput + L"</FixedHauptwerkOutput>\r\n"
 			L"  </StreamDeck>\r\n"
+			L"  <Audio>\r\n"
+			L"    <AsioDevId>" + s_cachedAsioDevId + L"</AsioDevId>\r\n"
+			L"    <AsioDevName>" + s_cachedAsioDevName + L"</AsioDevName>\r\n"
+			L"    <Devices>\r\n" + s_cachedAudioDevices +
+			L"    </Devices>\r\n"
+			L"  </Audio>\r\n"
 			L"  <Organ_Info>\r\n"
 			L"  </Organ_Info>\r\n"
 			L"</Settings>\r\n";
@@ -1359,6 +1438,278 @@ bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
     return success;
 }
 
+bool WriteHauptwerkAudioConfig()
+{
+    // Resolve config file path
+    std::wstring userDataRoot = s_rootHauptwerkUserData;
+    if (userDataRoot.empty())
+    {
+        std::wstring xml;
+        if (TryReadSettingsXml(xml))
+        {
+            std::wstring opts;
+            if (TryGetSection(xml, L"Options", opts))
+                TryGetTagStringValue(opts, L"<RootFolder_HauptwerkUserData>",
+                                     L"</RootFolder_HauptwerkUserData>", userDataRoot);
+        }
+    }
+    if (userDataRoot.empty())
+    {
+        printf("[WriteHauptwerkAudioConfig] RootFolder_HauptwerkUserData not configured.\n");
+        return false;
+    }
+    if (!userDataRoot.empty() && (userDataRoot.back() == L'\\' || userDataRoot.back() == L'/'))
+        userDataRoot.pop_back();
+
+    std::wstring configPath = userDataRoot + L"\\Config0-GeneralSettings\\Config.Config_Hauptwerk_xml";
+
+    std::wstring hwXml = ReadFileToWString(configPath);
+    if (hwXml.empty())
+    {
+        printf("[WriteHauptwerkAudioConfig] Cannot read config: %S\n", configPath.c_str());
+        return false;
+    }
+
+    // Fixed content for AudioOutputSystem
+    const std::wstring kAudioSystemNodes =
+        L"\r\n<o><id>1</id><nam>Close</nam></o>"
+        L"\r\n<o><id>2</id><nam>Organist</nam></o>"
+        L"\r\n<o><id>3</id><nam>Diffuse</nam></o>"
+        L"\r\n<o><id>4</id><nam>Rear Surround</nam></o>"
+        L"\r\n<o><id>5</id><nam>Rear</nam></o>"
+        L"\r\n<o><id>6</id><nam>MultiChannels</nam></o>";
+
+    // Read all audio output devices from AudioOutputDevice section;
+    // also identify the first ASIO: device to use as <dev> in AudioOutputUnit.
+    std::wstring asioDevId, asioDevName;
+    {
+        const std::wstring kDevOpen = L"<ObjectList ObjectType=\"AudioOutputDevice\">";
+        size_t devSecStart = hwXml.find(kDevOpen);
+        if (devSecStart != std::wstring::npos)
+        {
+            size_t contentStart = devSecStart + kDevOpen.size();
+            size_t nextOL  = hwXml.find(L"<ObjectList", contentStart);
+            size_t closeOL = hwXml.find(L"</ObjectList>", contentStart);
+            size_t contentEnd;
+            if (closeOL != std::wstring::npos && (nextOL == std::wstring::npos || closeOL < nextOL))
+                contentEnd = closeOL;
+            else if (nextOL != std::wstring::npos)
+                contentEnd = nextOL;
+            else
+                contentEnd = hwXml.size();
+
+            std::wstring devSection = hwXml.substr(contentStart, contentEnd - contentStart);
+            std::wstring allDevFragment; // will be stored in s_cachedAudioDevices
+            size_t pos = 0;
+            while (pos < devSection.size())
+            {
+                size_t oStart = devSection.find(L"<o>", pos);
+                if (oStart == std::wstring::npos) break;
+                size_t oEnd = devSection.find(L"</o>", oStart);
+                if (oEnd == std::wstring::npos) break;
+                std::wstring node = devSection.substr(oStart + 3, oEnd - oStart - 3);
+                std::wstring nam, id;
+                TryGetTagStringValue(node, L"<nam>", L"</nam>", nam);
+                TryGetTagStringValue(node, L"<id>",  L"</id>",  id);
+
+                if (!id.empty() && !nam.empty())
+                {
+                    allDevFragment += L"      <Device id=\"" + id + L"\">" + nam + L"</Device>\r\n";
+                    printf("[WriteHauptwerkAudioConfig] AudioOutputDevice: id=%S nam=%S\n",
+                           id.c_str(), nam.c_str());
+
+                    // First ASIO: device becomes the <dev> for AudioOutputUnit
+                    if (asioDevId.empty() && nam.compare(0, 5, L"ASIO:") == 0)
+                    {
+                        asioDevId   = id;
+                        asioDevName = nam;
+                        printf("[WriteHauptwerkAudioConfig] Selected ASIO device: id=%S nam=%S\n",
+                               id.c_str(), nam.c_str());
+                    }
+                }
+                pos = oEnd + 4;
+            }
+
+            // Update cache
+            s_cachedAudioDevices  = allDevFragment;
+            s_cachedAsioDevId     = asioDevId;
+            s_cachedAsioDevName   = asioDevName;
+            s_audioSettingsLoaded = true;
+        }
+        if (asioDevId.empty())
+            printf("[WriteHauptwerkAudioConfig] Warning: no ASIO device found in AudioOutputDevice, <dev> will be empty.\n");
+    }
+
+    // Helper: build a single AudioOutputUnit <dev> tag with the resolved id
+    // For the active organ: if 2-channel use "Hauptwerk VST Link" device id; otherwise use ASIO device id.
+    // Look up the id that corresponds to the device name from AudioOutputDevice list.
+    auto resolveDeviceId = [&](const std::wstring& deviceName) -> std::wstring
+    {
+        if (deviceName.empty())
+            return asioDevId; // default
+
+        // Scan AudioOutputDevice section in hwXml to find matching id by name
+        const std::wstring kODOpen = L"<ObjectList ObjectType=\"AudioOutputDevice\">";
+        size_t odStart = hwXml.find(kODOpen);
+        if (odStart == std::wstring::npos)
+            return asioDevId;
+        size_t odEnd = hwXml.find(L"</ObjectList>", odStart);
+
+        size_t p = odStart;
+        while (true)
+        {
+            size_t oS = hwXml.find(L"<o>", p);
+            if (oS == std::wstring::npos || oS >= odEnd) break;
+            size_t oE = hwXml.find(L"</o>", oS);
+            if (oE == std::wstring::npos || oE > odEnd) break;
+            std::wstring node = hwXml.substr(oS + 3, oE - oS - 3);
+
+            // Extract <nam> value
+            std::wstring namVal;
+            size_t ns = node.find(L"<nam>");
+            if (ns != std::wstring::npos)
+            {
+                ns += 5;
+                size_t ne = node.find(L"</nam>", ns);
+                if (ne != std::wstring::npos)
+                    namVal = node.substr(ns, ne - ns);
+            }
+
+            if (namVal == deviceName)
+            {
+                // Extract <id> value
+                size_t is = node.find(L"<id>");
+                if (is != std::wstring::npos)
+                {
+                    is += 4;
+                    size_t ie = node.find(L"</id>", is);
+                    if (ie != std::wstring::npos)
+                        return node.substr(is, ie - is);
+                }
+            }
+            p = oE + 4;
+        }
+        return asioDevId; // fallback
+    };
+
+    // Determine active-organ device name: use per-organ assignment if available
+    std::wstring activeOrganDeviceName;
+    {
+        auto assignments = LoadOrganAudioAssignments();
+        // Pick the currently active organ from g_hauptwerkOrganTitle (or first in list)
+        if (!assignments.empty())
+        {
+            for (const auto& a : assignments)
+            {
+                if (!g_hauptwerkOrganTitle.empty() &&
+                    (a.displayName == g_hauptwerkOrganTitle || a.organName == g_hauptwerkOrganTitle))
+                {
+                    activeOrganDeviceName = a.audioDeviceName;
+                    break;
+                }
+            }
+            if (activeOrganDeviceName.empty())
+                activeOrganDeviceName = assignments[0].audioDeviceName;
+        }
+    }
+
+    std::wstring activeDevId = resolveDeviceId(activeOrganDeviceName);
+
+    // Helper: build a single AudioOutputUnit <dev> tag with the resolved id
+    auto devTag = [&]() -> std::wstring { return L"<dev>" + activeDevId + L"</dev>"; };
+
+    // Fixed content for AudioOutputUnit
+    std::wstring kAudioUnitNodes;
+    kAudioUnitNodes +=
+        L"\r\n<o><id>1</id>"  + devTag() + L"<typ>2</typ><ch1dvch>1</ch1dvch><ch2dvch>2</ch2dvch><bufsz>32</bufsz><recfmt>2</recfmt><nam>10). FRONT </nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>2</id>"  + devTag() + L"<typ>2</typ><ch1dvch>3</ch1dvch><ch2dvch>4</ch2dvch><bufsz>32</bufsz><recfmt>2</recfmt><nam>11). SIDE</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>3</id>"  + devTag() + L"<typ>2</typ><ch1dvch>7</ch1dvch><ch2dvch>8</ch2dvch><bufsz>32</bufsz><recfmt>2</recfmt><nam>13). REAR</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>4</id>"  + devTag() + L"<bufsz>32</bufsz><recfmt>2</recfmt><grp>1</grp><ax1out>1</ax1out><nam>A). Close</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>5</id>"  + devTag() + L"<bufsz>32</bufsz><recfmt>2</recfmt><grp>2</grp><ax1out>1</ax1out><nam>B). Organist</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>6</id>"  + devTag() + L"<bufsz>32</bufsz><recfmt>2</recfmt><grp>3</grp><ax1out>2</ax1out><nam>C). Diffuse</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>7</id>"  + devTag() + L"<bufsz>32</bufsz><recfmt>2</recfmt><grp>4</grp><ax1out>2</ax1out><nam>D). Rear Surround</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>8</id>"  + devTag() + L"<bufsz>32</bufsz><recfmt>2</recfmt><grp>5</grp><ax1out>3</ax1out><nam>E). Rear</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>9</id>"  + devTag() + L"<typ>2</typ><ch1dvch>5</ch1dvch><ch2dvch>6</ch2dvch><bufsz>32</bufsz><recfmt>2</recfmt><nam>12). REAR SURROUND</nam></o>";
+    kAudioUnitNodes +=
+        L"\r\n<o><id>10</id>" + devTag() + L"<bufsz>32</bufsz><recfmt>2</recfmt><grp>6</grp><ax1out>1</ax1out><ax2out>2</ax2out><ax3out>9</ax3out><ax4out>3</ax4out><nam>F). MultiChannels</nam></o>";
+
+    // Helper: clear all <o> children inside an ObjectList section and replace with newNodes
+    auto replaceAudioSection = [&](std::wstring& xml, const std::wstring& objectType,
+                                   const std::wstring& newNodes) -> bool
+    {
+        const std::wstring kOpen = L"<ObjectList ObjectType=\"" + objectType + L"\">";
+        size_t secStart = xml.find(kOpen);
+        if (secStart == std::wstring::npos)
+        {
+            printf("[WriteHauptwerkAudioConfig] Section '%S' not found.\n", objectType.c_str());
+            return false;
+        }
+        size_t contentStart = secStart + kOpen.size();
+        size_t nextOL  = xml.find(L"<ObjectList", contentStart);
+        size_t closeOL = xml.find(L"</ObjectList>", contentStart);
+        size_t contentEnd;
+        if (closeOL != std::wstring::npos && (nextOL == std::wstring::npos || closeOL < nextOL))
+            contentEnd = closeOL;
+        else if (nextOL != std::wstring::npos)
+            contentEnd = nextOL;
+        else
+            contentEnd = xml.size();
+
+        int oldCount = 0;
+        size_t p = contentStart;
+        while ((p = xml.find(L"<o>", p)) != std::wstring::npos && p < contentEnd) { ++oldCount; p += 3; }
+
+        int newCount = 0;
+        p = 0;
+        while ((p = newNodes.find(L"<o>", p)) != std::wstring::npos) { ++newCount; p += 3; }
+
+        printf("[WriteHauptwerkAudioConfig] Section '%S': removed %d old node(s), writing %d new node(s).\n",
+               objectType.c_str(), oldCount, newCount);
+
+        xml = xml.substr(0, contentStart) + newNodes + L"\r\n" + xml.substr(contentEnd);
+        return true;
+    };
+
+    if (!replaceAudioSection(hwXml, L"AudioOutputSystem", kAudioSystemNodes))
+        printf("[WriteHauptwerkAudioConfig] Warning: AudioOutputSystem not replaced.\n");
+    if (!replaceAudioSection(hwXml, L"AudioOutputUnit", kAudioUnitNodes))
+        printf("[WriteHauptwerkAudioConfig] Warning: AudioOutputUnit not replaced.\n");
+
+    // Write back as UTF-8
+    int utf8Size = WideCharToMultiByte(CP_UTF8, 0, hwXml.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Size <= 0)
+    {
+        printf("[WriteHauptwerkAudioConfig] UTF-8 conversion failed.\n");
+        return false;
+    }
+    std::string utf8(utf8Size - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, hwXml.c_str(), -1, utf8.data(), utf8Size, nullptr, nullptr);
+
+    HANDLE fh = CreateFileW(configPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE)
+    {
+        printf("[WriteHauptwerkAudioConfig] Cannot write config (error %lu).\n", GetLastError());
+        return false;
+    }
+    DWORD written = 0;
+    BOOL ok = WriteFile(fh, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(fh);
+    printf("[WriteHauptwerkAudioConfig] Written %lu bytes to %S\n", written, configPath.c_str());
+    bool success = ok != FALSE && written == static_cast<DWORD>(utf8.size());
+    if (success)
+        RefreshSettingsFile(); // persist <Audio> section to Settings.xml
+    return success;
+}
+
 bool SaveSelectedDeviceId(UINT deviceId)
 {
     std::wstring input2Name, outputName, output2Name;
@@ -1479,23 +1830,14 @@ bool SaveCloseSettingsOnDisconnect(bool enabled)
 
 bool LoadSelectedDeviceId(UINT& deviceId)
 {
-    std::wstring xml;
-    if (!TryReadSettingsXml(xml))
+    // "First launch" detection: we consider the app configured if at least
+    // one MIDI input device is assigned in <AssignedMidiInputs>.
+    EnsureAssignedDevicesLoaded();
+    if (s_assignedInputNames.empty())
         return false;
 
-    std::wstring midiSection;
-    if (!TryGetSection(xml, L"Midi", midiSection))
-        return false;
-
-    std::wstring devicesSection;
-    if (!TryGetSection(midiSection, L"SettingsDevices", devicesSection))
-        return false;
-
-    std::wstring name;
-    if (!TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", name))
-        return false;
-
-    return FindMidiInputDeviceIndex(name, deviceId);
+    // Return the system device index of the first assigned input, if found.
+    return FindMidiInputDeviceIndex(s_assignedInputNames[0], deviceId);
 }
 
 bool SaveSelectedInput2DeviceId(UINT deviceId)
@@ -1579,14 +1921,21 @@ bool LoadMidiRouterEnabled(bool& enabled)
     }
 
     UINT value = 0;
-    // Require the <Midi> section and the <MidiRouterEnabled> tag inside it.
+    // Require the <Midi> section, then <MidiOptions> inside it.
     std::wstring midiSection;
     if (!TryGetSection(xml, L"Midi", midiSection))
     {
         return false;
     }
 
-    if (!TryGetTagValue(midiSection, L"<MidiRouterEnabled>", L"</MidiRouterEnabled>", value))
+    std::wstring midiOptions;
+    if (!TryGetSection(midiSection, L"MidiOptions", midiOptions))
+    {
+        // fallback: old schema had <MidiRouterEnabled> directly under <Midi>
+        midiOptions = midiSection;
+    }
+
+    if (!TryGetTagValue(midiOptions, L"<MidiRouterEnabled>", L"</MidiRouterEnabled>", value))
     {
         return false;
     }
@@ -2507,7 +2856,8 @@ std::vector<std::wstring> LoadInstalledOrganNames()
     if (!TryGetSection(xml, L"InstalledOrgans", section))
         return names;
 
-    // Parse <Organ id="NN">name</Organ> entries.
+    // Parse <Organ id="NN">name ... </Organ> entries.
+    // The organ name is the text immediately after '>' and before the first '\r', '\n' or '<'.
     size_t pos = 0;
     while (true)
     {
@@ -2520,7 +2870,11 @@ std::vector<std::wstring> LoadInstalledOrganNames()
         size_t end = section.find(L"</Organ>", gt + 1);
         if (end == std::wstring::npos)
             break;
-        names.push_back(section.substr(gt + 1, end - gt - 1));
+        // Extract only the text portion (up to the first newline or '<' child element)
+        std::wstring inner = section.substr(gt + 1, end - gt - 1);
+        size_t nameEnd = inner.find_first_of(L"\r\n<");
+        std::wstring organName = (nameEnd != std::wstring::npos) ? inner.substr(0, nameEnd) : inner;
+        names.push_back(organName);
         pos = end + 8; // skip past "</Organ>"
     }
 
@@ -2965,3 +3319,365 @@ bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& 
     TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", midiIn);
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Organ audio assignment persistence
+// ---------------------------------------------------------------------------
+
+std::vector<OrganAudioAssignment> LoadOrganAudioAssignments()
+{
+    std::vector<OrganAudioAssignment> result;
+
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return result;
+
+    std::wstring orgSection;
+    if (!TryGetSection(xml, L"InstalledOrgans", orgSection))
+        return result;
+
+    // Read ASIO default device name for multi-channel fallback
+    std::wstring asioDevName;
+    std::wstring audioSection;
+    if (TryGetSection(xml, L"Audio", audioSection))
+        TryGetTagStringValue(audioSection, L"<AsioDevName>", L"</AsioDevName>", asioDevName);
+
+    // Parse each <Organ ...>name\n <o>...</o> ... </Organ>
+    size_t pos = 0;
+    while (true)
+    {
+        size_t oStart = orgSection.find(L"<Organ", pos);
+        if (oStart == std::wstring::npos) break;
+        size_t gt = orgSection.find(L'>', oStart);
+        if (gt == std::wstring::npos) break;
+        size_t oEnd = orgSection.find(L"</Organ>", gt + 1);
+        if (oEnd == std::wstring::npos) break;
+
+        std::wstring tagContent = orgSection.substr(oStart, gt - oStart);
+        std::wstring inner      = orgSection.substr(gt + 1, oEnd - gt - 1);
+
+        // organ internal name = text up to first \r\n or <
+        size_t nameEnd = inner.find_first_of(L"\r\n<");
+        std::wstring organName = (nameEnd != std::wstring::npos)
+                                 ? inner.substr(0, nameEnd) : inner;
+
+        // displayName attribute
+        std::wstring displayName;
+        {
+            const std::wstring kAttr = L"displayName=\"";
+            size_t da = tagContent.find(kAttr);
+            if (da != std::wstring::npos)
+            {
+                da += kAttr.size();
+                size_t de = tagContent.find(L'"', da);
+                if (de != std::wstring::npos)
+                    displayName = tagContent.substr(da, de - da);
+            }
+        }
+
+        // channels from <o><Number_Channels>N</Number_Channels></o>
+        int channels = 0;
+        {
+            std::wstring chTag = L"<Number_Channels>";
+            size_t ct = inner.find(chTag);
+            if (ct != std::wstring::npos)
+            {
+                ct += chTag.size();
+                size_t ce = inner.find(L"</Number_Channels>", ct);
+                if (ce != std::wstring::npos)
+                {
+                    std::wstring chStr = inner.substr(ct, ce - ct);
+                    if (!chStr.empty())
+                        channels = _wtoi(chStr.c_str());
+                }
+            }
+        }
+
+        // audio device from <o><Output_Device>name</Output_Device></o>
+        std::wstring audioDeviceName;
+        {
+            std::wstring odTag = L"<Output_Device>";
+            size_t ot = inner.find(odTag);
+            if (ot != std::wstring::npos)
+            {
+                ot += odTag.size();
+                size_t oe = inner.find(L"</Output_Device>", ot);
+                if (oe != std::wstring::npos)
+                    audioDeviceName = inner.substr(ot, oe - ot);
+            }
+        }
+
+        // Auto-fill if empty
+        if (audioDeviceName.empty())
+        {
+            if (channels == 2)
+                audioDeviceName = L"Hauptwerk VST Link";
+            else if (channels > 2 && !asioDevName.empty())
+                audioDeviceName = asioDevName;
+        }
+
+        OrganAudioAssignment a;
+        a.organName      = organName;
+        a.displayName    = displayName;
+        a.channels       = channels;
+        a.audioDeviceName = audioDeviceName;
+        result.push_back(std::move(a));
+
+        pos = oEnd + 8;
+    }
+
+    return result;
+}
+
+bool SaveOrganAudioAssignment(const std::wstring& organName,
+                               const std::wstring& audioDeviceName)
+{
+    // Re-scan organs to get fresh data, update the matching entry, persist.
+    // We rely on ReadHauptwerkInstalledOrgans writing the new Output_Device
+    // into s_cachedInstalledOrgans via a targeted in-memory edit.
+
+    // Load current raw installed organs XML fragment from settings
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring orgSection;
+    if (!TryGetSection(xml, L"InstalledOrgans", orgSection))
+        return false;
+
+    std::wstring updated = orgSection;
+
+    // Find the <Organ ...>organName\n ... </Organ> block and replace its <Output_Device>
+    size_t pos = 0;
+    bool found = false;
+    while (true)
+    {
+        size_t oStart = updated.find(L"<Organ", pos);
+        if (oStart == std::wstring::npos) break;
+        size_t gt = updated.find(L'>', oStart);
+        if (gt == std::wstring::npos) break;
+        size_t oEnd = updated.find(L"</Organ>", gt + 1);
+        if (oEnd == std::wstring::npos) break;
+
+        std::wstring inner = updated.substr(gt + 1, oEnd - gt - 1);
+        size_t nameEnd = inner.find_first_of(L"\r\n<");
+        std::wstring thisName = (nameEnd != std::wstring::npos) ? inner.substr(0, nameEnd) : inner;
+
+        if (thisName == organName)
+        {
+            // Replace <Output_Device>old</Output_Device> inside inner
+            const std::wstring kODStart = L"<Output_Device>";
+            const std::wstring kODEnd   = L"</Output_Device>";
+            size_t odS = inner.find(kODStart);
+            size_t odE = (odS != std::wstring::npos) ? inner.find(kODEnd, odS) : std::wstring::npos;
+
+            if (odS != std::wstring::npos && odE != std::wstring::npos)
+            {
+                inner.replace(odS + kODStart.size(), odE - odS - kODStart.size(), audioDeviceName);
+            }
+            // Rebuild the block
+            updated.replace(gt + 1, oEnd - gt - 1, inner);
+            found = true;
+            break;
+        }
+
+        pos = oEnd + 8;
+    }
+
+    if (!found)
+        return false;
+
+    // Patch s_cachedInstalledOrgans so WriteSettingsXml uses the new value
+    {
+        // Replace InstalledOrgans section content in full xml
+        const std::wstring kOpen  = L"<InstalledOrgans>";
+        const std::wstring kClose = L"</InstalledOrgans>";
+        size_t secS = xml.find(kOpen);
+        size_t secE = (secS != std::wstring::npos) ? xml.find(kClose, secS) : std::wstring::npos;
+        if (secS != std::wstring::npos && secE != std::wstring::npos)
+        {
+            secS += kOpen.size();
+            xml.replace(secS, secE - secS, L"\r\n" + updated);
+        }
+    }
+
+    // Force s_cachedInstalledOrgans to the new value so RefreshSettingsFile persists it
+    SetCachedInstalledOrgans(updated);
+    RefreshSettingsFile();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// NeedsAudioConfigChange
+// ---------------------------------------------------------------------------
+bool NeedsAudioConfigChange(const std::wstring& organName)
+{
+    // 1. Resolve Hauptwerk user-data root
+    std::wstring userDataRoot;
+    {
+        std::wstring settingsXml;
+        if (TryReadSettingsXml(settingsXml))
+        {
+            std::wstring hwSection;
+            if (TryGetSection(settingsXml, L"Hauptwerk", hwSection))
+                TryGetTagStringValue(hwSection, L"<RootFolder_HauptwerkUserData>",
+                                     L"</RootFolder_HauptwerkUserData>", userDataRoot);
+            if (userDataRoot.empty())
+            {
+                std::wstring opts;
+                if (TryGetSection(settingsXml, L"Options", opts))
+                    TryGetTagStringValue(opts, L"<RootFolder_HauptwerkUserData>",
+                                         L"</RootFolder_HauptwerkUserData>", userDataRoot);
+            }
+        }
+    }
+    if (userDataRoot.empty()) return false;
+    if (!userDataRoot.empty() && (userDataRoot.back() == L'\\' || userDataRoot.back() == L'/'))
+        userDataRoot.pop_back();
+
+    std::wstring configPath = userDataRoot + L"\\Config0-GeneralSettings\\Config.Config_Hauptwerk_xml";
+    std::wstring hwXml = ReadFileToWString(configPath);
+    if (hwXml.empty()) return false;
+
+    // 2. Read the first <dev> in AudioOutputUnit
+    std::wstring currentDevId;
+    {
+        const std::wstring kOpen = L"<ObjectList ObjectType=\"AudioOutputUnit\">";
+        size_t sec = hwXml.find(kOpen);
+        if (sec == std::wstring::npos) return false;
+        size_t oS = hwXml.find(L"<o>", sec);
+        if (oS == std::wstring::npos) return false;
+        size_t oE = hwXml.find(L"</o>", oS);
+        if (oE == std::wstring::npos) return false;
+        std::wstring firstNode = hwXml.substr(oS + 3, oE - oS - 3);
+        size_t ds = firstNode.find(L"<dev>");
+        if (ds != std::wstring::npos)
+        {
+            ds += 5;
+            size_t de = firstNode.find(L"</dev>", ds);
+            if (de != std::wstring::npos)
+                currentDevId = firstNode.substr(ds, de - ds);
+        }
+    }
+
+    // 3. Determine what device id would be required for this organ
+    std::wstring requiredDeviceName;
+    {
+        auto assignments = LoadOrganAudioAssignments();
+        for (const auto& a : assignments)
+        {
+            if (a.displayName == organName || a.organName == organName)
+            {
+                requiredDeviceName = a.audioDeviceName;
+                break;
+            }
+        }
+        if (requiredDeviceName.empty())
+            return false;
+    }
+
+    std::wstring requiredDevId;
+    {
+        const std::wstring kODOpen = L"<ObjectList ObjectType=\"AudioOutputDevice\">";
+        size_t odStart = hwXml.find(kODOpen);
+        if (odStart == std::wstring::npos) return false;
+        size_t odEnd = hwXml.find(L"</ObjectList>", odStart);
+        size_t p = odStart;
+        while (true)
+        {
+            size_t oS = hwXml.find(L"<o>", p);
+            if (oS == std::wstring::npos || oS >= odEnd) break;
+            size_t oE = hwXml.find(L"</o>", oS);
+            if (oE == std::wstring::npos || oE > odEnd) break;
+            std::wstring node = hwXml.substr(oS + 3, oE - oS - 3);
+            std::wstring namVal;
+            size_t ns = node.find(L"<nam>");
+            if (ns != std::wstring::npos) { ns += 5; size_t ne = node.find(L"</nam>", ns); if (ne != std::wstring::npos) namVal = node.substr(ns, ne - ns); }
+            if (namVal == requiredDeviceName)
+            {
+                size_t is = node.find(L"<id>");
+                if (is != std::wstring::npos) { is += 4; size_t ie = node.find(L"</id>", is); if (ie != std::wstring::npos) requiredDevId = node.substr(is, ie - is); }
+                break;
+            }
+            p = oE + 4;
+        }
+        if (requiredDevId.empty()) return false;
+    }
+
+    bool needsChange = (currentDevId != requiredDevId);
+    printf("[NeedsAudioConfigChange] organ='%S' currentDev='%S' requiredDev='%S' -> %s\n",
+           organName.c_str(), currentDevId.c_str(), requiredDevId.c_str(),
+           needsChange ? "RESTART NEEDED" : "OK");
+    return needsChange;
+}
+
+bool ApplyAutoOrganAudioAssignments()
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring asioDevName;
+    std::wstring audioSection;
+    if (TryGetSection(xml, L"Audio", audioSection))
+        TryGetTagStringValue(audioSection, L"<AsioDevName>", L"</AsioDevName>", asioDevName);
+
+    std::wstring orgSection;
+    if (!TryGetSection(xml, L"InstalledOrgans", orgSection))
+        return false;
+
+    std::wstring updated = orgSection;
+    size_t pos = 0;
+    while (true)
+    {
+        size_t oStart = updated.find(L"<Organ", pos);
+        if (oStart == std::wstring::npos) break;
+        size_t gt = updated.find(L'>', oStart);
+        if (gt == std::wstring::npos) break;
+        size_t oEnd = updated.find(L"</Organ>", gt + 1);
+        if (oEnd == std::wstring::npos) break;
+
+        std::wstring inner = updated.substr(gt + 1, oEnd - gt - 1);
+
+        int channels = 0;
+        {
+            std::wstring chTag = L"<Number_Channels>";
+            size_t ct = inner.find(chTag);
+            if (ct != std::wstring::npos)
+            {
+                ct += chTag.size();
+                size_t ce = inner.find(L"</Number_Channels>", ct);
+                if (ce != std::wstring::npos)
+                {
+                    std::wstring s = inner.substr(ct, ce - ct);
+                    if (!s.empty()) channels = _wtoi(s.c_str());
+                }
+            }
+        }
+
+        std::wstring autoDevice;
+        if (channels == 2)
+            autoDevice = L"Hauptwerk VST Link";
+        else if (!asioDevName.empty())
+            autoDevice = asioDevName;
+
+        if (!autoDevice.empty())
+        {
+            const std::wstring kODStart = L"<Output_Device>";
+            const std::wstring kODEnd   = L"</Output_Device>";
+            size_t odS = inner.find(kODStart);
+            size_t odE = (odS != std::wstring::npos) ? inner.find(kODEnd, odS) : std::wstring::npos;
+            if (odS != std::wstring::npos && odE != std::wstring::npos)
+                inner.replace(odS + kODStart.size(), odE - odS - kODStart.size(), autoDevice);
+            updated.replace(gt + 1, oEnd - gt - 1, inner);
+            oEnd = updated.find(L"</Organ>", gt + 1);
+        }
+
+        pos = (oEnd != std::wstring::npos) ? oEnd + 8 : updated.size();
+    }
+
+    SetCachedInstalledOrgans(updated);
+    RefreshSettingsFile();
+    return true;
+}
+

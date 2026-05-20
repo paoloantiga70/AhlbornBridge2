@@ -8,6 +8,7 @@ constexpr UINT ID_TRAY_EXIT = 1002;
 constexpr UINT ID_TRAY_UPDATE = 1003;
 constexpr UINT ID_TRAY_TOGGLE_CONSOLE  = 1004;
 constexpr UINT ID_TRAY_MIDI_ASSIGN     = 1005;
+constexpr UINT ID_TRAY_TOGGLE_ACTIVE_SENSING = 1006;
 
 
 bool CreateTrayIcon(HINSTANCE hInstance, HWND hWnd);

@@ -4,6 +4,29 @@
 #include <string>
 #include <vector>
 
+// Per-organ audio output assignment
+struct OrganAudioAssignment
+{
+    std::wstring organName;       // internal name (filename without suffix)
+    std::wstring displayName;     // human-readable name from organ definition
+    int          channels = 0;    // Number_Channels (0 = unknown)
+    std::wstring audioDeviceName; // assigned audio output device name
+};
+
+// Load all organ audio assignments from <InstalledOrgans> in Settings.xml.
+// For each organ whose <Output_Device> is empty, auto-fills based on channels:
+//   channels == 2  -> "Hauptwerk VST Link"
+//   channels  > 2  -> first ASIO device from <Audio><AsioDevName>
+std::vector<OrganAudioAssignment> LoadOrganAudioAssignments();
+
+// Save the audio device assignment for a single organ back to Settings.xml.
+bool SaveOrganAudioAssignment(const std::wstring& organName,
+                               const std::wstring& audioDeviceName);
+
+// Apply automatic audio device assignment for ALL organs (overwrites existing)
+// and persist to Settings.xml.
+bool ApplyAutoOrganAudioAssignments();
+
 // ---------- Dynamic multi-device assignment (new API) ----------
 // Load/save ordered lists of assigned device names for inputs and outputs.
 std::vector<std::wstring> LoadAssignedMidiInputNames();
@@ -20,6 +43,13 @@ std::wstring LoadFixedHauptwerkOutputName();
 // Returns true if the file was written successfully.
 bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
                               const std::vector<std::wstring>& outputNames);
+
+// Configure AudioOutputSystem and AudioOutputUnit sections in the Hauptwerk
+// Config.Config_Hauptwerk_xml with the fixed preset for this installation.
+// Called once on first install after MIDI device detection.
+// The <dev> field in AudioOutputUnit entries is left empty and must be
+// filled later when the audio device ID is known.
+bool WriteHauptwerkAudioConfig();
 
 // ---------- Legacy wrappers (kept for backward compat) ----------
 bool SaveSelectedDeviceId(UINT deviceId);
@@ -93,3 +123,9 @@ bool SaveMidiOutput2DeviceEnabled(bool enabled);
 
 bool SaveStreamDeckSettings(int ccNumber, const std::wstring& midiOut, const std::wstring& midiIn);
 bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& midiIn);
+
+// Returns true if the AudioOutputUnit <dev> currently written in the Hauptwerk
+// Config.Config_Hauptwerk_xml differs from the device required by organName.
+// organName must match the displayName or organName in InstalledOrgans.
+// If no assignment is found for the organ the function returns false (no change needed).
+bool NeedsAudioConfigChange(const std::wstring& organName);
