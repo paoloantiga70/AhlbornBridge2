@@ -23,6 +23,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 void ShowAhlbornStartedSplash();
 // Show a fade-out splash window with ahlborn_closed.png for a few seconds.
 void ShowAhlbornClosedSplash();
+// Show a short text splash while Hauptwerk is restarting after an audio-device change.
+void ShowHauptwerkRestartSplash(const wchar_t* deviceName);
+// Update the restart splash progress (0..100) while Hauptwerk restart steps complete.
+void UpdateHauptwerkRestartSplashProgress(int percent);
+// Close the restart splash when Hauptwerk is ready again or the restart fails.
+void CloseHauptwerkRestartSplash();
 bool UpdateTrayIconFromFile(const wchar_t* iconPath);
 bool UpdateTrayIconTooltip(const wchar_t* tooltip);
 void CloseSettingsWindowIfAutoClose();

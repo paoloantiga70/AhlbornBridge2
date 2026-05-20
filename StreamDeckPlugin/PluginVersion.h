@@ -8,8 +8,8 @@
 // ---------------------------------------------------------------
 #define PLUGIN_VERSION_MAJOR 1
 #define PLUGIN_VERSION_MINOR 0
-#define PLUGIN_VERSION_PATCH 304
-#define PLUGIN_VERSION "1.0.304"
+#define PLUGIN_VERSION_PATCH 404
+#define PLUGIN_VERSION "1.0.404"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

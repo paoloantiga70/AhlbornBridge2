@@ -11,9 +11,6 @@
 #include <shlobj.h>
 #include <knownfolders.h>
 
-// Forward declaration (defined later in this file)
-void CloseHauptwerkProcess();
-
 HMIDIIN hMidiIn = nullptr;
 HMIDIIN hMidiIn2 = nullptr;
 HMIDIOUT hMidiOut = nullptr;
@@ -59,6 +56,8 @@ std::atomic<int> g_currentLoadedFavoriteIndex{ 0 };
 std::atomic<int> g_currentLoadedInstalledOrganIndex{ 0 };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
 std::wstring g_hauptwerkOrganTitle;
+
+void CloseHauptwerkProcess();
 
 namespace
 {
@@ -375,61 +374,106 @@ namespace
 						int idx = g_pendingInstalledOrganIndex.load();
 						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
 
-						if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
-						{
-							printf("[Deferred] Hauptwerk is not running - starting it before organ load.\n");
-							LaunchHauptwerkAndDismissWelcome();
+                        if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+                        {
+                            printf("[Deferred] Hauptwerk is not running - starting it before organ load.\n");
+                            LaunchHauptwerkAndDismissWelcome();
 
-							if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
-							{
-								printf("[Deferred] Hauptwerk could not be started or main window not detected.\n");
-								break;
-							}
-						}
+                            if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+                            {
+                                printf("[Deferred] Hauptwerk could not be started or main window not detected.\n");
+                                break;
+                            }
+                        }
 
-						if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 15000))
-						{
-							printf("[Deferred] Hauptwerk started but menu 'Organ' is not ready yet.\n");
-							break;
-						}
+                        if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 15000))
+                        {
+                            printf("[Deferred] Hauptwerk started but menu 'Organ' is not ready yet.\n");
+                            break;
+                        }
 
 						std::vector<std::wstring> names = LoadInstalledOrganNames();
 						if (idx >= 1 && idx <= static_cast<int>(names.size()) && !names[idx - 1].empty())
 						{
 							const std::wstring& name = names[idx - 1];
-							printf("[Deferred] Organ name: %S\n", name.c_str());
+                        printf("[AudioPreload] Organ name: %S (index=%d)\n", name.c_str(), idx);
 
-							// Check if audio config needs to change before loading
-							if (NeedsAudioConfigChange(name))
-							{
-								printf("[Deferred] Audio device mismatch for organ '%S' — updating config and restarting Hauptwerk.\n", name.c_str());
-								g_hauptwerkOrganTitle = name;
-								WriteHauptwerkAudioConfig();
+                        std::vector<InstalledOrganInfo> organInfos = LoadInstalledOrganInfos();
+                        if (idx >= 1 && idx <= static_cast<int>(organInfos.size()))
+                        {
+                            const auto& organInfo = organInfos[idx - 1];
+                            printf("[AudioPreload] Organ metadata: id=%S uniqueId=%S channels=%d outputDeviceId=%S\n",
+                                organInfo.id.c_str(),
+                                organInfo.uniqueOrganId.c_str(),
+                                organInfo.numberChannels,
+                                organInfo.outputDeviceId.c_str());
+                            if (!organInfo.outputDeviceId.empty())
+                            {
+                                printf("[AudioPreload] Checking AudioOutputUnit dev=%S for organ UniqueID=%S\n",
+                                    organInfo.outputDeviceId.c_str(), organInfo.uniqueOrganId.c_str());
+                                if (!IsHauptwerkAudioOutputDeviceIdAligned(organInfo.outputDeviceId))
+                                {
+                                    std::wstring outputDeviceName;
+                                    std::vector<AudioDeviceInfo> audioDevices = LoadAudioOutputDevices();
+                                    for (const auto& audioDevice : audioDevices)
+                                    {
+                                        if (audioDevice.id == organInfo.outputDeviceId)
+                                        {
+                                            outputDeviceName = audioDevice.name;
+                                            break;
+                                        }
+                                    }
 
-								// Close Hauptwerk and wait for it to exit
-								CloseHauptwerkProcess();
-								printf("[Deferred] Waiting for Hauptwerk to exit...\n");
-								for (int w = 0; w < 50 && IsProcessRunningByName(L"Hauptwerk.exe"); ++w)
-									Sleep(200);
+                                    printf("[AudioPreload] Audio config is not aligned. Closing Hauptwerk before rewriting config...\n");
+                                    ShowHauptwerkRestartSplash(outputDeviceName.c_str());
+                                    UpdateHauptwerkRestartSplashProgress(10);
+                                    CloseHauptwerkProcess();
+                                    UpdateHauptwerkRestartSplashProgress(30);
 
-								// Relaunch Hauptwerk
-								printf("[Deferred] Relaunching Hauptwerk...\n");
-								LaunchHauptwerkAndDismissWelcome();
-								if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
-								{
-									printf("[Deferred] Hauptwerk could not be relaunched.\n");
-									break;
-								}
-								if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 20000))
-								{
-									printf("[Deferred] Hauptwerk relaunched but menu 'Organ' is not ready.\n");
-									break;
-								}
-							}
-							else
-							{
-								printf("[Deferred] Audio device already correct for organ '%S' — no restart needed.\n", name.c_str());
-							}
+                                    bool audioConfigChanged = false;
+                                    if (!EnsureHauptwerkAudioOutputDeviceId(organInfo.outputDeviceId, &audioConfigChanged))
+                                    {
+                                        CloseHauptwerkRestartSplash();
+                                        printf("[AudioPreload] Warning: failed to update AudioOutputUnit dev after closing Hauptwerk.\n");
+                                        break;
+                                    }
+                                    UpdateHauptwerkRestartSplashProgress(50);
+
+                                    printf("[AudioPreload] Relaunching Hauptwerk after audio config rewrite...\n");
+                                    LaunchHauptwerkAndDismissWelcome();
+                                    UpdateHauptwerkRestartSplashProgress(80);
+
+                                    if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
+                                    {
+                                        CloseHauptwerkRestartSplash();
+                                        printf("[AudioPreload] Hauptwerk could not be restarted after audio config change.\n");
+                                        break;
+                                    }
+
+                                    if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 15000))
+                                    {
+                                        CloseHauptwerkRestartSplash();
+                                        printf("[AudioPreload] Restarted Hauptwerk but menu 'Organ' is not ready yet.\n");
+                                        break;
+                                    }
+                                    UpdateHauptwerkRestartSplashProgress(100);
+                                    CloseHauptwerkRestartSplash();
+                                }
+                                else
+                                {
+                                    printf("[AudioPreload] Audio config already aligned for this organ. No restart needed.\n");
+                                }
+                            }
+                            else
+                            {
+                                printf("[AudioPreload] Organ has empty Output_Device. Audio pre-load alignment skipped.\n");
+                            }
+                        }
+                        else
+                        {
+                            printf("[AudioPreload] Installed organ metadata index %d not found (list size=%zu).\n",
+                                idx, organInfos.size());
+                        }
 
 							if (!LoadOrganByName(g_hauptwerkMainWindow, name))
 							{
@@ -452,43 +496,6 @@ namespace
 					{
 						int organIdx = static_cast<int>(cmdVal - base) + 1;
 						printf("[Deferred] Loading favorite organ %d...\n", organIdx);
-
-						// Pre-set the organ title from the standby list and check audio config
-						std::vector<std::wstring> standbyNames = LoadStandbyOrganNames();
-						if (organIdx >= 1 && organIdx <= static_cast<int>(standbyNames.size()) && !standbyNames[organIdx - 1].empty())
-						{
-							const std::wstring& favName = standbyNames[organIdx - 1];
-
-							if (NeedsAudioConfigChange(favName))
-							{
-								printf("[Deferred] Audio device mismatch for favorite organ '%S' — updating config and restarting Hauptwerk.\n", favName.c_str());
-								g_hauptwerkOrganTitle = favName;
-								WriteHauptwerkAudioConfig();
-
-								CloseHauptwerkProcess();
-								printf("[Deferred] Waiting for Hauptwerk to exit...\n");
-								for (int w = 0; w < 50 && IsProcessRunningByName(L"Hauptwerk.exe"); ++w)
-									Sleep(200);
-
-								printf("[Deferred] Relaunching Hauptwerk...\n");
-								LaunchHauptwerkAndDismissWelcome();
-								if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
-								{
-									printf("[Deferred] Hauptwerk could not be relaunched.\n");
-									break;
-								}
-								if (!WaitForMenuBarItem(g_hauptwerkMainWindow.load(), L"Organ", 20000))
-								{
-									printf("[Deferred] Hauptwerk relaunched but menu 'Organ' is not ready.\n");
-									break;
-								}
-							}
-							else
-							{
-								printf("[Deferred] Audio device already correct for favorite organ '%S' — no restart needed.\n", favName.c_str());
-							}
-						}
-
 						std::wstring label = std::to_wstring(organIdx) + L": ";
 						if (!ClickMenuPath(g_hauptwerkMainWindow,
 							{ L"Organ", L"Load favorite organ", label.c_str() }))
@@ -573,6 +580,7 @@ namespace
     std::atomic<bool> g_trayFlashFromFe{ false };
     std::atomic<bool> g_pendingOrganLoad{ false };
     std::atomic<bool> g_organLoadCancelled{ false };
+    std::atomic<int> g_pendingManualRerouteInstalledOrganIndex{ 0 };
     HANDLE g_trayFlashThread = nullptr;
     HANDLE g_hauptwerkTitleMonitorThread = nullptr;
     HANDLE g_organLoadingWatchThread = nullptr;
@@ -597,7 +605,38 @@ namespace
             ++start;
         }
 
-        return std::wstring(start);
+        std::wstring title(start);
+        size_t suffixPos = title.rfind(L" [");
+        if (suffixPos != std::wstring::npos && !title.empty() && title.back() == L']')
+            title = title.substr(0, suffixPos);
+
+        while (!title.empty() && (title.back() == L' ' || title.back() == L'\t'))
+            title.pop_back();
+
+        return title;
+    }
+
+    std::wstring GetInstalledOrganOutputDeviceName(int installedOrganIndex)
+    {
+        if (installedOrganIndex <= 0)
+            return {};
+
+        std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+        if (installedOrganIndex > static_cast<int>(organs.size()))
+            return {};
+
+        const std::wstring& outputDeviceId = organs[installedOrganIndex - 1].outputDeviceId;
+        if (outputDeviceId.empty())
+            return {};
+
+        std::vector<AudioDeviceInfo> devices = LoadAudioOutputDevices();
+        for (const auto& device : devices)
+        {
+            if (device.id == outputDeviceId)
+                return device.name;
+        }
+
+        return {};
     }
 
     // Choose the appropriate standby icon based on the current device state.
@@ -832,6 +871,15 @@ namespace
                     NotifyOrganInfoTitleChanged();
                     g_trayIconImageStatus = TrayIconImageStatus::Online;
                 }
+
+                std::wstring cleanOrganTitle = ExtractOrganTitle(title);
+                std::wstring outputDeviceName = GetInstalledOrganOutputDeviceName(g_currentLoadedInstalledOrganIndex.load());
+                if (!cleanOrganTitle.empty() && !outputDeviceName.empty())
+                {
+                    std::wstring desiredTitle = L"Hauptwerk - " + cleanOrganTitle + L" [" + outputDeviceName + L"]";
+                    if (desiredTitle != title)
+                        SetWindowTextW(mainWindow, desiredTitle.c_str());
+                }
             }
 
             lastDeviceState = currentDeviceState;
@@ -993,11 +1041,13 @@ namespace
         HWND hLastLoadingWnd = nullptr;
         bool titleExtracted = false;
         bool cancelDetected = false;
+        bool reroutedManualLoad = false;
         while (running)
         {
             HWND hWnd = FindWindowW(nullptr, L"Loading organ");
-            bool loading = (hWnd != nullptr && IsWindow(hWnd));
-            if (loading)
+            bool loadingWindowExists = (hWnd != nullptr && IsWindow(hWnd));
+            bool loading = (loadingWindowExists && IsWindowVisible(hWnd));
+            if (loadingWindowExists)
             {
                 hLastLoadingWnd = hWnd;
 
@@ -1018,6 +1068,7 @@ namespace
                         g_organLoadCancelled = true;
                         SendUnloadOrganMidiMessage();
                         printf("[OrganLoadingWatch] CANCEL confirmed (isOrganLoaded=%d)\n", (int)organLoaded);
+
                     }
                     else
                     {
@@ -1027,7 +1078,7 @@ namespace
                 }
 
                 // While loading, try to extract the organ title early.
-                if (!titleExtracted)
+                if (loading && !titleExtracted)
                 {
                     std::wstring title = TryExtractOrganTitleFromLoadingWindow(hWnd);
                     if (!title.empty())
@@ -1065,6 +1116,18 @@ namespace
                         {
                             if (!installedNames[iidx].empty() && title == installedNames[iidx])
                             {
+                                if (!g_pendingOrganLoad.load() && !reroutedManualLoad)
+                                {
+                                    reroutedManualLoad = true;
+                                    printf("[AudioPreload] Manual organ load detected: %S (index=%d). Cancelling and rerouting through deferred preload flow.\n",
+                                        installedNames[iidx].c_str(), iidx + 1);
+                                    g_pendingManualRerouteInstalledOrganIndex.store(iidx + 1);
+                                    PostMessageW(hWnd, WM_KEYDOWN, VK_RETURN, 0);
+                                    PostMessageW(hWnd, WM_KEYUP, VK_RETURN, 0);
+                                    printf("[AudioPreload] Manual organ load marked for reroute after cancel confirmation (index=%d).\n", iidx + 1);
+                                    break;
+                                }
+
                                 printf("[OrganLoadingWatch] MATCH InstalledOrgan %d: %S\n",
                                     iidx + 1, installedNames[iidx].c_str());
 
@@ -1088,12 +1151,12 @@ namespace
             {
                 if (!loading)
                     {
-                        printf("[OrganLoadingWatch] Window destroyed (HWND=%p, cancelDetected=%d)\n",
+                        printf("[OrganLoadingWatch] Window no longer visible (HWND=%p, cancelDetected=%d)\n",
                             (void*)hLastLoadingWnd, (int)cancelDetected);
 
                         if (!cancelDetected)
                         {
-                            // Window was destroyed without becoming invisible first.
+                            // Window stopped being visible without the explicit cancel path.
                             // Wait and verify as fallback.
                             printf("[OrganLoadingWatch] Fallback: waiting 1s to verify outcome...\n");
                             Sleep(1000);
@@ -1108,18 +1171,47 @@ namespace
                             {
                                 SendUnloadOrganMidiMessage();
                                 printf("[OrganLoadingWatch] Cancel notification sent\n");
+
+                                int rerouteIndex = g_pendingManualRerouteInstalledOrganIndex.exchange(0);
+                                if (rerouteIndex > 0)
+                                {
+                                    printf("[AudioPreload] Fallback cancel confirmed. Requeueing installed organ %d via deferred preload flow.\n", rerouteIndex);
+                                    EnqueueLoadInstalledOrgan(rerouteIndex);
+                                }
+                            }
+                            else
+                            {
+                                g_pendingManualRerouteInstalledOrganIndex.store(0);
+                            }
+                        }
+                        else
+                        {
+                            if (g_organLoadCancelled.load())
+                            {
+                                int rerouteIndex = g_pendingManualRerouteInstalledOrganIndex.exchange(0);
+                                if (rerouteIndex > 0)
+                                {
+                                    printf("[AudioPreload] Cancelled loading window is no longer visible. Requeueing installed organ %d via deferred preload flow.\n", rerouteIndex);
+                                    EnqueueLoadInstalledOrgan(rerouteIndex);
+                                }
+                            }
+                            else
+                            {
+                                g_pendingManualRerouteInstalledOrganIndex.store(0);
                             }
                         }
 
                         hLastLoadingWnd = nullptr;
                         titleExtracted = false;
                         cancelDetected = false;
+                        reroutedManualLoad = false;
                     }
                 else
                 {
                     printf("[OrganLoadingWatch] Loading organ started (HWND=%p)\n", (void*)hWnd);
                     g_organLoadCancelled = false;
                     cancelDetected = false;
+                    reroutedManualLoad = false;
                 }
                 wasLoading = loading;
             }
