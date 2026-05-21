@@ -7,6 +7,7 @@
 - Use a Hauptwerk-style Win32 classic preferences UI with tabs for the Settings window instead of the current simple dialog.
 - Allow restructuring sections and adding new preferences within the Settings UI.
 - Implement the redesign incrementally, starting with a first "Model" tab.
+- For Bidule integration, use a dedicated Settings tab, auto-detect the executable with file-picker fallback, and close Bidule automatically when an organ is unloaded.
 
 ## MIDI Device Configuration
 - Use a separate window for MIDI device configuration.
@@ -22,4 +23,4 @@
 - Keep EnabledMIDIInputPort fixed to the AhlbornBridge Virtual Port (B); do not replace or remove this virtual input mapping when configuring Hauptwerk outputs.
 - Exclude bridge/virtual ports (for example, AhlbornBridge Virtual Port) from being written into Hauptwerk's EnabledMIDIOutputPort list; the bridge port must never be added there.
 - Do not automatically add input devices that are manually assigned later to the Hauptwerk outputs.
-- Allow users to remove or reassign the auto-included device from the Hauptwerk outputs via the configuration UI; reflect changes in persisted Settings.xml
+- Allow users to remove or reassign the auto-included device from the Hauptwerk outputs via the configuration UI; reflect changes in persisted Settings.xml.

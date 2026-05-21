@@ -11,6 +11,7 @@ struct InstalledOrganInfo
     std::wstring name;
     std::wstring uniqueOrganId;
     std::wstring outputDeviceId;
+    std::wstring biduleProfile;
     int numberChannels = 0;
 };
 
@@ -66,6 +67,10 @@ bool SaveShowDebugConsole(bool enabled);
 bool LoadShowDebugConsole(bool& enabled);
 bool SaveCheckForUpdateOnStart(bool enabled);
 bool LoadCheckForUpdateOnStart(bool& enabled);
+bool SaveBidulePath(const std::wstring& path);
+bool LoadBidulePath(std::wstring& path);
+bool SaveBiduleCloseOnUnload(bool enabled);
+bool LoadBiduleCloseOnUnload(bool& enabled);
 bool SaveActiveSensingEnabled(bool enabled);
 bool LoadActiveSensingEnabled(bool& enabled);
 bool SaveActiveSensingOutputName(const std::wstring& name);

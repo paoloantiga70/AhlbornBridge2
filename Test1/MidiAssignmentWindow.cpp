@@ -9,6 +9,7 @@
 
 #include <windowsx.h>
 #include <commctrl.h>
+#include <dbt.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -20,6 +21,7 @@
 // ---------------------------------------------------------------------------
 static const wchar_t kMidiAssignClassName[] = L"AhlbornMidiAssignWindow";
 constexpr UINT kActivityTimerId   = 1;
+constexpr UINT kRefreshListsMsg = WM_APP + 220;
 constexpr UINT kActivityIntervalMs = 16; // ~60fps refresh
 constexpr DWORD kActivityWindowMs  = 120; // LED stays green for 120 ms after last msg
 constexpr int kInternalBridgeSectionHeight = 84;
@@ -297,6 +299,69 @@ static std::vector<std::wstring> CollectPersistedOutputNames(HWND hLv)
 	}
 
 	return names;
+}
+
+static std::vector<std::wstring> EnumerateCurrentInputNames()
+{
+	std::vector<std::wstring> names;
+	UINT n = midiInGetNumDevs();
+	for (UINT i = 0; i < n; ++i)
+	{
+		MIDIINCAPS caps = {};
+		if (midiInGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+		names.emplace_back(caps.szPname);
+	}
+	return names;
+}
+
+static std::vector<std::wstring> EnumerateCurrentOutputNames()
+{
+	std::vector<std::wstring> names;
+	UINT n = midiOutGetNumDevs();
+	for (UINT i = 0; i < n; ++i)
+	{
+		MIDIOUTCAPS caps = {};
+		if (midiOutGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+		names.emplace_back(caps.szPname);
+	}
+	return names;
+}
+
+static void PruneDisconnectedAssignedDevices()
+{
+	auto currentInputs = EnumerateCurrentInputNames();
+	auto currentOutputs = EnumerateCurrentOutputNames();
+	auto assignedInputs = LoadAssignedMidiInputNames();
+	auto assignedOutputs = LoadAssignedMidiOutputNames();
+
+	std::vector<std::wstring> filteredInputs;
+	for (const auto& name : assignedInputs)
+	{
+		if (std::find(currentInputs.begin(), currentInputs.end(), name) != currentInputs.end())
+			filteredInputs.push_back(name);
+	}
+
+	std::vector<std::wstring> filteredOutputs;
+	for (const auto& name : assignedOutputs)
+	{
+		if (IsInternalMidiPort(name) || std::find(currentOutputs.begin(), currentOutputs.end(), name) != currentOutputs.end())
+			filteredOutputs.push_back(name);
+	}
+
+	if (filteredInputs != assignedInputs)
+	{
+		SaveAssignedMidiInputNames(filteredInputs);
+		SetAssignedMidiInputNames(filteredInputs);
+	}
+
+	if (filteredOutputs != assignedOutputs)
+	{
+		SaveAssignedMidiOutputNames(filteredOutputs);
+		SetAssignedMidiOutputNames(filteredOutputs);
+	}
+
+	if (filteredInputs != assignedInputs || filteredOutputs != assignedOutputs)
+		WriteHauptwerkMidiConfig(filteredInputs, filteredOutputs);
 }
 
 static void PopulateInputViews(HWND hAvail, HWND hAssign)
@@ -701,6 +766,29 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		}
 		return 0;
 
+	case WM_DEVICECHANGE:
+		PostMessageW(hWnd, kRefreshListsMsg, 0, 0);
+		return 0;
+
+	case kRefreshListsMsg:
+	{
+		PruneDisconnectedAssignedDevices();
+		HWND hAvailIn  = GetDlgItem(hWnd, IDC_TV_AVAIL_IN);
+		HWND hAssignIn = GetDlgItem(hWnd, IDC_TV_ASSIGN_IN);
+		HWND hAvailOut = GetDlgItem(hWnd, IDC_TV_AVAIL_OUT);
+		HWND hAssignOut= GetDlgItem(hWnd, IDC_TV_ASSIGN_OUT);
+		if (hAvailIn && hAssignIn)
+			PopulateInputViews(hAvailIn, hAssignIn);
+		if (hAvailOut && hAssignOut)
+			PopulateOutputViews(hAvailOut, hAssignOut);
+		if (g_internalBridgeLv)
+			PopulateInternalBridgePortsView(g_internalBridgeLv);
+		g_initialAssignedInputs  = CollectAssignedInputNames(hAssignIn);
+		g_initialAssignedOutputs = CollectPersistedOutputNames(hAssignOut);
+		UpdateApplyButtonState(hWnd);
+		return 0;
+	}
+
 	case WM_COMMAND:
 	{
 		UINT id = LOWORD(wParam);
@@ -819,6 +907,12 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+void RefreshMidiAssignmentWindowIfOpen()
+{
+	if (g_assignHwnd && IsWindow(g_assignHwnd))
+		PostMessageW(g_assignHwnd, kRefreshListsMsg, 0, 0);
+}
+
 void ShowMidiAssignmentWindow(HINSTANCE hInstance, HWND hOwner)
 {
 	if (g_assignHwnd && IsWindow(g_assignHwnd))

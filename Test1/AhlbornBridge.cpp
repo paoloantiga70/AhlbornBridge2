@@ -84,12 +84,17 @@ if (FAILED(hr))
 	initMidiState(); // Initialize MIDI state
 	printf("[Startup] MIDI state initialized.\n");
 
-	// Apply the Active Sensing output name (lock is ready after initMidiState).
+	// Apply and persist the Active Sensing output name (lock is ready after initMidiState).
 	{
 		std::wstring activeSensingOutputName;
 		LoadActiveSensingOutputName(activeSensingOutputName);
-		SetActiveSensingOutputName(activeSensingOutputName);
+		if (activeSensingOutputName.empty())
+			activeSensingOutputName = L"Default App Loopback (A)";
+		SaveActiveSensingOutputName(activeSensingOutputName);
 	}
+
+	// Auto-detect and persist Bidule path at startup (instead of waiting for Settings UI).
+	DetectBiduleExePath();
 
 	startsWithFe();  // Start the MIDI processing thread
 	printf("[Startup] MIDI processing thread started.\n");

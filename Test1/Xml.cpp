@@ -84,6 +84,9 @@ namespace
     std::wstring s_cachedFixedHauptwerkOutput;
     bool s_streamDeckSettingsLoaded = false;
 
+    std::wstring s_cachedBidulePath;
+    bool s_cachedBiduleCloseOnUnload = true;
+
     // Cached audio output devices (all entries from AudioOutputDevice in Hauptwerk config,
     // persisted to <Audio><Devices> in Settings.xml).
     // Each entry: "<Device id=\"NNN\">name</Device>"
@@ -741,13 +744,12 @@ namespace
         const std::wstring hauptwerkVstLinkDeviceId = findAudioDeviceIdByName(s_cachedAudioDevices, L"Hauptwerk VST Link");
 
         std::map<std::wstring, std::wstring> existingOutputDeviceByUniqueId;
-        bool firstInstallOutputAssignment = true;
+        std::map<std::wstring, std::wstring> existingBiduleProfileByUniqueId;
         {
             std::wstring existingSettingsXml;
             std::wstring installedOrgansSection;
             if (TryReadSettingsXml(existingSettingsXml) && TryGetSection(existingSettingsXml, L"InstalledOrgans", installedOrgansSection))
             {
-                firstInstallOutputAssignment = false;
                 size_t pos = 0;
                 while (true)
                 {
@@ -763,10 +765,15 @@ namespace
                     std::wstring organContent = installedOrgansSection.substr(openEnd + 1, closeStart - openEnd - 1);
                     std::wstring existingUniqueId;
                     std::wstring existingOutputDevice;
+                    std::wstring existingBiduleProfile;
                     TryGetTagStringValue(organContent, L"<Identification_UniqueOrganID>", L"</Identification_UniqueOrganID>", existingUniqueId);
                     TryGetTagStringValue(organContent, L"<Output_Device>", L"</Output_Device>", existingOutputDevice);
+                    TryGetTagStringValue(organContent, L"<BiduleProfile>", L"</BiduleProfile>", existingBiduleProfile);
                     if (!existingUniqueId.empty())
+                    {
                         existingOutputDeviceByUniqueId[existingUniqueId] = existingOutputDevice;
+                        existingBiduleProfileByUniqueId[existingUniqueId] = existingBiduleProfile;
+                    }
 
                     pos = closeStart + 8;
                 }
@@ -981,11 +988,11 @@ namespace
 				}
 
                 auto existingIt = existingOutputDeviceByUniqueId.find(uniqueOrganID);
-                if (existingIt != existingOutputDeviceByUniqueId.end())
+                if (existingIt != existingOutputDeviceByUniqueId.end() && !existingIt->second.empty())
                 {
                     outputDevice = existingIt->second;
                 }
-                else if (firstInstallOutputAssignment)
+                else
                 {
                     if (numberChannels == 2)
                         outputDevice = hauptwerkVstLinkDeviceId;
@@ -995,10 +1002,15 @@ namespace
 
 				std::wstring idStr = (id < 10 ? L"0" : L"") + std::to_wstring(id);
 				std::wstring displayAttr = displayName.empty() ? L"" : L" displayName=\"" + displayName + L"\"";
+				std::wstring biduleProfile;
+				auto biduleIt = existingBiduleProfileByUniqueId.find(uniqueOrganID);
+				if (biduleIt != existingBiduleProfileByUniqueId.end())
+					biduleProfile = biduleIt->second;
 				result += L"    <Organ id=\"" + idStr + L"\"" + displayAttr + L">" + name + L"\r\n";
 				result += L"       <o><Identification_UniqueOrganID>" + uniqueOrganID + L"</Identification_UniqueOrganID></o>\r\n";
 				result += L"       <o><Number_Channels>" + (numberChannels > 0 ? std::to_wstring(numberChannels) : L"") + L"</Number_Channels></o>\r\n";
 				result += L"       <o><Output_Device>" + outputDevice + L"</Output_Device></o>\r\n";
+				result += L"       <o><BiduleProfile>" + biduleProfile + L"</BiduleProfile></o>\r\n";
 				result += L"    </Organ>\r\n";
 				printf("ReadHauptwerkInstalledOrgans: [%02d] %S (displayName: %S, channels: %d)\n", id, name.c_str(),
 					displayName.empty() ? L"(none)" : displayName.c_str(), numberChannels);
@@ -1193,6 +1205,8 @@ namespace
 			L"    <CloseSettingsOnDisconnect>" + std::to_wstring(closeSettingsOnDisconnect ? 1 : 0) + L"</CloseSettingsOnDisconnect>\r\n"
 			L"    <ShowDebugConsole>" + std::to_wstring(showDebugConsole ? 1 : 0) + L"</ShowDebugConsole>\r\n"
 			L"    <CheckForUpdateOnStart>" + std::to_wstring(checkForUpdateOnStart ? 1 : 0) + L"</CheckForUpdateOnStart>\r\n"
+            L"    <BidulePath>" + s_cachedBidulePath + L"</BidulePath>\r\n"
+            L"    <BiduleCloseOnUnload>" + std::to_wstring(s_cachedBiduleCloseOnUnload ? 1 : 0) + L"</BiduleCloseOnUnload>\r\n"
 			L"    <ActiveSensingEnabled>" + std::to_wstring(g_activeSensingEnabled.load() ? 1 : 0) + L"</ActiveSensingEnabled>\r\n"
 			L"    <ActiveSensingOutput>" + g_activeSensingOutputName + L"</ActiveSensingOutput>\r\n"
 			L"    <RootFolder_HauptwerkApplication>" + s_rootHauptwerkApp + L"</RootFolder_HauptwerkApplication>\r\n"
@@ -1353,6 +1367,7 @@ std::vector<InstalledOrganInfo> LoadInstalledOrganInfos()
 
         TryGetTagStringValue(organContent, L"<Identification_UniqueOrganID>", L"</Identification_UniqueOrganID>", info.uniqueOrganId);
         TryGetTagStringValue(organContent, L"<Output_Device>", L"</Output_Device>", info.outputDeviceId);
+        TryGetTagStringValue(organContent, L"<BiduleProfile>", L"</BiduleProfile>", info.biduleProfile);
         UINT channels = 0;
         if (TryGetTagValue(organContent, L"<Number_Channels>", L"</Number_Channels>", channels))
             info.numberChannels = static_cast<int>(channels);
@@ -2024,6 +2039,7 @@ bool WriteHauptwerkAudioConfig()
             s_cachedAsioDevId     = asioDevId;
             s_cachedAsioDevName   = asioDevName;
             s_audioSettingsLoaded = true;
+            s_installedOrgansLoaded = false;
         }
         if (asioDevId.empty())
             printf("[WriteHauptwerkAudioConfig] Warning: no ASIO device found in AudioOutputDevice, <dev> will be empty.\n");
@@ -2356,6 +2372,114 @@ bool LoadMidiRouterEnabled(bool& enabled)
 
     enabled = value != 0;
     return true;
+}
+
+bool LoadBidulePath(std::wstring& path)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    if (!TryGetTagStringValue(optionsSection, L"<BidulePath>", L"</BidulePath>", path))
+    {
+        path.clear();
+        return true;
+    }
+
+    s_cachedBidulePath = path;
+    return true;
+}
+
+bool SaveBidulePath(const std::wstring& path)
+{
+    s_cachedBidulePath = path;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadBiduleCloseOnUnload(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    UINT value = 1;
+    if (!TryGetTagValue(optionsSection, L"<BiduleCloseOnUnload>", L"</BiduleCloseOnUnload>", value))
+    {
+        enabled = true;
+        return true;
+    }
+
+    enabled = value != 0;
+    s_cachedBiduleCloseOnUnload = enabled;
+    return true;
+}
+
+bool SaveBiduleCloseOnUnload(bool enabled)
+{
+    s_cachedBiduleCloseOnUnload = enabled;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
 }
 
 bool LoadCloseSettingsOnDisconnect(bool& enabled)
@@ -3507,6 +3631,7 @@ bool InitHauptwerkPaths()
     printf("InitHauptwerkPaths: Configuration complete.\n");
     return true;
 }
+
 
 bool LoadMidiInput1DeviceEnabled(bool& enabled)
 {

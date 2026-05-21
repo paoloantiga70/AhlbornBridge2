@@ -12,6 +12,7 @@
 #include <gdiplus.h>
 #include <dbt.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shlobj.h>
 #include <string>
 #include <atomic>
@@ -31,6 +32,7 @@ static HWND g_settingsMidiPageHwnd = nullptr;
 static HWND g_settingsInfoPageHwnd = nullptr;
 static HWND g_settingsOrganInfoPageHwnd = nullptr;
 static HWND g_settingsHauptwerkPageHwnd = nullptr;
+static HWND g_settingsBidulePageHwnd = nullptr;
 static HWND g_settingsOrganInfoGroupHwnd = nullptr;
 static HWND g_settingsAboutPageHwnd = nullptr;
 static HWND g_settingsStreamDeckPageHwnd = nullptr;
@@ -38,6 +40,8 @@ static HWND g_feLedHwnd = nullptr;
 static HWND g_activeSensingOutputComboHwnd = nullptr;
 static HWND g_hauptwerkOrganListHwnd = nullptr;
 static HWND g_hauptwerkAudioDeviceComboHwnd = nullptr;
+static HWND g_bidulePathEditHwnd = nullptr;
+static HWND g_biduleCloseOnUnloadCheckHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -58,6 +62,9 @@ constexpr int kMainCheckNowButtonId = 404;
 constexpr int kHauptwerkOrganListId = 501;
 constexpr int kHauptwerkAudioDeviceComboId = 502;
 constexpr int kHauptwerkSaveAudioAssignmentButtonId = 503;
+constexpr int kBiduleBrowseButtonId = 601;
+constexpr int kBiduleAutoDetectButtonId = 602;
+constexpr int kBiduleCloseOnUnloadCheckId = 603;
 
 namespace
 {
@@ -68,6 +75,7 @@ namespace
     {
         RefreshMidiDeviceStatus();
         RefreshSettingsFile();
+        RefreshMidiAssignmentWindowIfOpen();
         if (g_feLedHwnd)
         {
             InvalidateRect(g_feLedHwnd, nullptr, FALSE);
@@ -75,6 +83,42 @@ namespace
     }
 
     void UpdateOrganInfoGroupTitle();
+
+    void RefreshBiduleSettingsUI()
+    {
+        if (g_bidulePathEditHwnd)
+        {
+            std::wstring bidulePath = DetectBiduleExePath();
+            SetWindowTextW(g_bidulePathEditHwnd, bidulePath.c_str());
+        }
+
+        if (g_biduleCloseOnUnloadCheckHwnd)
+        {
+            bool closeOnUnload = true;
+            LoadBiduleCloseOnUnload(closeOnUnload);
+            SendMessageW(g_biduleCloseOnUnloadCheckHwnd, BM_SETCHECK,
+                closeOnUnload ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+    }
+
+    bool PickBiduleExecutable(HWND hOwner, std::wstring& path)
+    {
+        wchar_t fileName[MAX_PATH] = {};
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hOwner;
+        ofn.lpstrFile = fileName;
+        ofn.nMaxFile = _countof(fileName);
+        ofn.lpstrFilter = L"Executable files (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        ofn.lpstrTitle = L"Select Bidule executable";
+        if (!GetOpenFileNameW(&ofn))
+            return false;
+
+        path = fileName;
+        return true;
+    }
 
     void RefreshHauptwerkAudioAssignmentsUI()
     {
@@ -108,6 +152,7 @@ namespace
                     }
                 }
                 ListView_SetItemText(g_hauptwerkOrganListHwnd, i, 4, const_cast<LPWSTR>(deviceName.c_str()));
+                ListView_SetItemText(g_hauptwerkOrganListHwnd, i, 5, const_cast<LPWSTR>(organ.biduleProfile.c_str()));
             }
         }
 
@@ -448,10 +493,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         TabCtrl_InsertItem(g_settingsTabHwnd, 2, &tabItem);
         tabItem.pszText = const_cast<wchar_t*>(L"Hauptwerk");
         TabCtrl_InsertItem(g_settingsTabHwnd, 3, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"Stream Deck");
+        tabItem.pszText = const_cast<wchar_t*>(L"Bidule");
         TabCtrl_InsertItem(g_settingsTabHwnd, 4, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        tabItem.pszText = const_cast<wchar_t*>(L"Stream Deck");
         TabCtrl_InsertItem(g_settingsTabHwnd, 5, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        TabCtrl_InsertItem(g_settingsTabHwnd, 6, &tabItem);
 
         RECT tabRect = {};
         GetClientRect(g_settingsTabHwnd, &tabRect);
@@ -479,6 +526,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             hWnd, nullptr, nullptr, nullptr);
 
         g_settingsAboutPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
+            tabRect.left, tabRect.top,
+            tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+            hWnd, nullptr, nullptr, nullptr);
+
+        g_settingsBidulePageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
             tabRect.left, tabRect.top,
             tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
             hWnd, nullptr, nullptr, nullptr);
@@ -515,6 +567,43 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(L"BUTTON", L"Check for Update",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 22, 176, 140, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdPluginUpdateButtonId, nullptr, nullptr);
+        }
+
+        {
+            CreateWindowW(L"BUTTON", L"Bidule Integration", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 740, 220, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Executable:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 42, 100, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_bidulePathEditHwnd = CreateWindowW(L"EDIT", nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_READONLY,
+                136, 38, 430, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Browse...",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                580, 38, 90, 24, g_settingsBidulePageHwnd, (HMENU)kBiduleBrowseButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Auto-detect",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                580, 72, 90, 24, g_settingsBidulePageHwnd, (HMENU)kBiduleAutoDetectButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Bidule is launched automatically when the selected organ uses Hauptwerk VST Link.",
+                WS_CHILD | WS_VISIBLE,
+                136, 76, 410, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleCloseOnUnloadCheckHwnd = CreateWindowW(L"BUTTON", L"Close Bidule automatically on Unload organ",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                136, 114, 360, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleCloseOnUnloadCheckId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"If Bidule is not found automatically, choose Bidule.exe manually here.",
+                WS_CHILD | WS_VISIBLE,
+                136, 146, 430, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            RefreshBiduleSettingsUI();
         }
 
         {
@@ -570,7 +659,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             col.pszText = const_cast<LPWSTR>(L"ID"); col.cx = 50; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 1, &col);
             col.pszText = const_cast<LPWSTR>(L"Unique ID"); col.cx = 120; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 2, &col);
             col.pszText = const_cast<LPWSTR>(L"Channels"); col.cx = 70; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 3, &col);
-            col.pszText = const_cast<LPWSTR>(L"Audio Device"); col.cx = 250; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 4, &col);
+            col.pszText = const_cast<LPWSTR>(L"Audio Device"); col.cx = 180; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 4, &col);
+            col.pszText = const_cast<LPWSTR>(L"Bidule Profile"); col.cx = 220; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 5, &col);
 
             CreateWindowW(L"STATIC", L"Assign device:",
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
@@ -908,6 +998,35 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             }
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleBrowseButtonId)
+        {
+            std::wstring bidulePath;
+            if (PickBiduleExecutable(hWnd, bidulePath))
+            {
+                SaveBidulePath(bidulePath);
+                RefreshBiduleSettingsUI();
+            }
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleAutoDetectButtonId)
+        {
+            std::wstring bidulePath = DetectBiduleExePath();
+            if (bidulePath.empty())
+            {
+                MessageBoxW(hWnd, L"Bidule was not found automatically. Use Browse to select Bidule.exe.", L"Bidule", MB_OK | MB_ICONINFORMATION);
+            }
+            RefreshBiduleSettingsUI();
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleCloseOnUnloadCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = g_biduleCloseOnUnloadCheckHwnd;
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveBiduleCloseOnUnload(enabled);
+            return 0;
+        }
         break;
     }
     case WM_DEVICECHANGE:
@@ -943,13 +1062,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             {
                 ShowWindow(g_settingsHauptwerkPageHwnd, sel == 3 ? SW_SHOW : SW_HIDE);
             }
+            if (g_settingsBidulePageHwnd)
+            {
+                ShowWindow(g_settingsBidulePageHwnd, sel == 4 ? SW_SHOW : SW_HIDE);
+            }
             if (g_settingsStreamDeckPageHwnd)
             {
-                ShowWindow(g_settingsStreamDeckPageHwnd, sel == 4 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_settingsStreamDeckPageHwnd, sel == 5 ? SW_SHOW : SW_HIDE);
             }
             if (g_settingsAboutPageHwnd)
             {
-                ShowWindow(g_settingsAboutPageHwnd, sel == 5 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_settingsAboutPageHwnd, sel == 6 ? SW_SHOW : SW_HIDE);
             }
             if (sel == 2)
             {
@@ -980,11 +1103,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_settingsInfoPageHwnd = nullptr;
         g_settingsOrganInfoPageHwnd = nullptr;
         g_settingsHauptwerkPageHwnd = nullptr;
+        g_settingsBidulePageHwnd = nullptr;
         g_settingsOrganInfoGroupHwnd = nullptr;
         g_settingsAboutPageHwnd = nullptr;
         g_settingsStreamDeckPageHwnd = nullptr;
         g_hauptwerkOrganListHwnd = nullptr;
         g_hauptwerkAudioDeviceComboHwnd = nullptr;
+        g_bidulePathEditHwnd = nullptr;
+        g_biduleCloseOnUnloadCheckHwnd = nullptr;
         g_settingsHwnd = nullptr;
         return 0;
     default:
@@ -1115,6 +1241,19 @@ void NotifyOrganInfoTitleChanged()
     UpdateOrganInfoGroupTitle();
 }
 
+bool EnsureBiduleVisibleViaTrayToggle()
+{
+    if (IsBiduleWindowVisible())
+        return true;
+
+    HWND trayHwnd = g_nid.hWnd;
+    if (!trayHwnd || !IsWindow(trayHwnd))
+        return false;
+
+    SendMessageW(trayHwnd, WM_COMMAND, ID_TRAY_TOGGLE_BIDULE, 0);
+    return IsBiduleWindowVisible();
+}
+
 void ShowTrayMenu(HWND hWnd, POINT pt)
 {
     HMENU hMenu = CreatePopupMenu();
@@ -1130,6 +1269,12 @@ void ShowTrayMenu(HWND hWnd, POINT pt)
     AppendMenuW(hMenu, MF_STRING | (g_activeSensingEnabled.load() ? MF_CHECKED : MF_UNCHECKED),
         ID_TRAY_TOGGLE_ACTIVE_SENSING, L"Active Sensing sender");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    if (IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe"))
+    {
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_TOGGLE_BIDULE,
+            IsBiduleWindowVisible() ? L"Bidule: Hide" : L"Bidule: Show");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_BIDULE_OSC_TEST, L"Bidule: OSC Test /open");
+    }
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_UPDATE, L"Check for Updates");
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_TOGGLE_CONSOLE,
         showConsole ? L"Hide debug console" : L"Show debug console");
@@ -1220,6 +1365,20 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 			bool enabled = !g_activeSensingEnabled.load();
 			g_activeSensingEnabled = enabled;
 			SaveActiveSensingEnabled(enabled);
+			return 0;
+		}
+		case ID_TRAY_TOGGLE_BIDULE:
+		{
+			ToggleBiduleWindowVisibility();
+			return 0;
+		}
+		case ID_TRAY_BIDULE_OSC_TEST:
+		{
+			std::wstring testPath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\OSC_Test.bidule";
+			if (SendBiduleOscOpenProfile(testPath))
+				MessageBoxW(hWnd, L"OSC test sent: /open OSC_Test.bidule", L"Bidule OSC", MB_OK | MB_ICONINFORMATION);
+			else
+				MessageBoxW(hWnd, L"OSC test failed. Check Bidule OSC server/port and file path.", L"Bidule OSC", MB_OK | MB_ICONWARNING);
 			return 0;
 		}
 		case ID_TRAY_EXIT:
@@ -1373,6 +1532,9 @@ namespace {
     {
         HINSTANCE hInstance;
         std::wstring imagePath;
+        int totalMs;
+        bool bottomRight;
+        int holdMs;
     };
 
     struct TextSplashThreadParam
@@ -1406,6 +1568,9 @@ namespace {
         auto* p = reinterpret_cast<SplashThreadParam*>(param);
         HINSTANCE hInst = p->hInstance;
         std::wstring imgPath = std::move(p->imagePath);
+        int totalMs = p->totalMs;
+        bool bottomRight = p->bottomRight;
+        int holdMs = p->holdMs;
         delete p;
 
         if (imgPath.empty())
@@ -1440,11 +1605,26 @@ namespace {
         wc.lpszClassName = kSplashClass;
         RegisterClassExW(&wc);
 
-        // Centre on primary monitor.
         int screenW = GetSystemMetrics(SM_CXSCREEN);
         int screenH = GetSystemMetrics(SM_CYSCREEN);
-        int x = (screenW - imgW) / 2;
-        int y = (screenH - imgH) / 2;
+        int x = 0;
+        int y = 0;
+        if (bottomRight)
+        {
+            RECT workArea{};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+            constexpr int kToastMargin = 20;
+            x = workArea.right - imgW - kToastMargin;
+            y = workArea.bottom - imgH - kToastMargin;
+            if (x < workArea.left) x = workArea.left;
+            if (y < workArea.top) y = workArea.top;
+        }
+        else
+        {
+            // Centre on primary monitor.
+            x = (screenW - imgW) / 2;
+            y = (screenH - imgH) / 2;
+        }
 
         HWND hWnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1488,16 +1668,29 @@ namespace {
 
         // Max opacity: 220/255 (~86%) so the image appears slightly transparent at peak.
         constexpr int   kMaxAlpha    = 220;
-        constexpr int   kTotalMs     = 4000; // total duration
-        constexpr int   kSteps       = 100;  // 100 steps: 0..99 fade-in, 99..0 fade-out
-        constexpr int   kSleepMs     = kTotalMs / (kSteps * 2); // ~20 ms per step
+        constexpr int   kSteps       = 100;
+        int kSleepMs = totalMs / (kSteps * 2);
+        if (kSleepMs < 5)
+            kSleepMs = 5;
 
-        // Single loop: first half = fade-in, second half = fade-out.
-        // Peak is exactly at the midpoint (step == kSteps).
-        for (int i = 0; i <= kSteps * 2; ++i)
+        // Fade-in.
+        for (int i = 0; i <= kSteps; ++i)
         {
-            int half = (i <= kSteps) ? i : (kSteps * 2 - i);
-            BYTE alpha = static_cast<BYTE>((half * kMaxAlpha) / kSteps);
+            BYTE alpha = static_cast<BYTE>((i * kMaxAlpha) / kSteps);
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+            UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
+            ShowWindow(hWnd, SW_SHOW);
+            Sleep(kSleepMs);
+        }
+
+        // Hold at peak visibility.
+        if (holdMs > 0)
+            Sleep(holdMs);
+
+        // Fade-out.
+        for (int i = kSteps; i >= 0; --i)
+        {
+            BYTE alpha = static_cast<BYTE>((i * kMaxAlpha) / kSteps);
             BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
             UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
             ShowWindow(hWnd, SW_SHOW);
@@ -1520,13 +1713,13 @@ namespace {
         return 0;
     }
 
-    static void ShowSplash(const wchar_t* filename)
+    static void ShowSplash(const wchar_t* filename, int totalMs = 4000, bool bottomRight = false, int holdMs = 0)
     {
         bool expected = false;
         if (!g_splashActive.compare_exchange_strong(expected, true))
             return;
 
-        auto* p = new SplashThreadParam{ GetModuleHandleW(nullptr), BuildSplashImagePath(filename) };
+        auto* p = new SplashThreadParam{ GetModuleHandleW(nullptr), BuildSplashImagePath(filename), totalMs, bottomRight, holdMs };
         HANDLE h = CreateThread(nullptr, 0, SplashThread, p, 0, nullptr);
         if (h) CloseHandle(h);
         else
@@ -1672,6 +1865,11 @@ void ShowAhlbornStartedSplash()
 void ShowAhlbornClosedSplash()
 {
     ShowSplash(L"ahlborn_closed.png");
+}
+
+void ShowVstLinkModeSplash()
+{
+    ShowSplash(L"VstLinkMode1.png", 1200, true, 1400);
 }
 
 void ShowHauptwerkRestartSplash(const wchar_t* deviceName)

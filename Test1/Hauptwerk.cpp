@@ -11,7 +11,11 @@
 #include <vector>
 #include <shlobj.h>
 #include <knownfolders.h>
+#include <shellapi.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
+#pragma comment(lib, "Ws2_32.lib")
 
 namespace
 {
@@ -137,6 +141,55 @@ namespace
     {
         return FindProcessId(processName) != 0;
     }
+
+    struct BiduleWindowEnumContext
+    {
+        DWORD pid = 0;
+        HWND firstMainWindow = nullptr;
+        HWND firstVisibleMainWindow = nullptr;
+    };
+
+    BOOL CALLBACK EnumBiduleWindowsProc(HWND hwnd, LPARAM lParam)
+    {
+        auto* ctx = reinterpret_cast<BiduleWindowEnumContext*>(lParam);
+        if (!ctx || !IsWindow(hwnd))
+            return TRUE;
+
+        if (GetWindow(hwnd, GW_OWNER) != nullptr || GetParent(hwnd) != nullptr)
+            return TRUE;
+
+        if (GetWindow(hwnd, GW_CHILD) == nullptr)
+            return TRUE;
+
+        DWORD processId = 0;
+        GetWindowThreadProcessId(hwnd, &processId);
+        if (processId == 0 || processId != ctx->pid)
+            return TRUE;
+
+        wchar_t title[256] = {};
+        GetWindowTextW(hwnd, title, static_cast<int>(_countof(title)));
+        if (title[0] == L'\0')
+            return TRUE;
+
+        if (!ctx->firstMainWindow)
+            ctx->firstMainWindow = hwnd;
+
+        if (IsWindowVisible(hwnd) && !ctx->firstVisibleMainWindow)
+            ctx->firstVisibleMainWindow = hwnd;
+
+        return TRUE;
+    }
+
+    HWND FindPrimaryBiduleWindow(DWORD bidulePid, bool preferVisible)
+    {
+        BiduleWindowEnumContext ctx{};
+        ctx.pid = bidulePid;
+        EnumWindows(EnumBiduleWindowsProc, reinterpret_cast<LPARAM>(&ctx));
+
+        if (preferVisible && ctx.firstVisibleMainWindow)
+            return ctx.firstVisibleMainWindow;
+        return ctx.firstMainWindow;
+    }
 }
 
 
@@ -177,6 +230,180 @@ namespace
 bool IsProcessRunningByName(const wchar_t* processName)
 {
     return IsProcessRunning(processName);
+}
+
+std::wstring DetectBiduleExePath()
+{
+    std::wstring savedPath;
+    if (LoadBidulePath(savedPath) && !savedPath.empty())
+    {
+        DWORD attrs = GetFileAttributesW(savedPath.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+            return savedPath;
+    }
+
+    const wchar_t* candidates[] = {
+        L"C:\\Program Files\\Plogue\\Bidule\\bidule.exe",
+        L"C:\\Program Files\\Plogue\\Bidule\\Bidule.exe",
+        L"C:\\Program Files (x86)\\Plogue\\Bidule\\bidule.exe",
+        L"C:\\Program Files (x86)\\Plogue\\Bidule\\Bidule.exe"
+    };
+
+    for (const wchar_t* candidate : candidates)
+    {
+        DWORD attrs = GetFileAttributesW(candidate);
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            SaveBidulePath(candidate);
+            return candidate;
+        }
+    }
+
+    return {};
+}
+
+bool LaunchBidule()
+{
+    if (IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe"))
+        return true;
+
+    std::wstring exePath = DetectBiduleExePath();
+    if (exePath.empty())
+        return false;
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+
+    std::wstring cmd = L"\"" + exePath + L"\"";
+
+    std::vector<wchar_t> cmdLine(cmd.begin(), cmd.end());
+    cmdLine.push_back(L'\0');
+
+    if (!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+    {
+        printf("Failed to start Bidule (error %lu).\n", GetLastError());
+        return false;
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+bool SendBiduleOscOpenProfile(const std::wstring& profilePath, unsigned short port)
+{
+    if (profilePath.empty())
+        return false;
+
+    auto appendOscString = [](std::vector<char>& buffer, const std::string& value)
+    {
+        buffer.insert(buffer.end(), value.begin(), value.end());
+        buffer.push_back('\0');
+        while (buffer.size() % 4 != 0)
+            buffer.push_back('\0');
+    };
+
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, profilePath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 1)
+        return false;
+
+    std::string profileUtf8(static_cast<size_t>(utf8Len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, profilePath.c_str(), -1, profileUtf8.data(), utf8Len, nullptr, nullptr);
+
+    std::vector<char> packet;
+    appendOscString(packet, "/open");
+    appendOscString(packet, ",s");
+    appendOscString(packet, profileUtf8);
+
+    WSADATA wsa = {};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+        return false;
+
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return false;
+    }
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    int sent = sendto(sock, packet.data(), static_cast<int>(packet.size()), 0,
+        reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+
+    closesocket(sock);
+    WSACleanup();
+
+    if (sent != static_cast<int>(packet.size()))
+        return false;
+
+    printf("[BiduleOSC] Sent /open %S to 127.0.0.1:%u\n", profilePath.c_str(), static_cast<unsigned>(port));
+    return true;
+}
+
+void CloseBiduleProcess()
+{
+    CloseProcessByName(L"bidule.exe");
+    CloseProcessByName(L"Bidule.exe");
+}
+
+bool IsBiduleWindowVisible()
+{
+    DWORD bidulePid = FindProcessId(L"bidule.exe");
+    if (bidulePid == 0)
+        bidulePid = FindProcessId(L"Bidule.exe");
+    if (bidulePid == 0)
+        return false;
+
+    HWND visibleWindow = FindPrimaryBiduleWindow(bidulePid, true);
+    return visibleWindow != nullptr && IsWindowVisible(visibleWindow);
+}
+
+bool ShowBiduleWindow()
+{
+    DWORD bidulePid = FindProcessId(L"bidule.exe");
+    if (bidulePid == 0)
+        bidulePid = FindProcessId(L"Bidule.exe");
+    if (bidulePid == 0)
+        return false;
+
+    HWND mainWindow = FindPrimaryBiduleWindow(bidulePid, false);
+    if (!mainWindow || !IsWindow(mainWindow))
+        return false;
+
+    ShowWindowAsync(mainWindow, SW_RESTORE);
+    ShowWindowAsync(mainWindow, SW_SHOW);
+    SetForegroundWindow(mainWindow);
+    return true;
+}
+
+bool HideBiduleWindow()
+{
+    DWORD bidulePid = FindProcessId(L"bidule.exe");
+    if (bidulePid == 0)
+        bidulePid = FindProcessId(L"Bidule.exe");
+    if (bidulePid == 0)
+        return false;
+
+    HWND visibleWindow = FindPrimaryBiduleWindow(bidulePid, true);
+    if (!visibleWindow || !IsWindow(visibleWindow))
+        return false;
+
+    ShowWindowAsync(visibleWindow, SW_HIDE);
+    return true;
+}
+
+bool ToggleBiduleWindowVisibility()
+{
+    if (IsBiduleWindowVisible())
+        return HideBiduleWindow();
+    return ShowBiduleWindow();
 }
 
 bool LaunchHauptwerkAndDismissWelcome()

@@ -62,6 +62,9 @@ void CloseHauptwerkProcess();
 namespace
 {
     std::atomic<bool> g_hauptwerkWorkerActive{ false };
+    std::wstring GetInstalledOrganOutputDeviceName(int installedOrganIndex);
+    bool ShouldUseBiduleForInstalledOrgan(int installedOrganIndex);
+    void CloseBiduleIfConfigured();
 
     // ---------------------------------------------------------------
     // Lock-free SPSC ring buffer for MIDI output routing.
@@ -639,6 +642,20 @@ namespace
         return {};
     }
 
+    bool ShouldUseBiduleForInstalledOrgan(int installedOrganIndex)
+    {
+        return _wcsicmp(GetInstalledOrganOutputDeviceName(installedOrganIndex).c_str(), L"Hauptwerk VST Link") == 0;
+    }
+
+    void CloseBiduleIfConfigured()
+    {
+        bool closeOnUnload = true;
+        if (!LoadBiduleCloseOnUnload(closeOnUnload))
+            closeOnUnload = true;
+        if (closeOnUnload)
+            CloseBiduleProcess();
+    }
+
     // Choose the appropriate standby icon based on the current device state.
     // If the console is connected use the alternative standby icon, otherwise
     // fall back to the default standby image.
@@ -806,6 +823,7 @@ namespace
                 
                 g_hauptwerkMainWindow = nullptr;
                 isOrganLoaded = false;
+                CloseBiduleIfConfigured();
                 g_hauptwerkOrganTitle.clear();
                 NotifyOrganInfoTitleChanged();
                 
@@ -848,6 +866,7 @@ namespace
                     isOrganLoaded = false;
                     g_currentLoadedFavoriteIndex = 0;
                     g_currentLoadedInstalledOrganIndex = 0;
+                    CloseBiduleIfConfigured();
                     g_hauptwerkOrganTitle.clear();
                     NotifyOrganInfoTitleChanged();
                     g_trayIconImageStatus = TrayIconImageStatus::Standby;
@@ -870,6 +889,68 @@ namespace
 					g_hauptwerkOrganTitle = ExtractOrganTitle(title);
                     NotifyOrganInfoTitleChanged();
                     g_trayIconImageStatus = TrayIconImageStatus::Online;
+
+                    int loadedInstalledOrganIndex = g_currentLoadedInstalledOrganIndex.load();
+                    if (loadedInstalledOrganIndex > 0 && ShouldUseBiduleForInstalledOrgan(loadedInstalledOrganIndex))
+                    {
+                        std::wstring biduleProfilePath;
+                        std::vector<InstalledOrganInfo> organInfos = LoadInstalledOrganInfos();
+                        if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
+                            biduleProfilePath = organInfos[loadedInstalledOrganIndex - 1].biduleProfile;
+
+                        if (!biduleProfilePath.empty())
+                        {
+                            bool rooted = (biduleProfilePath.size() > 2 && biduleProfilePath[1] == L':' &&
+                                (biduleProfilePath[2] == L'\\' || biduleProfilePath[2] == L'/'));
+                            bool unc = (biduleProfilePath.size() > 1 && biduleProfilePath[0] == L'\\' && biduleProfilePath[1] == L'\\');
+                            if (!rooted && !unc)
+                            {
+                                biduleProfilePath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + biduleProfilePath;
+                            }
+                        }
+
+                        if (!LaunchBidule())
+                        {
+                            printf("[Bidule] Bidule launch skipped because no executable path is configured or detected.\n");
+                        }
+                        else
+                        {
+                            if (biduleProfilePath.empty())
+                                printf("[Bidule] Bidule launched after organ load completed (no profile).\n");
+                            else
+                                printf("[Bidule] Bidule launched after organ load completed with OSC profile request: %S\n", biduleProfilePath.c_str());
+                            ShowVstLinkModeSplash();
+
+                            Sleep(2000);
+                            if (!biduleProfilePath.empty())
+                            {
+                                DWORD attrs = GetFileAttributesW(biduleProfilePath.c_str());
+                                if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+                                {
+                                    printf("[BiduleOSC] Profile file not found: %S\n", biduleProfilePath.c_str());
+                                }
+                                else if (!SendBiduleOscOpenProfile(biduleProfilePath))
+                                {
+                                    printf("[BiduleOSC] Failed to send /open command.\n");
+                                }
+                            }
+                            else
+                            {
+                                bool shown = IsBiduleWindowVisible();
+                                for (int attempt = 0; !shown && attempt < 12; ++attempt)
+                                {
+                                    Sleep(250);
+                                    shown = IsBiduleWindowVisible();
+                                    if (!shown)
+                                    {
+                                        EnsureBiduleVisibleViaTrayToggle();
+                                        Sleep(100);
+                                        shown = IsBiduleWindowVisible();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 std::wstring cleanOrganTitle = ExtractOrganTitle(title);
