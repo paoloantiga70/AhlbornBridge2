@@ -827,6 +827,8 @@ namespace
 
 			name = name.substr(0, name.size() - kSuffixLen);
 
+            printf("\nReadHauptwerkInstalledOrgans: analyzing %S\n", name.c_str());
+
 				// Read the entire organ definition file once
 				std::wstring displayName, uniqueOrganID, outputDevice;
 				int numberChannels = 0;
@@ -854,57 +856,123 @@ namespace
 									TryGetTagStringValue(hwXml, L"<Identification_Name>", L"</Identification_Name>", displayName);
 									TryGetTagStringValue(hwXml, L"<Identification_UniqueOrganID>", L"</Identification_UniqueOrganID>", uniqueOrganID);
 
-									// Compute Number_Channels from ObjectList ObjectType="StopRank":
-									// find the first <a> value in the first <o> child, then count how many
-									// <o> children share that same first <a> value; result * 2 = channels.
-									const std::wstring kObjListOpen = L"<ObjectList ObjectType=\"StopRank\">";
-									const std::wstring kObjListClose = L"</ObjectList>";
-									size_t olStart = hwXml.find(kObjListOpen);
-									if (olStart != std::wstring::npos)
-									{
-										olStart += kObjListOpen.size();
-										size_t olEnd = hwXml.find(kObjListClose, olStart);
-										if (olEnd == std::wstring::npos)
-											olEnd = hwXml.size();
+                                    // Compute Number_Channels from Stop + Rank:
+                                    // 1) read the first <b> of the first <o> inside ObjectList ObjectType="Stop"
+                                    // 2) count Rank child nodes whose <b> is either exactly the same string
+                                    //    or ends with " - <stopName>"
+                                    // 3) channels = matchCount * 2
+                                    auto extractObjectListSection = [&](const std::wstring& objectType, std::wstring& section) -> bool
+                                    {
+                                        const std::wstring openTag = L"<ObjectList ObjectType=\"" + objectType + L"\">";
+                                        size_t start = hwXml.find(openTag);
+                                        if (start == std::wstring::npos)
+                                            return false;
+                                        start += openTag.size();
+                                        size_t end = hwXml.find(L"</ObjectList>", start);
+                                        if (end == std::wstring::npos)
+                                            return false;
+                                        section = hwXml.substr(start, end - start);
+                                        return true;
+                                    };
 
-										std::wstring olSection = hwXml.substr(olStart, olEnd - olStart);
+                                    std::wstring stopSection;
+                                    std::wstring rankSection;
+                                    if (extractObjectListSection(L"Stop", stopSection) && extractObjectListSection(L"Rank", rankSection))
+                                    {
+                                        auto normalizeForRankMatch = [](const std::wstring& text) -> std::wstring
+                                        {
+                                            std::wstring noParens;
+                                            bool inParens = false;
+                                            for (wchar_t ch : text)
+                                            {
+                                                if (ch == L'(')
+                                                {
+                                                    inParens = true;
+                                                    continue;
+                                                }
+                                                if (ch == L')')
+                                                {
+                                                    inParens = false;
+                                                    continue;
+                                                }
+                                                if (!inParens)
+                                                    noParens.push_back(ch);
+                                            }
 
-										// Extract first <a> value from the first <o> node
-										std::wstring firstAValue;
-										size_t firstO = olSection.find(L"<o>");
-										if (firstO != std::wstring::npos)
-										{
-											size_t aStart = olSection.find(L"<a>", firstO);
-											size_t aEnd = olSection.find(L"</a>", aStart);
-											if (aStart != std::wstring::npos && aEnd != std::wstring::npos)
-												firstAValue = olSection.substr(aStart + 3, aEnd - aStart - 3);
-										}
+                                            std::wstring normalized;
+                                            bool lastWasSpace = true;
+                                            for (wchar_t ch : noParens)
+                                            {
+                                                wchar_t lower = static_cast<wchar_t>(towlower(ch));
+                                                if ((lower >= L'a' && lower <= L'z') || (lower >= L'0' && lower <= L'9'))
+                                                {
+                                                    normalized.push_back(lower);
+                                                    lastWasSpace = false;
+                                                }
+                                                else if (!lastWasSpace)
+                                                {
+                                                    normalized.push_back(L' ');
+                                                    lastWasSpace = true;
+                                                }
+                                            }
 
-										// Count <o> nodes whose first <a> matches firstAValue
-										if (!firstAValue.empty())
-										{
-											int matchCount = 0;
-											size_t pos2 = 0;
-											while (true)
-											{
-												size_t oPos = olSection.find(L"<o>", pos2);
-												if (oPos == std::wstring::npos) break;
-												size_t oEnd = olSection.find(L"</o>", oPos);
-												if (oEnd == std::wstring::npos) break;
-												std::wstring oNode = olSection.substr(oPos + 3, oEnd - oPos - 3);
-												size_t aS = oNode.find(L"<a>");
-												size_t aE = oNode.find(L"</a>", aS);
-												if (aS != std::wstring::npos && aE != std::wstring::npos)
-												{
-													std::wstring aVal = oNode.substr(aS + 3, aE - aS - 3);
-													if (aVal == firstAValue)
-														++matchCount;
-												}
-												pos2 = oEnd + 4;
-											}
-											numberChannels = matchCount * 2;
-										}
-									}
+                                            while (!normalized.empty() && normalized.back() == L' ')
+                                                normalized.pop_back();
+                                            return normalized;
+                                        };
+
+                                        std::wstring targetStopName;
+                                        size_t firstO = stopSection.find(L"<o>");
+                                        if (firstO != std::wstring::npos)
+                                        {
+                                            size_t firstOEnd = stopSection.find(L"</o>", firstO);
+                                            if (firstOEnd != std::wstring::npos)
+                                            {
+                                                std::wstring firstStopNode = stopSection.substr(firstO + 3, firstOEnd - firstO - 3);
+                                                TryGetTagStringValue(firstStopNode, L"<b>", L"</b>", targetStopName);
+                                            }
+                                        }
+
+                                        if (!targetStopName.empty())
+                                        {
+                                            int matchCount = 0;
+                                            std::wstring normalizedTargetStopName = normalizeForRankMatch(targetStopName);
+                                            const std::wstring suffix = L" - " + targetStopName;
+                                            size_t pos2 = 0;
+                                            while (true)
+                                            {
+                                                size_t oPos = rankSection.find(L"<o>", pos2);
+                                                if (oPos == std::wstring::npos)
+                                                    break;
+                                                size_t oEnd = rankSection.find(L"</o>", oPos);
+                                                if (oEnd == std::wstring::npos)
+                                                    break;
+
+                                                std::wstring rankNode = rankSection.substr(oPos + 3, oEnd - oPos - 3);
+                                                std::wstring rankName;
+                                                if (TryGetTagStringValue(rankNode, L"<b>", L"</b>", rankName))
+                                                {
+                                                    std::wstring normalizedRankName = normalizeForRankMatch(rankName);
+                                                    if (rankName == targetStopName ||
+                                                        (rankName.size() > suffix.size() &&
+                                                        rankName.compare(rankName.size() - suffix.size(), suffix.size(), suffix) == 0) ||
+                                                        (!normalizedTargetStopName.empty() &&
+                                                         normalizedRankName.find(normalizedTargetStopName) != std::wstring::npos))
+                                                    {
+                                                        ++matchCount;
+                                                        printf("ReadHauptwerkInstalledOrgans: rank match '%S' for stop '%S'\n",
+                                                            rankName.c_str(), targetStopName.c_str());
+                                                    }
+                                                }
+
+                                                pos2 = oEnd + 4;
+                                            }
+
+                                            numberChannels = matchCount * 2;
+                                            printf("ReadHauptwerkInstalledOrgans: stop '%S' -> %d rank match(es) -> %d channel(s)\n",
+                                                targetStopName.c_str(), matchCount, numberChannels);
+                                        }
+                                    }
 								}
 							}
 						}
