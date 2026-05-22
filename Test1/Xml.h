@@ -32,6 +32,7 @@ std::wstring LoadFixedHauptwerkOutputName();
 std::vector<InstalledOrganInfo> LoadInstalledOrganInfos();
 std::vector<AudioDeviceInfo> LoadAudioOutputDevices();
 bool SaveInstalledOrganOutputDevice(const std::wstring& uniqueOrganId, const std::wstring& outputDeviceId);
+bool SaveInstalledOrganBiduleProfile(const std::wstring& uniqueOrganId, const std::wstring& biduleProfile);
 bool EnsureHauptwerkAudioOutputDeviceId(const std::wstring& outputDeviceId, bool* changed = nullptr);
 bool IsHauptwerkAudioOutputDeviceIdAligned(const std::wstring& outputDeviceId);
 

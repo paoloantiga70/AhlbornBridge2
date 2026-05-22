@@ -1474,6 +1474,64 @@ bool SaveInstalledOrganOutputDevice(const std::wstring& uniqueOrganId, const std
     return false;
 }
 
+bool SaveInstalledOrganBiduleProfile(const std::wstring& uniqueOrganId, const std::wstring& biduleProfile)
+{
+    if (uniqueOrganId.empty())
+        return false;
+
+    EnsureInstalledOrgansLoaded();
+    std::wstring xml = s_cachedInstalledOrgans;
+    size_t pos = 0;
+    while (true)
+    {
+        size_t organStart = xml.find(L"<Organ", pos);
+        if (organStart == std::wstring::npos)
+            break;
+
+        size_t openEnd = xml.find(L'>', organStart);
+        size_t closeStart = xml.find(L"</Organ>", openEnd);
+        if (openEnd == std::wstring::npos || closeStart == std::wstring::npos)
+            break;
+
+        std::wstring organContent = xml.substr(openEnd + 1, closeStart - openEnd - 1);
+        std::wstring currentUniqueId;
+        TryGetTagStringValue(organContent, L"<Identification_UniqueOrganID>", L"</Identification_UniqueOrganID>", currentUniqueId);
+        if (currentUniqueId == uniqueOrganId)
+        {
+            const std::wstring startTag = L"<BiduleProfile>";
+            const std::wstring endTag = L"</BiduleProfile>";
+            size_t valueStart = organContent.find(startTag);
+            if (valueStart == std::wstring::npos)
+                return false;
+            valueStart += startTag.size();
+            size_t valueEnd = organContent.find(endTag, valueStart);
+            if (valueEnd == std::wstring::npos)
+                return false;
+
+            organContent = organContent.substr(0, valueStart) + biduleProfile + organContent.substr(valueEnd);
+            xml = xml.substr(0, openEnd + 1) + organContent + xml.substr(closeStart);
+            s_cachedInstalledOrgans = xml;
+
+            bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+            bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+            bool showConsole = true; LoadShowDebugConsole(showConsole);
+            bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+            std::wstring in1, in2;
+            if (!s_assignedInputNames.empty()) in1 = s_assignedInputNames[0];
+            if (s_assignedInputNames.size() > 1) in2 = s_assignedInputNames[1];
+            std::wstring out1, out2;
+            if (!s_assignedOutputNames.empty()) out1 = s_assignedOutputNames[0];
+            if (s_assignedOutputNames.size() > 1) out2 = s_assignedOutputNames[1];
+            DeviceEnabledStates devEnabled;
+            return WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+        }
+
+        pos = closeStart + 8;
+    }
+
+    return false;
+}
+
 bool IsHauptwerkAudioOutputDeviceIdAligned(const std::wstring& outputDeviceId)
 {
     if (outputDeviceId.empty())

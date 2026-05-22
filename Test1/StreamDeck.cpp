@@ -1,6 +1,7 @@
 #include "StreamDeck.h"
 #include "Midi.h"
 #include "Xml.h"
+#include "Hauptwerk.h"
 #include "StreamDeck_profiler.h"
 #include <windows.h>
 #include <shlobj.h>
@@ -105,10 +106,38 @@ static std::string BuildOrganListJson()
     return json;
 }
 
-static std::string BuildStateJson()
+static bool IsVstLinkEngineForInstalledOrgan(int installedOrganIndex)
 {
-    int idx = g_currentLoadedInstalledOrganIndex.load();
-    return "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(idx) + "}";
+    if (installedOrganIndex <= 0)
+        return false;
+
+    std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+    if (installedOrganIndex > static_cast<int>(organs.size()))
+        return false;
+
+    const std::wstring& outputDeviceId = organs[installedOrganIndex - 1].outputDeviceId;
+    if (outputDeviceId.empty())
+        return false;
+
+    std::vector<AudioDeviceInfo> devices = LoadAudioOutputDevices();
+    for (const auto& device : devices)
+    {
+        if (device.id == outputDeviceId)
+            return _wcsicmp(device.name.c_str(), L"Hauptwerk VST Link") == 0;
+    }
+
+    return false;
+}
+
+static std::string BuildStateJson(int loadedIndex)
+{
+    bool vstLink = IsVstLinkEngineForInstalledOrgan(loadedIndex);
+    bool consoleConnected = (deviceState.load() == DeviceState::Connected);
+    bool hauptwerkRunning = IsProcessRunningByName(L"Hauptwerk.exe");
+    return "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(loadedIndex) +
+           ",\"vstLink\":" + std::string(vstLink ? "true" : "false") +
+           ",\"consoleConnected\":" + std::string(consoleConnected ? "true" : "false") +
+           ",\"hauptwerkRunning\":" + std::string(hauptwerkRunning ? "true" : "false") + "}";
 }
 
 static void HandlePipeMessage(const std::string& msg)
@@ -122,7 +151,7 @@ static void HandlePipeMessage(const std::string& msg)
     else if (msg.find("\"getState\"") != std::string::npos)
     {
         printf("[PipeServer] Client requested state\n");
-        PipeSend(BuildStateJson());
+        PipeSend(BuildStateJson(g_currentLoadedInstalledOrganIndex.load()));
     }
     else if (msg.find("\"load\"") != std::string::npos)
     {
@@ -152,6 +181,12 @@ static void HandlePipeMessage(const std::string& msg)
         printf("[PipeServer] Unload organ requested\n");
         EnqueueUnloadOrgan();
         PipeSend("{\"type\":\"ack\",\"command\":\"unload\"}");
+    }
+    else if (msg.find("\"toggleBiduleWindow\"") != std::string::npos)
+    {
+        printf("[PipeServer] Toggle Bidule window requested\n");
+        bool toggled = ToggleBiduleWindowVisibility();
+        PipeSend(std::string("{\"type\":\"ack\",\"command\":\"toggleBiduleWindow\",\"ok\":") + (toggled ? "true" : "false") + "}");
     }
     else
     {
@@ -218,7 +253,7 @@ static DWORD WINAPI PipeServerThread(LPVOID)
 
         // Send initial data to the plugin
         PipeSend(BuildOrganListJson());
-        PipeSend(BuildStateJson());
+        PipeSend(BuildStateJson(g_currentLoadedInstalledOrganIndex.load()));
 
         // Read loop
         char buffer[4096];
@@ -552,11 +587,11 @@ void NotifyStreamDeckOrganList()
 void NotifyStreamDeckOrganState(int loadedIndex)
 {
     if (g_pipeConnected)
-        PipeSend("{\"type\":\"state\",\"loadedIndex\":" + std::to_string(loadedIndex) + "}");
+        PipeSend(BuildStateJson(loadedIndex));
 }
 
 void NotifyStreamDeckOrganUnloaded()
 {
     if (g_pipeConnected)
-        PipeSend("{\"type\":\"state\",\"loadedIndex\":0}");
+        PipeSend(BuildStateJson(0));
 }

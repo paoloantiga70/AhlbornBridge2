@@ -147,6 +147,11 @@ namespace
         DWORD pid = 0;
         HWND firstMainWindow = nullptr;
         HWND firstVisibleMainWindow = nullptr;
+        HWND largestMainWindow = nullptr;
+        HWND largestVisibleMainWindow = nullptr;
+        LONG largestArea = 0;
+        LONG largestVisibleArea = 0;
+        bool foundCandidate = false;
     };
 
     BOOL CALLBACK EnumBiduleWindowsProc(HWND hwnd, LPARAM lParam)
@@ -158,12 +163,14 @@ namespace
         if (GetWindow(hwnd, GW_OWNER) != nullptr || GetParent(hwnd) != nullptr)
             return TRUE;
 
-        if (GetWindow(hwnd, GW_CHILD) == nullptr)
-            return TRUE;
-
         DWORD processId = 0;
         GetWindowThreadProcessId(hwnd, &processId);
         if (processId == 0 || processId != ctx->pid)
+            return TRUE;
+
+        ctx->foundCandidate = true;
+
+        if (GetWindow(hwnd, GW_CHILD) == nullptr)
             return TRUE;
 
         wchar_t title[256] = {};
@@ -173,6 +180,25 @@ namespace
 
         if (!ctx->firstMainWindow)
             ctx->firstMainWindow = hwnd;
+
+        RECT rc{};
+        if (GetWindowRect(hwnd, &rc))
+        {
+            LONG width = rc.right - rc.left;
+            LONG height = rc.bottom - rc.top;
+            LONG area = (width > 0 && height > 0) ? (width * height) : 0;
+            if (area > ctx->largestArea)
+            {
+                ctx->largestArea = area;
+                ctx->largestMainWindow = hwnd;
+            }
+
+            if (IsWindowVisible(hwnd) && area > ctx->largestVisibleArea)
+            {
+                ctx->largestVisibleArea = area;
+                ctx->largestVisibleMainWindow = hwnd;
+            }
+        }
 
         if (IsWindowVisible(hwnd) && !ctx->firstVisibleMainWindow)
             ctx->firstVisibleMainWindow = hwnd;
@@ -186,9 +212,25 @@ namespace
         ctx.pid = bidulePid;
         EnumWindows(EnumBiduleWindowsProc, reinterpret_cast<LPARAM>(&ctx));
 
-        if (preferVisible && ctx.firstVisibleMainWindow)
-            return ctx.firstVisibleMainWindow;
+        if (preferVisible)
+        {
+            if (ctx.largestVisibleMainWindow)
+                return ctx.largestVisibleMainWindow;
+            if (ctx.firstVisibleMainWindow)
+                return ctx.firstVisibleMainWindow;
+        }
+
+        if (ctx.largestMainWindow)
+            return ctx.largestMainWindow;
         return ctx.firstMainWindow;
+    }
+
+    bool HasAnyBiduleTopLevelWindow(DWORD bidulePid)
+    {
+        BiduleWindowEnumContext ctx{};
+        ctx.pid = bidulePid;
+        EnumWindows(EnumBiduleWindowsProc, reinterpret_cast<LPARAM>(&ctx));
+        return ctx.foundCandidate;
     }
 }
 
@@ -265,11 +307,17 @@ std::wstring DetectBiduleExePath()
 bool LaunchBidule()
 {
     if (IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe"))
+    {
+        printf("[Bidule] LaunchBidule: process already running; no new instance started.\n");
         return true;
+    }
 
     std::wstring exePath = DetectBiduleExePath();
     if (exePath.empty())
+    {
+        printf("[Bidule] LaunchBidule: executable path not detected.\n");
         return false;
+    }
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
@@ -282,41 +330,43 @@ bool LaunchBidule()
     std::vector<wchar_t> cmdLine(cmd.begin(), cmd.end());
     cmdLine.push_back(L'\0');
 
+    printf("[Bidule] LaunchBidule: starting hidden (SW_HIDE). exe=%S\n", exePath.c_str());
     if (!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
     {
-        printf("Failed to start Bidule (error %lu).\n", GetLastError());
+        printf("[Bidule] LaunchBidule: CreateProcess failed (error %lu).\n", GetLastError());
         return false;
     }
 
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    printf("[Bidule] LaunchBidule: process started hidden successfully.\n");
     return true;
 }
 
-bool SendBiduleOscOpenProfile(const std::wstring& profilePath, unsigned short port)
+static bool SendBiduleOscSingleStringCommand(const char* address, const std::wstring& value, unsigned short port)
 {
-    if (profilePath.empty())
+    if (!address || !*address || value.empty())
         return false;
 
-    auto appendOscString = [](std::vector<char>& buffer, const std::string& value)
+    auto appendOscString = [](std::vector<char>& buffer, const std::string& text)
     {
-        buffer.insert(buffer.end(), value.begin(), value.end());
+        buffer.insert(buffer.end(), text.begin(), text.end());
         buffer.push_back('\0');
         while (buffer.size() % 4 != 0)
             buffer.push_back('\0');
     };
 
-    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, profilePath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (utf8Len <= 1)
         return false;
 
-    std::string profileUtf8(static_cast<size_t>(utf8Len - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, profilePath.c_str(), -1, profileUtf8.data(), utf8Len, nullptr, nullptr);
+    std::string valueUtf8(static_cast<size_t>(utf8Len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, valueUtf8.data(), utf8Len, nullptr, nullptr);
 
     std::vector<char> packet;
-    appendOscString(packet, "/open");
+    appendOscString(packet, address);
     appendOscString(packet, ",s");
-    appendOscString(packet, profileUtf8);
+    appendOscString(packet, valueUtf8);
 
     WSADATA wsa = {};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
@@ -340,17 +390,86 @@ bool SendBiduleOscOpenProfile(const std::wstring& profilePath, unsigned short po
     closesocket(sock);
     WSACleanup();
 
-    if (sent != static_cast<int>(packet.size()))
+    return sent == static_cast<int>(packet.size());
+}
+
+bool SendBiduleOscOpenProfile(const std::wstring& profilePath, unsigned short port)
+{
+    bool ok = SendBiduleOscSingleStringCommand("/open", profilePath, port);
+    if (ok)
+        printf("[BiduleOSC] Sent /open %S to 127.0.0.1:%u\n", profilePath.c_str(), static_cast<unsigned>(port));
+    return ok;
+}
+
+bool SendBiduleOscFileSaveAs(const std::wstring& profilePath, unsigned short port)
+{
+    bool ok = SendBiduleOscSingleStringCommand("/file_saveas", profilePath, port);
+    if (!ok)
+        ok = SendBiduleOscSingleStringCommand("/file_saveas", L"\"" + profilePath + L"\"", port);
+    if (ok)
+        printf("[BiduleOSC] Sent /file_saveas %S to 127.0.0.1:%u\n", profilePath.c_str(), static_cast<unsigned>(port));
+    return ok;
+}
+
+bool SendBiduleOscStringCommand(const std::wstring& address, const std::wstring& value, unsigned short port)
+{
+    if (address.empty() || value.empty())
         return false;
 
-    printf("[BiduleOSC] Sent /open %S to 127.0.0.1:%u\n", profilePath.c_str(), static_cast<unsigned>(port));
-    return true;
+    int utf8AddrLen = WideCharToMultiByte(CP_UTF8, 0, address.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8AddrLen <= 1)
+        return false;
+
+    std::string addressUtf8(static_cast<size_t>(utf8AddrLen - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, address.c_str(), -1, addressUtf8.data(), utf8AddrLen, nullptr, nullptr);
+
+    bool ok = SendBiduleOscSingleStringCommand(addressUtf8.c_str(), value, port);
+    if (ok)
+        printf("[BiduleOSC] Sent %S %S to 127.0.0.1:%u\n", address.c_str(), value.c_str(), static_cast<unsigned>(port));
+    return ok;
 }
 
 void CloseBiduleProcess()
 {
+    bool runningBefore = IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe");
+    if (!runningBefore)
+    {
+        printf("[Bidule] CloseBiduleProcess: not running.\n");
+        return;
+    }
+
+    DWORD bidulePid = FindProcessId(L"bidule.exe");
+    if (bidulePid == 0)
+        bidulePid = FindProcessId(L"Bidule.exe");
+
+    HWND mainWindow = (bidulePid != 0) ? FindPrimaryBiduleWindow(bidulePid, false) : nullptr;
+    if (mainWindow && IsWindow(mainWindow))
+    {
+        printf("[Bidule] CloseBiduleProcess: posting WM_CLOSE to HWND=%p PID=%lu\n", mainWindow, static_cast<unsigned long>(bidulePid));
+        PostMessageW(mainWindow, WM_CLOSE, 0, 0);
+        Sleep(250);
+    }
+
     CloseProcessByName(L"bidule.exe");
     CloseProcessByName(L"Bidule.exe");
+
+    const DWORD waitStart = GetTickCount();
+    const DWORD waitTimeout = 5000;
+    while (GetTickCount() - waitStart < waitTimeout)
+    {
+        if (!IsProcessRunningByName(L"bidule.exe") && !IsProcessRunningByName(L"Bidule.exe"))
+        {
+            printf("[Bidule] CloseBiduleProcess: running before=1 after=0\n");
+            return;
+        }
+        Sleep(200);
+    }
+
+    printf("[Bidule] CloseBiduleProcess: process still running after graceful+forced close attempt.\n");
+    CloseProcessByName(L"bidule.exe");
+    CloseProcessByName(L"Bidule.exe");
+    printf("[Bidule] CloseBiduleProcess: running before=1 after=%d\n",
+        (IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe")) ? 1 : 0);
 }
 
 bool IsBiduleWindowVisible()
@@ -365,6 +484,62 @@ bool IsBiduleWindowVisible()
     return visibleWindow != nullptr && IsWindowVisible(visibleWindow);
 }
 
+bool EnsureBiduleWindowReady(unsigned int timeoutMs)
+{
+    DWORD bidulePid = FindProcessId(L"bidule.exe");
+    if (bidulePid == 0)
+        bidulePid = FindProcessId(L"Bidule.exe");
+    if (bidulePid == 0)
+        return false;
+
+    const DWORD startTick = GetTickCount();
+    const DWORD timeout = timeoutMs < 1000 ? 1000 : timeoutMs;
+    const LONG kMinReadyArea = 300000;
+    unsigned int stableReadyHits = 0;
+
+    while (GetTickCount() - startTick < timeout)
+    {
+        HWND mainWindow = FindPrimaryBiduleWindow(bidulePid, false);
+        if (mainWindow && IsWindow(mainWindow))
+        {
+            RECT rc{};
+            LONG area = 0;
+            if (GetWindowRect(mainWindow, &rc))
+            {
+                LONG width = rc.right - rc.left;
+                LONG height = rc.bottom - rc.top;
+                if (width > 0 && height > 0)
+                    area = width * height;
+            }
+
+            if (area >= kMinReadyArea)
+            {
+                ++stableReadyHits;
+                if (stableReadyHits >= 3)
+                    return true;
+            }
+            else
+            {
+                stableReadyHits = 0;
+            }
+        }
+        else if (HasAnyBiduleTopLevelWindow(bidulePid))
+        {
+            stableReadyHits = 0;
+            Sleep(150);
+        }
+        else
+        {
+            stableReadyHits = 0;
+            Sleep(120);
+        }
+
+        Sleep(120);
+    }
+
+    return false;
+}
+
 bool ShowBiduleWindow()
 {
     DWORD bidulePid = FindProcessId(L"bidule.exe");
@@ -373,14 +548,46 @@ bool ShowBiduleWindow()
     if (bidulePid == 0)
         return false;
 
-    HWND mainWindow = FindPrimaryBiduleWindow(bidulePid, false);
-    if (!mainWindow || !IsWindow(mainWindow))
+    if (!EnsureBiduleWindowReady(12000))
+    {
+        printf("[Bidule] ShowBiduleWindow: timed out waiting for main window readiness (main UI area too small or unstable).\n");
         return false;
+    }
 
-    ShowWindowAsync(mainWindow, SW_RESTORE);
-    ShowWindowAsync(mainWindow, SW_SHOW);
-    SetForegroundWindow(mainWindow);
-    return true;
+    const LONG kMinReadyArea = 300000;
+    ShowWindowAsync(FindPrimaryBiduleWindow(bidulePid, false), SW_SHOW);
+    const DWORD showStartTick = GetTickCount();
+    const DWORD showTimeout = 8000;
+    while (GetTickCount() - showStartTick < showTimeout)
+    {
+        HWND mainWindow = FindPrimaryBiduleWindow(bidulePid, false);
+        if (mainWindow && IsWindow(mainWindow))
+        {
+            ShowWindowAsync(mainWindow, SW_RESTORE);
+            ShowWindowAsync(mainWindow, SW_SHOW);
+            SetForegroundWindow(mainWindow);
+
+            Sleep(180);
+
+            RECT rc{};
+            LONG area = 0;
+            if (GetWindowRect(mainWindow, &rc))
+            {
+                LONG width = rc.right - rc.left;
+                LONG height = rc.bottom - rc.top;
+                if (width > 0 && height > 0)
+                    area = width * height;
+            }
+
+            if (IsWindowVisible(mainWindow) && area >= kMinReadyArea)
+                return true;
+        }
+
+        Sleep(180);
+    }
+
+    printf("[Bidule] ShowBiduleWindow: show retry timeout, UI still not in ready size/visible state.\n");
+    return false;
 }
 
 bool HideBiduleWindow()

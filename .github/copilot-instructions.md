@@ -7,7 +7,8 @@
 - Use a Hauptwerk-style Win32 classic preferences UI with tabs for the Settings window instead of the current simple dialog.
 - Allow restructuring sections and adding new preferences within the Settings UI.
 - Implement the redesign incrementally, starting with a first "Model" tab.
-- For Bidule integration, use a dedicated Settings tab, auto-detect the executable with file-picker fallback, and close Bidule automatically when an organ is unloaded.
+- For Bidule integration, use a dedicated Settings tab, auto-detect the executable with file-picker fallback, and close Bidule automatically when an organ is unloaded. 
+- Save Bidule profiles only when an organ is actually loaded; do not trigger Bidule profile save during standby/transient states, and only on real unload cases such as manual close, unload, or FE disconnect.
 
 ## MIDI Device Configuration
 - Use a separate window for MIDI device configuration.

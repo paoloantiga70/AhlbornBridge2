@@ -367,6 +367,7 @@ namespace
                     
 				case DeferredCmd::LoadFavoriteOrgan0:
 					printf("[Deferred] Unload organ ...\n");
+					CloseBiduleIfConfigured();
 					if (!ClickMenu(g_hauptwerkMainWindow,  mUNLOAD_ORGAN ))
 					{
 						printf("Bridge is unchecked!!..\n");
@@ -427,9 +428,12 @@ namespace
                                         }
                                     }
 
-                                    printf("[AudioPreload] Audio config is not aligned. Closing Hauptwerk before rewriting config...\n");
+                                    printf("[AudioPreload] Audio config is not aligned. Closing Bidule and Hauptwerk before rewriting config...\n");
                                     ShowHauptwerkRestartSplash(outputDeviceName.c_str());
                                     UpdateHauptwerkRestartSplashProgress(10);
+                                    printf("[AudioPreload] Saving and closing Bidule before audio rewrite.\n");
+                                    CloseBiduleIfConfigured();
+                                    UpdateHauptwerkRestartSplashProgress(20);
                                     CloseHauptwerkProcess();
                                     UpdateHauptwerkRestartSplashProgress(30);
 
@@ -647,13 +651,73 @@ namespace
         return _wcsicmp(GetInstalledOrganOutputDeviceName(installedOrganIndex).c_str(), L"Hauptwerk VST Link") == 0;
     }
 
+    std::wstring GetInstalledOrganUniqueId(int installedOrganIndex)
+    {
+        if (installedOrganIndex <= 0)
+            return {};
+
+        std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+        if (installedOrganIndex > static_cast<int>(organs.size()))
+            return {};
+        return organs[installedOrganIndex - 1].uniqueOrganId;
+    }
+
+    std::wstring BuildBiduleProfilePathForOrgan(int installedOrganIndex)
+    {
+        if (installedOrganIndex <= 0)
+            return {};
+
+        std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+        if (installedOrganIndex > static_cast<int>(organs.size()))
+            return {};
+
+        const auto& organ = organs[installedOrganIndex - 1];
+        if (!organ.biduleProfile.empty())
+        {
+            std::wstring path = organ.biduleProfile;
+            bool rooted = (path.size() > 2 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'));
+            bool unc = (path.size() > 1 && path[0] == L'\\' && path[1] == L'\\');
+            if (!rooted && !unc)
+                path = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + path;
+            return path;
+        }
+
+        if (organ.name.empty())
+            return {};
+
+        return L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + organ.name + L".bidule";
+    }
+
     void CloseBiduleIfConfigured()
     {
+        int loadedInstalledOrganIndex = g_currentLoadedInstalledOrganIndex.load();
+        if (loadedInstalledOrganIndex <= 0)
+            return;
+
+        if (!ShouldUseBiduleForInstalledOrgan(loadedInstalledOrganIndex))
+            return;
+
+        printf("[Bidule] save-on-unload triggered.\n");
         bool closeOnUnload = true;
         if (!LoadBiduleCloseOnUnload(closeOnUnload))
             closeOnUnload = true;
-        if (closeOnUnload)
-            CloseBiduleProcess();
+
+        if (!closeOnUnload)
+            return;
+
+        std::wstring savePath = BuildBiduleProfilePathForOrgan(loadedInstalledOrganIndex);
+        if (!savePath.empty())
+        {
+            if (SendBiduleOscFileSaveAs(savePath))
+            {
+                size_t sep = savePath.find_last_of(L"\\/");
+                std::wstring profileName = (sep == std::wstring::npos) ? savePath : savePath.substr(sep + 1);
+                SaveInstalledOrganBiduleProfile(GetInstalledOrganUniqueId(loadedInstalledOrganIndex), profileName);
+                Sleep(300);
+            }
+        }
+
+        CloseBiduleProcess();
     }
 
     // Choose the appropriate standby icon based on the current device state.
@@ -856,112 +920,133 @@ namespace
                 continue;
             }
 
-            if (std::wcscmp(title, L"Hauptwerk") == 0)
-            {
-                if (lastState != IconState::Standby || deviceStateChanged)
-                {
-                    UpdateTrayIconTooltip(title);
-                    UpdateTrayIconFromFile(GetStandbyIconForCurrentDeviceState());
-                    lastState = IconState::Standby;
-                    isOrganLoaded = false;
-                    g_currentLoadedFavoriteIndex = 0;
-                    g_currentLoadedInstalledOrganIndex = 0;
-                    CloseBiduleIfConfigured();
-                    g_hauptwerkOrganTitle.clear();
-                    NotifyOrganInfoTitleChanged();
-                    g_trayIconImageStatus = TrayIconImageStatus::Standby;
-                    if (!g_isLoadingOrgan.load() && ! g_pendingOrganLoad.load())
-                    {
-                        SendUnloadOrganMidiMessage();
-                    }
-                    
-                }
-            }
-            else if (std::wcsncmp(title, L"Hauptwerk -", 11) == 0)
-            {
-                if (lastState != IconState::Online || deviceStateChanged)
-                {
-                    UpdateTrayIconTooltip(title);
-                    UpdateTrayIconFromFile(GetOnlineIconForCurrentDeviceState());
+			if (std::wcscmp(title, L"Hauptwerk") == 0)
+			{
+				if (lastState != IconState::Standby || deviceStateChanged)
+				{
+					UpdateTrayIconTooltip(title);
+					UpdateTrayIconFromFile(GetStandbyIconForCurrentDeviceState());
+					lastState = IconState::Standby;
+					isOrganLoaded = false;
+					g_currentLoadedFavoriteIndex = 0;
+					g_currentLoadedInstalledOrganIndex = 0;
+					if (deviceState.load() == DeviceState::Disconnected)
+						CloseBiduleIfConfigured();
+					g_hauptwerkOrganTitle.clear();
+					NotifyOrganInfoTitleChanged();
+					g_trayIconImageStatus = TrayIconImageStatus::Standby;
+					if (!g_isLoadingOrgan.load() && ! g_pendingOrganLoad.load())
+					{
+						SendUnloadOrganMidiMessage();
+					}
+
+				}
+			}
+			else if (std::wcsncmp(title, L"Hauptwerk -", 11) == 0)
+			{
+				bool enteringOnlineState = (lastState != IconState::Online);
+				if (enteringOnlineState || deviceStateChanged)
+				{
+					UpdateTrayIconTooltip(title);
+					UpdateTrayIconFromFile(GetOnlineIconForCurrentDeviceState());
 					lastState = IconState::Online;
 					isOrganLoaded = true;
 					g_pendingOrganLoad = false;
 					g_hauptwerkOrganTitle = ExtractOrganTitle(title);
-                    NotifyOrganInfoTitleChanged();
-                    g_trayIconImageStatus = TrayIconImageStatus::Online;
+					NotifyOrganInfoTitleChanged();
+					g_trayIconImageStatus = TrayIconImageStatus::Online;
+				}
 
-                    int loadedInstalledOrganIndex = g_currentLoadedInstalledOrganIndex.load();
-                    if (loadedInstalledOrganIndex > 0 && ShouldUseBiduleForInstalledOrgan(loadedInstalledOrganIndex))
-                    {
-                        std::wstring biduleProfilePath;
-                        std::vector<InstalledOrganInfo> organInfos = LoadInstalledOrganInfos();
-                        if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
-                            biduleProfilePath = organInfos[loadedInstalledOrganIndex - 1].biduleProfile;
+				if (enteringOnlineState)
+				{
+					int loadedInstalledOrganIndex = g_currentLoadedInstalledOrganIndex.load();
+					if (loadedInstalledOrganIndex > 0 && ShouldUseBiduleForInstalledOrgan(loadedInstalledOrganIndex))
+					{
+						std::wstring biduleProfilePath;
+						std::vector<InstalledOrganInfo> organInfos = LoadInstalledOrganInfos();
+						if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
+						{
+							const auto& organ = organInfos[loadedInstalledOrganIndex - 1];
+							biduleProfilePath = organ.biduleProfile;
+							if (!biduleProfilePath.empty())
+							{
+								bool rooted = (biduleProfilePath.size() > 2 && biduleProfilePath[1] == L':' &&
+									(biduleProfilePath[2] == L'\\' || biduleProfilePath[2] == L'/'));
+								bool unc = (biduleProfilePath.size() > 1 && biduleProfilePath[0] == L'\\' && biduleProfilePath[1] == L'\\');
+								if (!rooted && !unc)
+								{
+									biduleProfilePath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + biduleProfilePath;
+								}
+							}
+						}
 
-                        if (!biduleProfilePath.empty())
-                        {
-                            bool rooted = (biduleProfilePath.size() > 2 && biduleProfilePath[1] == L':' &&
-                                (biduleProfilePath[2] == L'\\' || biduleProfilePath[2] == L'/'));
-                            bool unc = (biduleProfilePath.size() > 1 && biduleProfilePath[0] == L'\\' && biduleProfilePath[1] == L'\\');
-                            if (!rooted && !unc)
-                            {
-                                biduleProfilePath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + biduleProfilePath;
-                            }
-                        }
+						if (!LaunchBidule())
+						{
+							printf("[Bidule] Bidule launch skipped because no executable path is configured or detected.\n");
+						}
+						else
+						{
+							ShowBiduleLaunchSplash();
+							UpdateBiduleLaunchSplashProgress(10);
+							if (biduleProfilePath.empty())
+								printf("[Bidule] Bidule launched after organ load completed (no profile).\n");
+							else
+								printf("[Bidule] Bidule launched after organ load completed with OSC profile request: %S\n", biduleProfilePath.c_str());
 
-                        if (!LaunchBidule())
-                        {
-                            printf("[Bidule] Bidule launch skipped because no executable path is configured or detected.\n");
-                        }
-                        else
-                        {
-                            if (biduleProfilePath.empty())
-                                printf("[Bidule] Bidule launched after organ load completed (no profile).\n");
-                            else
-                                printf("[Bidule] Bidule launched after organ load completed with OSC profile request: %S\n", biduleProfilePath.c_str());
-                            ShowVstLinkModeSplash();
+							UpdateBiduleLaunchSplashProgress(30);
+							Sleep(2000);
+							UpdateBiduleLaunchSplashProgress(55);
+							if (!biduleProfilePath.empty())
+							{
+								DWORD attrs = GetFileAttributesW(biduleProfilePath.c_str());
+								if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+								{
+									printf("[BiduleOSC] Profile file not found: %S\n", biduleProfilePath.c_str());
+								}
+								else if (!SendBiduleOscOpenProfile(biduleProfilePath))
+								{
+									printf("[BiduleOSC] Failed to send /open command.\n");
+								}
+							}
+							else
+							{
+								printf("[Bidule] Launch mode for this organ: visible (no BiduleProfile).\n");
+								bool shown = ShowBiduleWindow();
+								if (!shown)
+									shown = IsBiduleWindowVisible();
+								printf("[Bidule] Visible request result: %s\n", shown ? "visible" : "still hidden");
+							}
 
-                            Sleep(2000);
-                            if (!biduleProfilePath.empty())
-                            {
-                                DWORD attrs = GetFileAttributesW(biduleProfilePath.c_str());
-                                if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
-                                {
-                                    printf("[BiduleOSC] Profile file not found: %S\n", biduleProfilePath.c_str());
-                                }
-                                else if (!SendBiduleOscOpenProfile(biduleProfilePath))
-                                {
-                                    printf("[BiduleOSC] Failed to send /open command.\n");
-                                }
-                            }
-                            else
-                            {
-                                bool shown = IsBiduleWindowVisible();
-                                for (int attempt = 0; !shown && attempt < 12; ++attempt)
-                                {
-                                    Sleep(250);
-                                    shown = IsBiduleWindowVisible();
-                                    if (!shown)
-                                    {
-                                        EnsureBiduleVisibleViaTrayToggle();
-                                        Sleep(100);
-                                        shown = IsBiduleWindowVisible();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+							UpdateBiduleLaunchSplashProgress(75);
+							if (EnsureBiduleWindowReady(12000))
+							{
+								UpdateBiduleLaunchSplashProgress(90);
+								Sleep(400);
+								UpdateBiduleLaunchSplashProgress(100);
+							}
+							else
+							{
+								printf("[Bidule] Launch splash timeout waiting for audio engine readiness.\n");
+								UpdateBiduleLaunchSplashProgress(90);
+							}
+							CloseBiduleLaunchSplash();
+						}
+					}
+				}
+				else if (deviceStateChanged)
+				{
+					printf("[Bidule] Console reconnect detected while organ already online; keeping current Bidule profile/session.\n");
+				}
 
-                std::wstring cleanOrganTitle = ExtractOrganTitle(title);
-                std::wstring outputDeviceName = GetInstalledOrganOutputDeviceName(g_currentLoadedInstalledOrganIndex.load());
-                if (!cleanOrganTitle.empty() && !outputDeviceName.empty())
-                {
-                    std::wstring desiredTitle = L"Hauptwerk - " + cleanOrganTitle + L" [" + outputDeviceName + L"]";
-                    if (desiredTitle != title)
-                        SetWindowTextW(mainWindow, desiredTitle.c_str());
-                }
-            }
+				std::wstring cleanOrganTitle = ExtractOrganTitle(title);
+				std::wstring outputDeviceName = GetInstalledOrganOutputDeviceName(g_currentLoadedInstalledOrganIndex.load());
+				if (!cleanOrganTitle.empty() && !outputDeviceName.empty())
+				{
+					std::wstring desiredTitle = L"Hauptwerk - " + cleanOrganTitle + L" [" + outputDeviceName + L"]";
+					if (desiredTitle != title)
+						SetWindowTextW(mainWindow, desiredTitle.c_str());
+				}
+			}
 
             lastDeviceState = currentDeviceState;
             Sleep(200);
@@ -1971,6 +2056,7 @@ DWORD WINAPI WatchdogThread(LPVOID)
         {
             if (newState == DeviceState::Disconnected)
             {
+                printf("[Bidule] FE disconnect path enter.\n");
                 printf("\n>>> *************************** >>>\n");
                 printf(">>> AHLBORN 250 SL DISCONNECTED >>>\n");
                 printf(">>> *************************** >>>\n");
@@ -1989,7 +2075,8 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 if (!g_hauptwerkKeyHeld.load() )
                 {
                     printf("Closing Hauptwerk (no key held).\n");
-					
+                    CloseBiduleIfConfigured();
+
                     printf("g_midi_reset set to false.\n");
                     CloseHauptwerkProcess();
 
@@ -2007,6 +2094,14 @@ DWORD WINAPI WatchdogThread(LPVOID)
                     //g_hauptwerkMainWindow = nullptr;
                 }
                 clearAllNotes(); // panic safety
+
+                // Force Stream Deck/UI state back to no-loaded-organ on real console disconnect.
+                isOrganLoaded = false;
+                g_pendingOrganLoad = false;
+                g_currentLoadedFavoriteIndex = 0;
+                g_currentLoadedInstalledOrganIndex = 0;
+                g_hauptwerkOrganTitle.clear();
+                NotifyOrganInfoTitleChanged();
             }
             else
             {
@@ -2042,6 +2137,10 @@ DWORD WINAPI WatchdogThread(LPVOID)
             }
 
             deviceState = newState;
+
+            // Refresh Stream Deck button visuals even when loaded organ index
+            // does not change (for example console OFF->ON with organ already loaded).
+            NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
         }
 
         Sleep(50);

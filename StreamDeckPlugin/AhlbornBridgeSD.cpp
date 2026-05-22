@@ -90,6 +90,9 @@ static std::map<std::string, ButtonInfo> g_visibleButtons; // context -> info
 // Current organ state
 static std::mutex g_stateMutex;
 static int g_loadedOrganIndex = 0;
+static bool g_loadedOrganUsesVstLink = false;
+static bool g_consoleConnected = false;
+static bool g_hauptwerkRunning = false;
 
 // Organ list from AhlbornBridge
 struct OrganEntry
@@ -107,6 +110,16 @@ static std::string g_bgImageOn;
 // Delayed refresh after willAppear burst (profile load)
 static std::atomic<ULONGLONG> g_lastWillAppearTick{0};
 static std::atomic<bool> g_refreshPending{false};
+
+// Hold detection for loaded-organ button action (short press unload, long press toggle Bidule window)
+struct KeyHoldInfo
+{
+    ULONGLONG downTick = 0;
+    int organIndex = 0;
+    bool longTriggered = false;
+};
+static std::mutex g_keyDownMutex;
+static std::map<std::string, KeyHoldInfo> g_keyDownTickByContext;
 
 // ─── Simple JSON helpers ────────────────────────────────────────────────
 
@@ -383,17 +396,19 @@ static std::vector<std::string> WrapTitleLines(const std::string& text, int maxC
 }
 
 // Build an SVG image for a button with improved visual states and title layout
-static std::string BuildButtonSvg(const std::string& title, bool loaded)
+static std::string BuildButtonSvg(const std::string& title, bool loaded, bool vstLink, bool consoleConnected, bool hauptwerkRunning)
 {
     const bool isEmpty = (title == "Empty");
     const bool isOffline = (title == "Disconnected.");
     const bool isReady = !loaded && !isEmpty && !isOffline;
+    const bool isVstLinkLoaded = loaded && vstLink;
 
     const std::string& bgImage = loaded ? g_bgImageOn : g_bgImageOff;
-    std::string frameColor = loaded ? "#39d353" : isOffline ? "#ffb347" : isEmpty ? "#7d8590" : "#58a6ff";
-    std::string badgeText = loaded ? "LOADED" : isOffline ? "OFFLINE" : isEmpty ? "EMPTY" : "READY";
-    std::string badgeFill = loaded ? "#123c1f" : isOffline ? "#5c3b00" : isEmpty ? "#30363d" : "#0d2d4f";
-    std::string titleColor = loaded ? "#eaffea" : isOffline ? "#fff4db" : isEmpty ? "#e6edf3" : "#ffffff";
+    std::string frameColor = isVstLinkLoaded ? "#a371f7" : loaded ? "#39d353" : isOffline ? "#ffb347" : isEmpty ? "#7d8590" : "#58a6ff";
+    std::string outerBorderColor = loaded ? "#39d353" : isOffline ? "#ffb347" : isEmpty ? "#7d8590" : "#58a6ff";
+    std::string badgeText = isVstLinkLoaded ? "VST LINK" : loaded ? "LOADED" : isOffline ? "OFFLINE" : isEmpty ? "EMPTY" : "READY";
+    std::string badgeFill = isVstLinkLoaded ? "#2f1a47" : loaded ? "#123c1f" : isOffline ? "#5c3b00" : isEmpty ? "#30363d" : "#0d2d4f";
+    std::string titleColor = isVstLinkLoaded ? "#a371f7" : loaded ? "#39d353" : isOffline ? "#fff4db" : isEmpty ? "#e6edf3" : "#ffffff";
     std::string shadowColor = loaded ? "#0b1f10" : "#111111";
 
     std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>";
@@ -410,8 +425,8 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded)
         svg += "<rect x='4' y='4' width='136' height='136' rx='12' fill='" + bg + "'/>";
     }
 
-    svg += "<rect x='4' y='4' width='136' height='136' rx='12' fill='none' stroke='" + frameColor + "' stroke-width='3'/>";
-    svg += "<rect x='14' y='12' width='116' height='24' rx='8' fill='" + badgeFill + "' stroke='" + frameColor + "' stroke-width='1.5'/>";
+    svg += "<rect x='4' y='4' width='136' height='136' rx='12' fill='none' stroke='" + outerBorderColor + "' stroke-width='3'/>";
+    svg += "<rect x='14' y='12' width='116' height='24' rx='8' fill='" + badgeFill + "' stroke='" + outerBorderColor + "' stroke-width='1.5'/>";
     svg += "<text x='72' y='29' font-family='Arial' font-size='12' fill='" + frameColor + "' text-anchor='middle' font-weight='bold' letter-spacing='1'>" + badgeText + "</text>";
 
     auto lines = WrapTitleLines(title, 12, 4);
@@ -427,22 +442,17 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded)
         svg += "<text x='72' y='" + std::to_string(y) + "' font-family='Arial' font-size='" + std::to_string(fontSize) + "' fill='" + titleColor + "' text-anchor='middle' font-weight='bold'>" + XmlEscape(lines[i]) + "</text>";
     }
 
-    if (isReady)
+    std::string consoleDotFill = "#7d8590";
+    std::string consoleDotStroke = "#e6edf3";
+    std::string consoleDotStrokeWidth = "1.5";
+    if (hauptwerkRunning)
     {
-        svg += "<circle cx='123' cy='122' r='7' fill='#58a6ff' stroke='#dbeafe' stroke-width='1.5'/>";
+        consoleDotFill = "#39d353";
+        consoleDotStroke = consoleConnected ? "#ff7b72" : "#dcffe4";
+        if (consoleConnected)
+            consoleDotStrokeWidth = "2.5";
     }
-    else if (loaded)
-    {
-        svg += "<circle cx='123' cy='122' r='7' fill='#39d353' stroke='#dcffe4' stroke-width='1.5'/>";
-    }
-    else if (isOffline)
-    {
-        svg += "<circle cx='123' cy='122' r='7' fill='#ffb347' stroke='#fff1d6' stroke-width='1.5'/>";
-    }
-    else
-    {
-        svg += "<circle cx='123' cy='122' r='7' fill='#7d8590' stroke='#e6edf3' stroke-width='1.5'/>";
-    }
+    svg += "<circle cx='123' cy='122' r='7' fill='" + consoleDotFill + "' stroke='" + consoleDotStroke + "' stroke-width='" + consoleDotStrokeWidth + "'/>";
 
     svg += "</svg>";
     return svg;
@@ -507,9 +517,15 @@ static void UpdateAllButtons()
 {
     std::lock_guard<std::mutex> lk(g_buttonsMutex);
     int loaded = 0;
+    bool loadedUsesVstLink = false;
+    bool consoleConnected = false;
+    bool hauptwerkRunning = false;
     {
         std::lock_guard<std::mutex> sl(g_stateMutex);
         loaded = g_loadedOrganIndex;
+        loadedUsesVstLink = g_loadedOrganUsesVstLink;
+        consoleConnected = g_consoleConnected;
+        hauptwerkRunning = g_hauptwerkRunning;
     }
 
     Log("[UpdateAllButtons] visibleButtons=%d  loadedOrganIndex=%d",
@@ -532,7 +548,7 @@ static void UpdateAllButtons()
         int st = (info.organIndex == loaded && loaded > 0) ? 1 : 0;
         Log("  button ctx=%.30s organIndex=%d title=%s state=%d",
             ctx.c_str(), info.organIndex, title.c_str(), st);
-        std::string svg = BuildButtonSvg(title, st == 1);
+        std::string svg = BuildButtonSvg(title, st == 1, st == 1 && loadedUsesVstLink, consoleConnected, hauptwerkRunning);
         SdSetImage(ctx, svg, 0);
         SdSetImage(ctx, svg, 1);
         SdSetTitle(ctx, "", 0);
@@ -555,12 +571,18 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
     std::string title = ResolveButtonTitle(organIndex, cachedName);
 
     int loaded;
+    bool loadedUsesVstLink;
+    bool consoleConnected;
+    bool hauptwerkRunning;
     {
         std::lock_guard<std::mutex> sl(g_stateMutex);
         loaded = g_loadedOrganIndex;
+        loadedUsesVstLink = g_loadedOrganUsesVstLink;
+        consoleConnected = g_consoleConnected;
+        hauptwerkRunning = g_hauptwerkRunning;
     }
     bool isLoaded = (organIndex == loaded && loaded > 0);
-    std::string svg = BuildButtonSvg(title, isLoaded);
+    std::string svg = BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning);
     SdSetImage(context, svg, 0);
     SdSetImage(context, svg, 1);
     SdSetTitle(context, "", 0);
@@ -678,11 +700,17 @@ static void HandlePipeMessage(const std::string& msg)
     else if (msg.find("\"state\"") != std::string::npos)
     {
         int loaded = JsonExtractInt(msg, "loadedIndex");
+        bool vstLink = (msg.find("\"vstLink\":true") != std::string::npos);
+        bool consoleConnected = (msg.find("\"consoleConnected\":true") != std::string::npos);
+        bool hauptwerkRunning = (msg.find("\"hauptwerkRunning\":true") != std::string::npos);
         {
             std::lock_guard<std::mutex> lk(g_stateMutex);
             g_loadedOrganIndex = loaded;
+            g_loadedOrganUsesVstLink = (loaded > 0) && vstLink;
+            g_consoleConnected = consoleConnected;
+            g_hauptwerkRunning = hauptwerkRunning;
         }
-        Log("[Pipe] State update: loadedIndex=%d", loaded);
+        Log("[Pipe] State update: loadedIndex=%d vstLink=%d consoleConnected=%d hauptwerkRunning=%d", loaded, (int)((loaded > 0) && vstLink), (int)consoleConnected, (int)hauptwerkRunning);
         UpdateAllButtons();
     }
 }
@@ -759,6 +787,9 @@ static void PipeReaderThread()
             {
                 std::lock_guard<std::mutex> sl(g_stateMutex);
                 g_loadedOrganIndex = 0;
+                g_loadedOrganUsesVstLink = false;
+                g_consoleConnected = false;
+                g_hauptwerkRunning = false;
             }
             UpdateAllButtons();
             Sleep(2000);
@@ -971,12 +1002,18 @@ static void HandleSdEvent(const std::string& json)
         std::string title = ResolveButtonTitle(organIndex, organName);
 
         int loaded;
+        bool loadedUsesVstLink;
+        bool consoleConnected;
+        bool hauptwerkRunning;
         {
             std::lock_guard<std::mutex> sl(g_stateMutex);
             loaded = g_loadedOrganIndex;
+            loadedUsesVstLink = g_loadedOrganUsesVstLink;
+            consoleConnected = g_consoleConnected;
+            hauptwerkRunning = g_hauptwerkRunning;
         }
         bool isLoaded = (organIndex == loaded && loaded > 0);
-        std::string svg = BuildButtonSvg(title, isLoaded);
+        std::string svg = BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning);
         SdSetImage(context, svg, 0);
         SdSetImage(context, svg, 1);
         SdSetTitle(context, "", 0);
@@ -1002,8 +1039,14 @@ static void HandleSdEvent(const std::string& json)
     else if (event == "willDisappear")
     {
         Log("[SD] willDisappear: context=%.40s", context.c_str());
-        std::lock_guard<std::mutex> lk(g_buttonsMutex);
-        g_visibleButtons.erase(context);
+        {
+            std::lock_guard<std::mutex> lk(g_buttonsMutex);
+            g_visibleButtons.erase(context);
+        }
+        {
+            std::lock_guard<std::mutex> kl(g_keyDownMutex);
+            g_keyDownTickByContext.erase(context);
+        }
     }
     else if (event == "keyDown")
     {
@@ -1021,13 +1064,56 @@ static void HandleSdEvent(const std::string& json)
 
         if (organIndex > 0 && organIndex == loaded)
         {
-            // This organ is currently loaded → unload
-            Log("[SD] keyDown: unloading organ %d", organIndex);
-            PipeSend("{\"type\":\"unload\"}");
+            ULONGLONG downTick = GetTickCount64();
+            {
+                std::lock_guard<std::mutex> kl(g_keyDownMutex);
+                g_keyDownTickByContext[context] = { downTick, organIndex, false };
+            }
+            Log("[SD] keyDown: loaded organ button hold tracking started (ctx=%.40s)", context.c_str());
+
+            std::string holdContext = context;
+            std::thread([holdContext, organIndex, downTick]() {
+                Sleep(2000);
+
+                bool shouldTrigger = false;
+                {
+                    std::lock_guard<std::mutex> kl(g_keyDownMutex);
+                    auto it = g_keyDownTickByContext.find(holdContext);
+                    if (it != g_keyDownTickByContext.end()
+                        && it->second.downTick == downTick
+                        && it->second.organIndex == organIndex
+                        && !it->second.longTriggered)
+                    {
+                        it->second.longTriggered = true;
+                        shouldTrigger = true;
+                    }
+                }
+
+                if (!shouldTrigger)
+                    return;
+
+                int loadedNow;
+                bool loadedUsesVstLinkNow;
+                {
+                    std::lock_guard<std::mutex> sl(g_stateMutex);
+                    loadedNow = g_loadedOrganIndex;
+                    loadedUsesVstLinkNow = g_loadedOrganUsesVstLink;
+                }
+
+                if (organIndex <= 0 || organIndex != loadedNow || !loadedUsesVstLinkNow)
+                {
+                    Log("[SD] hold threshold reached, action ignored (organIndex=%d loaded=%d vst=%d)",
+                        organIndex, loadedNow, (int)loadedUsesVstLinkNow);
+                    return;
+                }
+
+                Log("[SD] hold threshold reached (2000 ms) on loaded organ %d -> toggle Bidule window", organIndex);
+                PipeSend("{\"type\":\"toggleBiduleWindow\"}");
+            }).detach();
         }
         else if (organIndex > 0)
         {
-            // Not loaded → load this organ
+            // Not loaded → load this organ immediately
             Log("[SD] keyDown: loading organ %d", organIndex);
             PipeSend("{\"type\":\"load\",\"index\":" + std::to_string(organIndex) + "}");
         }
@@ -1035,6 +1121,53 @@ static void HandleSdEvent(const std::string& json)
         {
             Log("[SD] keyDown: organIndex=0, no action (button not configured)");
         }
+    }
+    else if (event == "keyUp")
+    {
+        std::string payload = JsonExtractObject(json, "payload");
+        std::string settings = JsonExtractObject(payload, "settings");
+        int organIndex = JsonExtractInt(settings, "organIndex");
+
+        KeyHoldInfo hold;
+        bool hasHold = false;
+        {
+            std::lock_guard<std::mutex> kl(g_keyDownMutex);
+            auto it = g_keyDownTickByContext.find(context);
+            if (it != g_keyDownTickByContext.end())
+            {
+                hold = it->second;
+                g_keyDownTickByContext.erase(it);
+                hasHold = true;
+            }
+        }
+
+        if (!hasHold)
+            return;
+
+        ULONGLONG heldMs = GetTickCount64() - hold.downTick;
+
+        if (hold.longTriggered)
+        {
+            Log("[SD] keyUp: hold action already triggered at threshold (held=%llu ms)", (unsigned long long)heldMs);
+            return;
+        }
+
+        int loaded;
+        {
+            std::lock_guard<std::mutex> sl(g_stateMutex);
+            loaded = g_loadedOrganIndex;
+        }
+
+        if (organIndex <= 0 || organIndex != loaded)
+        {
+            Log("[SD] keyUp: ignoring short press action, organ changed (organIndex=%d loaded=%d held=%llu)",
+                organIndex, loaded, (unsigned long long)heldMs);
+            return;
+        }
+
+        // Short press on loaded organ keeps existing behavior
+        Log("[SD] keyUp: short press (%llu ms) on loaded organ %d -> unload", (unsigned long long)heldMs, organIndex);
+        PipeSend("{\"type\":\"unload\"}");
     }
     else if (event == "propertyInspectorDidAppear")
     {
@@ -1100,12 +1233,18 @@ static void HandleSdEvent(const std::string& json)
             }
 
             int loaded;
+            bool loadedUsesVstLink;
+            bool consoleConnected;
+            bool hauptwerkRunning;
             {
                 std::lock_guard<std::mutex> sl(g_stateMutex);
                 loaded = g_loadedOrganIndex;
+                loadedUsesVstLink = g_loadedOrganUsesVstLink;
+                consoleConnected = g_consoleConnected;
+                hauptwerkRunning = g_hauptwerkRunning;
             }
             bool isLoaded = (organIndex == loaded && loaded > 0);
-            std::string svg = BuildButtonSvg(title, isLoaded);
+            std::string svg = BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning);
             SdSetImage(context, svg, 0);
             SdSetImage(context, svg, 1);
             SdSetTitle(context, "", 0);
@@ -1137,12 +1276,18 @@ static void HandleSdEvent(const std::string& json)
         std::string title = ResolveButtonTitle(organIndex, organName);
 
         int loaded;
+        bool loadedUsesVstLink;
+        bool consoleConnected;
+        bool hauptwerkRunning;
         {
             std::lock_guard<std::mutex> sl(g_stateMutex);
             loaded = g_loadedOrganIndex;
+            loadedUsesVstLink = g_loadedOrganUsesVstLink;
+            consoleConnected = g_consoleConnected;
+            hauptwerkRunning = g_hauptwerkRunning;
         }
         bool isLoaded = (organIndex == loaded && loaded > 0);
-        std::string svg = BuildButtonSvg(title, isLoaded);
+        std::string svg = BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning);
         SdSetImage(context, svg, 0);
         SdSetImage(context, svg, 1);
         SdSetTitle(context, "", 0);

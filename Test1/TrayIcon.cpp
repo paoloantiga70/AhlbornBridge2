@@ -42,6 +42,9 @@ static HWND g_hauptwerkOrganListHwnd = nullptr;
 static HWND g_hauptwerkAudioDeviceComboHwnd = nullptr;
 static HWND g_bidulePathEditHwnd = nullptr;
 static HWND g_biduleCloseOnUnloadCheckHwnd = nullptr;
+static HWND g_biduleOscAddressEditHwnd = nullptr;
+static HWND g_biduleOscValueEditHwnd = nullptr;
+static HWND g_biduleOscPortEditHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -65,6 +68,7 @@ constexpr int kHauptwerkSaveAudioAssignmentButtonId = 503;
 constexpr int kBiduleBrowseButtonId = 601;
 constexpr int kBiduleAutoDetectButtonId = 602;
 constexpr int kBiduleCloseOnUnloadCheckId = 603;
+constexpr int kBiduleOscSendButtonId = 604;
 
 namespace
 {
@@ -571,7 +575,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
         {
             CreateWindowW(L"BUTTON", L"Bidule Integration", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                10, 8, 740, 220, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+                10, 8, 740, 300, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
             CreateWindowW(L"STATIC", L"Executable:",
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
@@ -602,6 +606,34 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 L"If Bidule is not found automatically, choose Bidule.exe manually here.",
                 WS_CHILD | WS_VISIBLE,
                 136, 146, 430, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"OSC address:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 180, 100, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleOscAddressEditHwnd = CreateWindowW(L"EDIT", L"/open",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                136, 176, 220, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Value:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 210, 100, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleOscValueEditHwnd = CreateWindowW(L"EDIT", L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\OSC_Test.bidule",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                136, 206, 430, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Port:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 240, 100, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleOscPortEditHwnd = CreateWindowW(L"EDIT", L"3210",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                136, 236, 80, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Send OSC",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                230, 236, 100, 24, g_settingsBidulePageHwnd, (HMENU)kBiduleOscSendButtonId, nullptr, nullptr);
 
             RefreshBiduleSettingsUI();
         }
@@ -1027,6 +1059,26 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             SaveBiduleCloseOnUnload(enabled);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleOscSendButtonId)
+        {
+            wchar_t addrBuf[128] = {};
+            wchar_t valueBuf[1024] = {};
+            wchar_t portBuf[32] = {};
+            if (g_biduleOscAddressEditHwnd) GetWindowTextW(g_biduleOscAddressEditHwnd, addrBuf, static_cast<int>(_countof(addrBuf)));
+            if (g_biduleOscValueEditHwnd) GetWindowTextW(g_biduleOscValueEditHwnd, valueBuf, static_cast<int>(_countof(valueBuf)));
+            if (g_biduleOscPortEditHwnd) GetWindowTextW(g_biduleOscPortEditHwnd, portBuf, static_cast<int>(_countof(portBuf)));
+
+            unsigned short port = 3210;
+            int parsed = _wtoi(portBuf);
+            if (parsed > 0 && parsed <= 65535)
+                port = static_cast<unsigned short>(parsed);
+
+            if (SendBiduleOscStringCommand(addrBuf, valueBuf, port))
+                MessageBoxW(hWnd, L"OSC command sent.", L"Bidule OSC", MB_OK | MB_ICONINFORMATION);
+            else
+                MessageBoxW(hWnd, L"Failed to send OSC command.", L"Bidule OSC", MB_OK | MB_ICONWARNING);
+            return 0;
+        }
         break;
     }
     case WM_DEVICECHANGE:
@@ -1111,6 +1163,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_hauptwerkAudioDeviceComboHwnd = nullptr;
         g_bidulePathEditHwnd = nullptr;
         g_biduleCloseOnUnloadCheckHwnd = nullptr;
+        g_biduleOscAddressEditHwnd = nullptr;
+        g_biduleOscValueEditHwnd = nullptr;
+        g_biduleOscPortEditHwnd = nullptr;
         g_settingsHwnd = nullptr;
         return 0;
     default:
@@ -1434,7 +1489,7 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 				FillConsoleOutputAttribute(hConsole, csbi.wAttributes, totalCells, origin, &written);
 				SetConsoleCursorPosition(hConsole, origin);
 			}
-			printf("Console cleared (F12).\n");
+			printf("Console cleared (Ctrl+Shift+F12).\n");
 		}
 		return 0;
 
@@ -1505,7 +1560,7 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
 }
 
 // ---------------------------------------------------------------------------
-// Ahlborn Splash (generic fade window)
+// Ahlborn Splash (generic splash window)
 // ---------------------------------------------------------------------------
 namespace {
     static std::atomic<bool> g_splashActive{ false };
@@ -1666,35 +1721,31 @@ namespace {
         SIZE  szWnd = { imgW, imgH };
         POINT ptDst = { x, y };
 
-        // Max opacity: 220/255 (~86%) so the image appears slightly transparent at peak.
-        constexpr int   kMaxAlpha    = 220;
-        constexpr int   kSteps       = 100;
-        int kSleepMs = totalMs / (kSteps * 2);
-        if (kSleepMs < 5)
-            kSleepMs = 5;
+        constexpr int kFadeSteps = 8;
+        constexpr int kFadeStepDelayMs = 12;
 
-        // Fade-in.
-        for (int i = 0; i <= kSteps; ++i)
+        for (int i = 0; i <= kFadeSteps; ++i)
         {
-            BYTE alpha = static_cast<BYTE>((i * kMaxAlpha) / kSteps);
+            BYTE alpha = static_cast<BYTE>((255 * i) / kFadeSteps);
             BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
             UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
-            ShowWindow(hWnd, SW_SHOW);
-            Sleep(kSleepMs);
+            ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+            Sleep(kFadeStepDelayMs);
         }
 
-        // Hold at peak visibility.
+        // Hold the splash for the requested duration, then close it.
         if (holdMs > 0)
             Sleep(holdMs);
+        else if (totalMs > 0)
+            Sleep(totalMs);
 
-        // Fade-out.
-        for (int i = kSteps; i >= 0; --i)
+        for (int i = kFadeSteps; i >= 0; --i)
         {
-            BYTE alpha = static_cast<BYTE>((i * kMaxAlpha) / kSteps);
+            BYTE alpha = static_cast<BYTE>((255 * i) / kFadeSteps);
             BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
             UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
-            ShowWindow(hWnd, SW_SHOW);
-            Sleep(kSleepMs);
+            ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+            Sleep(kFadeStepDelayMs);
         }
 
         DestroyWindow(hWnd);
@@ -1867,11 +1918,6 @@ void ShowAhlbornClosedSplash()
     ShowSplash(L"ahlborn_closed.png");
 }
 
-void ShowVstLinkModeSplash()
-{
-    ShowSplash(L"VstLinkMode1.png", 1200, true, 1400);
-}
-
 void ShowHauptwerkRestartSplash(const wchar_t* deviceName)
 {
     bool expected = false;
@@ -1907,4 +1953,35 @@ void CloseHauptwerkRestartSplash()
         PostMessageW(hWnd, WM_CLOSE, 0, 0);
     else
         g_splashActive = false;
+}
+
+void ShowBiduleLaunchSplash()
+{
+    bool expected = false;
+    if (!g_splashActive.compare_exchange_strong(expected, true))
+        return;
+
+    auto* p = new TextSplashThreadParam{ GetModuleHandleW(nullptr), L"Starting Bidule...", L"Preparing audio engine..." };
+    HANDLE h = CreateThread(nullptr, 0, TextSplashThread, p, 0, nullptr);
+    if (h) CloseHandle(h);
+    else
+    {
+        delete p;
+        g_splashActive = false;
+    }
+}
+
+void UpdateBiduleLaunchSplashProgress(int percent)
+{
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    g_textSplashProgress = percent;
+    HWND hWnd = g_textSplashHwnd.load();
+    if (hWnd && IsWindow(hWnd))
+        InvalidateRect(hWnd, nullptr, TRUE);
+}
+
+void CloseBiduleLaunchSplash()
+{
+    CloseHauptwerkRestartSplash();
 }

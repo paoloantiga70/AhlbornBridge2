@@ -8,8 +8,8 @@
 // ---------------------------------------------------------------
 #define APP_VERSION_MAJOR 0
 #define APP_VERSION_MINOR 4
-#define APP_VERSION_PATCH 324
-#define APP_VERSION "0.4.324"
+#define APP_VERSION_PATCH 382
+#define APP_VERSION "0.4.382"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

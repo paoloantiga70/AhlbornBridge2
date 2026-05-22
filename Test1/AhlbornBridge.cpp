@@ -181,14 +181,12 @@ if (FAILED(hr))
 		}
 	}
 
-	/*
-	// F12 clears the debug console.
-    const int kHotkeyIdClearConsole = 1;
-    if (!RegisterHotKey(hWnd, kHotkeyIdClearConsole, 0, VK_F12))
-        printf("RegisterHotKey F12 FAILED (error %lu)\n", GetLastError());
-    else
-        printf("F12 hotkey registered for console clear.\n");
-    */
+	// Ctrl+Shift+F12 clears the debug console.
+	const int kHotkeyIdClearConsole = 1;
+	if (!RegisterHotKey(hWnd, kHotkeyIdClearConsole, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F12))
+		printf("RegisterHotKey Ctrl+Shift+F12 FAILED (error %lu)\n", GetLastError());
+	else
+		printf("Ctrl+Shift+F12 hotkey registered for console clear.\n");
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0))
