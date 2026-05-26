@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <map>
 
 struct InstalledOrganInfo
 {
@@ -19,6 +20,15 @@ struct AudioDeviceInfo
 {
     std::wstring id;
     std::wstring name;
+};
+
+struct AhlbornSwitchInfo
+{
+    std::wstring name;
+    int channel = 1;
+    int controlChange = 0;
+    int valueOn = 127;
+    int valueOff = 0;
 };
 
 // ---------- Dynamic multi-device assignment (new API) ----------
@@ -96,6 +106,9 @@ std::vector<std::wstring> LoadStandbyOrganNames();
 // Returns the names of all installed organs found in the OrganDefinitions
 // folder, as written to the <InstalledOrgans> section of Settings.xml.
 std::vector<std::wstring> LoadInstalledOrganNames();
+std::vector<AhlbornSwitchInfo> LoadAhlbornSwitches();
+bool SaveOrganSwitchState(const std::wstring& uniqueOrganId, int switchIndex, bool isOn);
+std::map<int, bool> LoadOrganSwitchStates(const std::wstring& uniqueOrganId);
 
 // Detect / configure Hauptwerk installation folders.
 // On first run, checks the default install path or shows a folder picker.

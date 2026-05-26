@@ -10,7 +10,7 @@
 #define LOAD_FAVORITE_ORGAN_8   8
 
 // Sends MIDI message BF 50 00 (CC ch16, CC#80, value 0) on the current output device.
-void SendUnloadOrganMidiMessage();
+void SendUnloadOrganMidiMessage(bool resetSwitches = true);
 
 // Named pipe server for Stream Deck plugin IPC
 void StartStreamDeckPipeServer();
@@ -20,8 +20,15 @@ void StopStreamDeckPipeServer();
 // Safe to call even when no plugin is connected.
 void NotifyStreamDeckOrganList();
 void NotifyStreamDeckOrganState(int loadedIndex);
-void NotifyStreamDeckOrganUnloaded();
+void NotifyStreamDeckOrganUnloaded(bool resetSwitches = true);
+void NotifyStreamDeckSwitchState(int switchIndex, bool isOn);
+void NotifyStreamDeckSwitchesForOrgan(int loadedIndex);
+void NotifyStreamDeckActiveSensingState(bool enabled);
+
+struct AhlbornSwitchInfo;
 
 // Updates organ titles in the existing SD profile files and restarts Stream Deck.
 // Called automatically when organ names change.
 void UpdateStreamDeckProfileTitles();
+void SendAhlbornSwitchControlChange(int channel, int controlChange, int value);
+// Ciao, this is a test message to check if the Stream Deck integration is working correctly.

@@ -19,6 +19,46 @@
             "SupportedInMultiActions": false,
             "Tooltip": "Load an organ in Hauptwerk via AhlbornBridge",
             "UUID": "com.ahlbornbridge.organ.load"
+        },
+        {
+            "Icon": "images/organ-off",
+            "Name": "Ahlborn Switches",
+            "States": [
+                {
+                    "Image": "images/organ-off",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                },
+                {
+                    "Image": "images/organ-on",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                }
+            ],
+            "PropertyInspectorPath": "property_inspector.html",
+            "SupportedInMultiActions": false,
+            "Tooltip": "Toggle a console stop via MIDI Control Change",
+            "UUID": "com.ahlbornbridge.switch"
+        },
+        {
+            "Icon": "images/organ-off",
+            "Name": "Console Power",
+            "States": [
+                {
+                    "Image": "images/organ-off",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                },
+                {
+                    "Image": "images/organ-on",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                }
+            ],
+            "PropertyInspectorPath": "property_inspector.html",
+            "SupportedInMultiActions": false,
+            "Tooltip": "Toggle Active Sensing sender (console power simulation)",
+            "UUID": "com.ahlbornbridge.activesensing"
         }
     ],
     "Author": "Paolo Antiga",
@@ -39,5 +79,5 @@
         "MinimumVersion": "6.0"
     },
     "UUID": "com.ahlbornbridge.organ",
-    "Version": "1.0.537"
+    "Version": "0.5.259"
 }

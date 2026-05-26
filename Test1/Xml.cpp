@@ -23,12 +23,12 @@ namespace
         if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, buf)))
         {
             std::wstring dir(buf);
-            dir += L"\\AhlbornBridge";
+            dir += L"\\AhlbornBridge2";
             return dir;
         }
 
         // Fallback to C:\Users\Default\AppData\Roaming\TuaApp if retrieval fails
-        return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge");
+        return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge2");
     }
 
     std::wstring GetSettingsFilePath()
@@ -82,6 +82,7 @@ namespace
     std::wstring s_cachedStreamDeckMidiOut;
     std::wstring s_cachedStreamDeckMidiIn;
     std::wstring s_cachedFixedHauptwerkOutput;
+    std::wstring s_cachedOrganSwitchStates;
     bool s_streamDeckSettingsLoaded = false;
 
     std::wstring s_cachedBidulePath;
@@ -94,6 +95,16 @@ namespace
     std::wstring s_cachedAsioDevId;     // id of first ASIO: device (convenience)
     std::wstring s_cachedAsioDevName;   // name of first ASIO: device
     bool s_audioSettingsLoaded = false;
+
+    const wchar_t* kDefaultAhlbornSwitchesXml =
+        LR"(<o><nam>Principale 16'</nam><h>1</h><c>70</c><d>65</d><e>1</e></o>
+<o><nam>Subbasso 16'</nam><h>1</h><c>70</c><d>66</d><e>2</e></o>
+<o><nam>Ottave 8'</nam><h>1</h><c>70</c><d>67</d><e>3</e></o>
+<o><nam>Bordone 8'</nam><h>1</h><c>70</c><d>68</d><e>4</e></o>
+<o><nam>Decima Quinta 4'</nam><h>1</h><c>70</c><d>69</d><e>5</e></o>
+<o><nam>Ripieno IV</nam><h>1</h><c>70</c><d>72</d><e>8</e></o>
+<o><nam>Controfagotto 16'</nam><h>1</h><c>70</c><d>74</d><e>10</e></o>
+<o><nam>Regale 4'</nam><h>1</h><c>70</c><d>76</d><e>12</e></o>)";
 
     // Cached assigned MIDI device name lists (new dynamic multi-device model).
     std::vector<std::wstring> s_assignedInputNames;
@@ -251,6 +262,20 @@ namespace
 			return false;
 
 		value = xml.substr(start, end - start);
+
+		// Trim leading/trailing spaces and line breaks to avoid preserving
+		// blank lines inside sections such as <AhlbornSwitches>.
+		size_t first = value.find_first_not_of(L" \t\r\n");
+		if (first == std::wstring::npos)
+		{
+			value.clear();
+		}
+		else
+		{
+			size_t last = value.find_last_not_of(L" \t\r\n");
+			value = value.substr(first, last - first + 1);
+		}
+
 		return true;
 	}
 
@@ -1033,6 +1058,19 @@ namespace
 		TryGetTagStringValue(section, L"<MidiOut>", L"</MidiOut>", s_cachedStreamDeckMidiOut);
 		TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", s_cachedStreamDeckMidiIn);
 		TryGetTagStringValue(section, L"<FixedHauptwerkOutput>", L"</FixedHauptwerkOutput>", s_cachedFixedHauptwerkOutput);
+		std::wstring switchStatesSection;
+		if (TryGetSection(section, L"OrganSwitchStates", switchStatesSection))
+		{
+			// Trim leading/trailing whitespace so we don't accumulate blank lines on each save.
+			size_t first = switchStatesSection.find_first_not_of(L" \t\r\n");
+			if (first == std::wstring::npos)
+				s_cachedOrganSwitchStates.clear();
+			else
+			{
+				size_t last = switchStatesSection.find_last_not_of(L" \t\r\n");
+				s_cachedOrganSwitchStates = switchStatesSection.substr(first, last - first + 1) + L"\r\n";
+			}
+		}
 	}
 
 	void EnsureAudioSettingsLoaded()
@@ -1049,12 +1087,36 @@ namespace
 		std::wstring devSection;
 		if (TryGetSection(section, L"Devices", devSection))
 		{
-			// Strip leading/trailing blank lines only (preserve indentation spaces)
-			size_t first = devSection.find_first_not_of(L"\r\n");
-			size_t last  = devSection.find_last_not_of(L"\r\n");
+			// Strip leading/trailing whitespace so we don't preserve blank tail lines
+			// inside <Devices> when rewriting Settings.xml.
+			size_t first = devSection.find_first_not_of(L" \t\r\n");
+			size_t last  = devSection.find_last_not_of(L" \t\r\n");
 			if (first != std::wstring::npos)
 				s_cachedAudioDevices = devSection.substr(first, last - first + 1) + L"\r\n";
+			else
+				s_cachedAudioDevices.clear();
 		}
+	}
+
+	std::wstring NormalizeAhlbornSwitchesSection(const std::wstring& section)
+	{
+		std::wstring normalized;
+		size_t pos = 0;
+		while (true)
+		{
+			size_t oStart = section.find(L"<o>", pos);
+			if (oStart == std::wstring::npos)
+				break;
+			size_t oEnd = section.find(L"</o>", oStart);
+			if (oEnd == std::wstring::npos)
+				break;
+
+			if (!normalized.empty())
+				normalized += L"\r\n";
+			normalized += section.substr(oStart, oEnd - oStart + 4);
+			pos = oEnd + 4;
+		}
+		return normalized;
 	}
 
 	// Parse a <AssignedMidi*s> section: each <Device>name</Device> child.
@@ -1130,6 +1192,8 @@ namespace
 				return false;
 			}
 		}
+		CreateDirectoryW((settingsDir + L"\\Icons").c_str(), nullptr);
+		CreateDirectoryW((settingsDir + L"\\BiduleProfiles").c_str(), nullptr);
 
 		// Enumerate all currently available MIDI devices.
 		std::wstring inputDevices;
@@ -1153,24 +1217,58 @@ namespace
 		}
 
 		std::wstring standbyOrgans;
-        std::wstring installedOrgans;
+		std::wstring installedOrgans;
+		std::wstring ahlbornSwitches = kDefaultAhlbornSwitchesXml;
 
-        if (!bootstrapDefaults)
-        {
-            // Ensure standby organ names are loaded (cached on first call).
-            EnsureStandbyOrgansLoaded();
-            standbyOrgans = s_cachedStandbyOrgans;
+		if (!bootstrapDefaults)
+		{
+			// Ensure standby organ names are loaded (cached on first call).
+			EnsureStandbyOrgansLoaded();
+			standbyOrgans = s_cachedStandbyOrgans;
 
-            // Ensure installed organs are loaded (cached on first call).
-            EnsureInstalledOrgansLoaded();
-            installedOrgans = s_cachedInstalledOrgans;
+			// Ensure installed organs are loaded (cached on first call).
+			EnsureInstalledOrgansLoaded();
+			installedOrgans = s_cachedInstalledOrgans;
 
-            // Ensure Stream Deck settings are loaded (cached on first call).
-            EnsureStreamDeckSettingsLoaded();
+			// Ensure Stream Deck settings are loaded (cached on first call).
+			EnsureStreamDeckSettingsLoaded();
 
-            // Ensure audio settings are loaded (cached on first call).
-            EnsureAudioSettingsLoaded();
-        }
+			// Ensure audio settings are loaded (cached on first call).
+			EnsureAudioSettingsLoaded();
+
+			// Preserve the existing AhlbornSwitches table if it is already present in Settings.xml.
+			std::wstring existingXml;
+			if (TryReadSettingsXml(existingXml))
+			{
+				std::wstring streamDeckSection;
+				if (TryGetSection(existingXml, L"StreamDeck", streamDeckSection))
+				{
+					std::wstring switchesSection;
+					if (TryGetSection(streamDeckSection, L"AhlbornSwitches", switchesSection) && !switchesSection.empty())
+					{
+						std::wstring normalizedSwitches = NormalizeAhlbornSwitchesSection(switchesSection);
+						if (!normalizedSwitches.empty())
+							ahlbornSwitches = normalizedSwitches;
+					}
+					std::wstring savedSwitchStates;
+					if (TryGetSection(streamDeckSection, L"OrganSwitchStates", savedSwitchStates) && s_cachedOrganSwitchStates.empty())
+					{
+						// Only load from file if we don't already have a value in memory.
+						// This prevents WriteSettingsXml from overwriting an in-memory update
+						// with the stale on-disk value (which is still empty on first save).
+						size_t first = savedSwitchStates.find_first_not_of(L" \t\r\n");
+						if (first == std::wstring::npos)
+							savedSwitchStates.clear();
+						else
+						{
+							size_t last = savedSwitchStates.find_last_not_of(L" \t\r\n");
+							savedSwitchStates = savedSwitchStates.substr(first, last - first + 1) + L"\r\n";
+						}
+						s_cachedOrganSwitchStates = savedSwitchStates;
+					}
+				}
+			}
+		}
 
         // Build the assigned device list sections and the actual Hauptwerk snapshot.
         std::wstring assignedInputSection = BuildDeviceListSectionXml(s_assignedInputNames);
@@ -1188,7 +1286,7 @@ namespace
 			L"    <MidiOptions>\r\n"
 			L"      <MidiRouterEnabled>" + std::to_wstring(routerEnabled ? 1 : 0) + L"</MidiRouterEnabled>\r\n"
 			L"    </MidiOptions>\r\n"
-			L"    <CurrentMidiInputDevices>\r\n"
+			L"    <CurrentMidiInputDevices>\r\n" + inputDevices +
 			L"    </CurrentMidiInputDevices>\r\n"
 			L"    <CurrentMidiOutputDevices>\r\n" + outputDevices +
 			L"    </CurrentMidiOutputDevices>\r\n"
@@ -1223,6 +1321,11 @@ namespace
 				L"    <MidiOut>" + s_cachedStreamDeckMidiOut + L"</MidiOut>\r\n"
 				L"    <MidiIn>" + s_cachedStreamDeckMidiIn + L"</MidiIn>\r\n"
 			L"    <FixedHauptwerkOutput>" + s_cachedFixedHauptwerkOutput + L"</FixedHauptwerkOutput>\r\n"
+			L"    <AhlbornSwitches>\r\n"
+				+ ahlbornSwitches + L"\r\n"
+			L"    </AhlbornSwitches>\r\n"
+			L"    <OrganSwitchStates>\r\n" + s_cachedOrganSwitchStates +
+			L"    </OrganSwitchStates>\r\n"
 			L"  </StreamDeck>\r\n"
 			L"  <Audio>\r\n"
 			L"    <AsioDevId>" + s_cachedAsioDevId + L"</AsioDevId>\r\n"
@@ -1511,6 +1614,9 @@ bool SaveInstalledOrganBiduleProfile(const std::wstring& uniqueOrganId, const st
             organContent = organContent.substr(0, valueStart) + biduleProfile + organContent.substr(valueEnd);
             xml = xml.substr(0, openEnd + 1) + organContent + xml.substr(closeStart);
             s_cachedInstalledOrgans = xml;
+
+            std::wstring targetDir = GetSettingsDirPath() + L"\\BiduleProfiles";
+            CreateDirectoryW(targetDir.c_str(), nullptr);
 
             bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
             bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
@@ -2678,10 +2784,10 @@ bool LoadActiveSensingEnabled(bool& enabled)
     if (!TryGetSection(xml, L"Options", optionsSection))
         return false;
 
-    UINT value = 1;
+    UINT value = 0;
     if (!TryGetTagValue(optionsSection, L"<ActiveSensingEnabled>", L"</ActiveSensingEnabled>", value))
     {
-        enabled = true;
+        enabled = false;
         return true;
     }
 
@@ -3475,6 +3581,242 @@ std::vector<std::wstring> LoadInstalledOrganNames()
     }
 
     return names;
+}
+
+std::vector<AhlbornSwitchInfo> LoadAhlbornSwitches()
+{
+    std::vector<AhlbornSwitchInfo> result;
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return result;
+
+    std::wstring streamDeckSection;
+    if (!TryGetSection(xml, L"StreamDeck", streamDeckSection))
+        return result;
+
+    std::wstring switchesSection;
+    if (!TryGetSection(streamDeckSection, L"AhlbornSwitches", switchesSection))
+        return result;
+
+    size_t pos = 0;
+    while (true)
+    {
+        size_t start = switchesSection.find(L"<o>", pos);
+        if (start == std::wstring::npos)
+            break;
+        size_t end = switchesSection.find(L"</o>", start);
+        if (end == std::wstring::npos)
+            break;
+
+        std::wstring item = switchesSection.substr(start, end - start + 4);
+        AhlbornSwitchInfo info;
+        std::wstring tmp;
+        UINT val = 0;
+
+        if (!TryGetTagStringValue(item, L"<nam>", L"</nam>", info.name) || info.name.empty())
+        {
+            pos = end + 4;
+            continue;
+        }
+        if (TryGetTagValue(item, L"<h>", L"</h>", val)) info.channel = static_cast<int>(val);
+        if (TryGetTagValue(item, L"<c>", L"</c>", val)) info.controlChange = static_cast<int>(val);
+        if (TryGetTagValue(item, L"<d>", L"</d>", val)) info.valueOn = static_cast<int>(val);
+        if (TryGetTagValue(item, L"<e>", L"</e>", val)) info.valueOff = static_cast<int>(val);
+        result.push_back(info);
+        pos = end + 4;
+    }
+
+    return result;
+}
+
+bool SaveOrganSwitchState(const std::wstring& uniqueOrganId, int switchIndex, bool isOn)
+{
+    if (uniqueOrganId.empty() || switchIndex <= 0)
+        return false;
+
+    EnsureStreamDeckSettingsLoaded();
+
+    std::map<int, bool> states = LoadOrganSwitchStates(uniqueOrganId);
+    states[switchIndex] = isOn;
+
+    std::map<std::wstring, std::map<int, bool>> allStates;
+    std::wstring section = s_cachedOrganSwitchStates;
+    size_t pos = 0;
+    while (true)
+    {
+        size_t start = section.find(L"<Organ", pos);
+        if (start == std::wstring::npos)
+            break;
+        size_t openEnd = section.find(L'>', start);
+        size_t close = section.find(L"</Organ>", openEnd);
+        if (openEnd == std::wstring::npos || close == std::wstring::npos)
+            break;
+
+        std::wstring organNode = section.substr(start, close - start + 8);
+        size_t idPos = organNode.find(L"id=\"");
+        if (idPos != std::wstring::npos)
+        {
+            idPos += 4;
+            size_t idEnd = organNode.find(L'\"', idPos);
+            if (idEnd != std::wstring::npos)
+            {
+                std::wstring oid = organNode.substr(idPos, idEnd - idPos);
+                std::map<int, bool> organStates;
+                size_t spos = 0;
+                while (true)
+                {
+                    size_t sstart = organNode.find(L"<s", spos);
+                    if (sstart == std::wstring::npos)
+                        break;
+                    size_t send = organNode.find(L"/>", sstart);
+                    if (send == std::wstring::npos)
+                        break;
+                    std::wstring switchNode = organNode.substr(sstart, send - sstart + 2);
+
+                    size_t idxPos = switchNode.find(L"idx=\"");
+                    size_t onPos = switchNode.find(L"on=\"");
+                    if (idxPos != std::wstring::npos && onPos != std::wstring::npos)
+                    {
+                        idxPos += 5;
+                        onPos += 4;
+                        size_t idxEnd = switchNode.find(L'\"', idxPos);
+                        size_t onEnd = switchNode.find(L'\"', onPos);
+                        if (idxEnd != std::wstring::npos && onEnd != std::wstring::npos)
+                        {
+                            int idx = _wtoi(switchNode.substr(idxPos, idxEnd - idxPos).c_str());
+                            int on = _wtoi(switchNode.substr(onPos, onEnd - onPos).c_str());
+                            if (idx > 0)
+                                organStates[idx] = (on != 0);
+                        }
+                    }
+                    spos = send + 2;
+                }
+                allStates[oid] = organStates;
+            }
+        }
+
+        pos = close + 8;
+    }
+
+    allStates[uniqueOrganId] = states;
+
+    std::wstring serialized;
+    for (const auto& [oid, organStates] : allStates)
+    {
+        serialized += L"      <Organ id=\"" + oid + L"\">\r\n";
+        for (const auto& [idx, on] : organStates)
+            serialized += L"        <s idx=\"" + std::to_wstring(idx) + L"\" on=\"" + (on ? L"1" : L"0") + L"\"/>\r\n";
+        serialized += L"      </Organ>\r\n";
+    }
+
+    s_cachedOrganSwitchStates = serialized;
+
+    bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+    bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+    bool showConsole = true; LoadShowDebugConsole(showConsole);
+    bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+
+    EnsureAssignedDevicesLoaded();
+    std::wstring in1, in2;
+    if (!s_assignedInputNames.empty()) in1 = s_assignedInputNames[0];
+    if (s_assignedInputNames.size() > 1) in2 = s_assignedInputNames[1];
+    std::wstring out1, out2;
+    if (!s_assignedOutputNames.empty()) out1 = s_assignedOutputNames[0];
+    if (s_assignedOutputNames.size() > 1) out2 = s_assignedOutputNames[1];
+
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            if (in1.empty()) TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", in1);
+            if (in2.empty()) TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", in2);
+            if (out1.empty()) TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", out1);
+            if (out2.empty()) TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", out2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+
+    bool writeOk = WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+    printf("[SaveOrganSwitchState] WriteSettingsXml result=%d, organId=%S, switchIdx=%d, isOn=%d\n",
+        (int)writeOk, uniqueOrganId.c_str(), switchIndex, (int)isOn);
+    return writeOk;
+}
+
+std::map<int, bool> LoadOrganSwitchStates(const std::wstring& uniqueOrganId)
+{
+    std::map<int, bool> result;
+    if (uniqueOrganId.empty())
+        return result;
+
+    EnsureStreamDeckSettingsLoaded();
+
+    std::wstring section = s_cachedOrganSwitchStates;
+    size_t pos = 0;
+    while (true)
+    {
+        size_t start = section.find(L"<Organ", pos);
+        if (start == std::wstring::npos)
+            break;
+        size_t openEnd = section.find(L'>', start);
+        size_t close = section.find(L"</Organ>", openEnd);
+        if (openEnd == std::wstring::npos || close == std::wstring::npos)
+            break;
+
+        std::wstring organNode = section.substr(start, close - start + 8);
+        size_t idPos = organNode.find(L"id=\"");
+        if (idPos != std::wstring::npos)
+        {
+            idPos += 4;
+            size_t idEnd = organNode.find(L'\"', idPos);
+            if (idEnd != std::wstring::npos)
+            {
+                std::wstring oid = organNode.substr(idPos, idEnd - idPos);
+                if (oid == uniqueOrganId)
+                {
+                    size_t spos = 0;
+                    while (true)
+                    {
+                        size_t sstart = organNode.find(L"<s", spos);
+                        if (sstart == std::wstring::npos)
+                            break;
+                        size_t send = organNode.find(L"/>", sstart);
+                        if (send == std::wstring::npos)
+                            break;
+                        std::wstring switchNode = organNode.substr(sstart, send - sstart + 2);
+
+                        size_t idxPos = switchNode.find(L"idx=\"");
+                        size_t onPos = switchNode.find(L"on=\"");
+                        if (idxPos != std::wstring::npos && onPos != std::wstring::npos)
+                        {
+                            idxPos += 5;
+                            onPos += 4;
+                            size_t idxEnd = switchNode.find(L'\"', idxPos);
+                            size_t onEnd = switchNode.find(L'\"', onPos);
+                            if (idxEnd != std::wstring::npos && onEnd != std::wstring::npos)
+                            {
+                                int idx = _wtoi(switchNode.substr(idxPos, idxEnd - idxPos).c_str());
+                                int on = _wtoi(switchNode.substr(onPos, onEnd - onPos).c_str());
+                                if (idx > 0)
+                                    result[idx] = (on != 0);
+                            }
+                        }
+                        spos = send + 2;
+                    }
+                    return result;
+                }
+            }
+        }
+
+        pos = close + 8;
+    }
+
+    return result;
 }
 
 bool LoadHauptwerkAppPath(std::wstring& path)

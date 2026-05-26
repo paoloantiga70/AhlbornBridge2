@@ -735,9 +735,9 @@ bool LaunchHauptwerkAndDismissWelcome()
 
 	ReloadStandbyOrgans();
 
-	// --- Reset Stream Deck buttons
+	// --- Reset Stream Deck buttons (startup: do not reset switch visuals, organ load will restore them)
 	printf("\nFrom Hauptwerk.cpp line %d: Sending MIDI message to reset Stream Deck buttons...\n", __LINE__);
-    SendUnloadOrganMidiMessage();
+	SendUnloadOrganMidiMessage(false);
 
     // --- Mostra menu disponibili dell'applicazione Hauptwerk ---
     std::wcout << L"\n========================================\n";

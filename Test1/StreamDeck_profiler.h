@@ -119,4 +119,7 @@ bool CreateStreamDeckProfile(const std::string& profileName, int deviceType = -1
 // Called once on first launch after Settings.xml has been written.
 bool CreateStreamDeckProfileFromSettings();
 
+// Creates (or updates) the Stream Deck profile with one button per AhlbornSwitch.
+bool CreateStreamDeckSwitchesProfile();
+
 

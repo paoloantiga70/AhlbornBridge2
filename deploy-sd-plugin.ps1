@@ -87,7 +87,7 @@ $v = Get-PluginVersion -VersionFile $versionFile
 # --- 1. Patch ISS installer script ---
 $iss = Get-Content $issSource -Raw
 $iss = $iss -replace '@PLUGIN_VERSION@', $v
-$iss = $iss -replace [Regex]::Escape('{#SourceBase}'), [System.Text.RegularExpressions.Regex]::Escape($srcBase).Replace('\\', '\')
+$iss = $iss.Replace('{#SourceBase}', $srcBase)
 Set-Content $issPatched $iss -NoNewline
 Write-Host "Patched ISS with plugin version $v"
 

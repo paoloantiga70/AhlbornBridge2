@@ -847,14 +847,28 @@ bool LoadOrganByName(HWND hwndReal, const std::wstring& organName)
     if (found)
     {
         // The item has already been focused and selected via accSelect.
-        // Send ENTER to confirm the selection — this is more reliable
-        // than simulating a double-click on Qt dialogs because it
-        // doesn't depend on cursor position or window hierarchy.
+        // Force foreground focus using AttachThreadInput so that SendInput
+        // reliably delivers VK_RETURN to this dialog even if another app
+        // (e.g. Stream Deck) currently owns the foreground.
         Sleep(100);
+        DWORD dwCurrentThread = GetCurrentThreadId();
+        DWORD dwFgThread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+        DWORD dwDlgThread = GetWindowThreadProcessId(hDialog, nullptr);
+        bool attached = false;
+        if (dwFgThread && dwFgThread != dwCurrentThread)
+        {
+            AttachThreadInput(dwCurrentThread, dwFgThread, TRUE);
+            attached = true;
+        }
+        if (dwDlgThread && dwDlgThread != dwCurrentThread && dwDlgThread != dwFgThread)
+            AttachThreadInput(dwCurrentThread, dwDlgThread, TRUE);
+
+        BringWindowToTop(hDialog);
         SetForegroundWindow(hDialog);
+        SetFocus(hDialog);
         Sleep(100);
 
-        INPUT key[4] = {};
+        INPUT key[2] = {};
         key[0].type = INPUT_KEYBOARD;
         key[0].ki.wVk = VK_RETURN;
         key[1].type = INPUT_KEYBOARD;
@@ -862,6 +876,11 @@ bool LoadOrganByName(HWND hwndReal, const std::wstring& organName)
         key[1].ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(2, key, sizeof(INPUT));
         std::wcout << L"[LoadOrgan] SendInput VK_RETURN inviato\n";
+
+        if (attached)
+            AttachThreadInput(dwCurrentThread, dwFgThread, FALSE);
+        if (dwDlgThread && dwDlgThread != dwCurrentThread && dwDlgThread != dwFgThread)
+            AttachThreadInput(dwCurrentThread, dwDlgThread, FALSE);
     }
     else
     {

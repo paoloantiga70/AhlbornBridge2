@@ -2,6 +2,10 @@
 ; AppVersion is patched automatically by the post-build step from PluginVersion.h.
 ; Do NOT edit @PLUGIN_VERSION@ manually - update PluginVersion.h instead.
 
+#ifndef SourceBase
+  #define SourceBase AddBackslash(SourcePath) + "com.ahlbornbridge.organ.sdPlugin"
+#endif
+
 [Setup]
 AppName=AhlbornBridgeSD2 Stream Deck Plugin
 AppVersion=@PLUGIN_VERSION@

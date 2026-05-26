@@ -6,10 +6,10 @@
 // auto-increments the patch number and patches manifest.json.
 // The post-build step patches the Inno Setup installer script.
 // ---------------------------------------------------------------
-#define PLUGIN_VERSION_MAJOR 1
-#define PLUGIN_VERSION_MINOR 0
-#define PLUGIN_VERSION_PATCH 537
-#define PLUGIN_VERSION "1.0.537"
+#define PLUGIN_VERSION_MAJOR 0
+#define PLUGIN_VERSION_MINOR 5
+#define PLUGIN_VERSION_PATCH 259
+#define PLUGIN_VERSION "0.5.259"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

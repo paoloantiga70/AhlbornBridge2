@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -64,6 +64,9 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command "$dst = \"$env:APPDATA\Elgato\StreamDeck\Plugins\com.ahlbornbridge.organ.sdPlugin\"; if (!(Test-Path $dst)) { exit 0 }; Stop-Process -Name StreamDeck -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Copy-Item -Force \"$(OutDir)AhlbornBridgeSD.exe\" \"${dst}AhlbornBridgeSD.exe\"; Write-Host [PostBuild] Plugin copied to Stream Deck Debug"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>

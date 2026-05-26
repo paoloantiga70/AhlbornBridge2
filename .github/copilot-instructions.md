@@ -2,6 +2,7 @@
 
 ## General Guidelines
 - Do not run builds unless the user explicitly asks for one.
+- When updating runtime settings, use the user settings file at C:\Users\paolo\AppData\Roaming\AhlbornBridge2\Settings.xml instead of build output copies.
 
 ## Project Guidelines
 - Use a Hauptwerk-style Win32 classic preferences UI with tabs for the Settings window instead of the current simple dialog.
@@ -25,3 +26,25 @@
 - Exclude bridge/virtual ports (for example, AhlbornBridge Virtual Port) from being written into Hauptwerk's EnabledMIDIOutputPort list; the bridge port must never be added there.
 - Do not automatically add input devices that are manually assigned later to the Hauptwerk outputs.
 - Allow users to remove or reassign the auto-included device from the Hauptwerk outputs via the configuration UI; reflect changes in persisted Settings.xml.
+
+## Ahlborn Switches Action
+- For each stop entry, include the following parameters:
+  - `nam`: stop name
+  - `h`: channel number
+  - `c`: control change number
+  - `d`: data value ON
+  - `e`: data value OFF
+- For Ahlborn Switches button graphics, set badge text as follows:
+  - 'PEDALE' for MIDI channel 1
+  - 'MANUALE I' for channel 2
+  - 'MANUALE II' for channel 3
+- For switch-state synchronization, switches must not update when no organ is loaded, and unload reset CC must be ignored only for in-memory restore while avoiding stale ON visuals on the plugin.
+
+## Stream Deck Key State Logic
+- OFFLINE must represent pipe-disconnected state (not pipe-connected/no-name state). Stream Deck buttons should show OFFLINE whenever the AhlbornBridge pipe is disconnected, regardless of cached organ names.
+- When the pipe is disconnected, the key title text should be blank (no 'Disconnected') and the status dot should use the same offline red color theme.
+- Stream Deck status dot mapping: OFFLINE red; pipe connected without Hauptwerk running gray; Hauptwerk running without organ loaded yellow (red border if console connected); Hauptwerk running with organ loaded green (red border if console connected).
+- When Hauptwerk is closed but console is connected, the Stream Deck key should be gray with red borders to match status semantics.
+- The READY badge must be yellow in the same state as the yellow status dot (Hauptwerk running with no organ loaded), and with a red border when the console is connected.
+- When an organ is loaded (VST Link or not), the badge text border must be red if the console is connected; the outer key border must keep its normal color.
+- For Stream Deck switch keys, implement toggle mode: each key press flips state (ON to OFF and OFF to ON), not momentary keyDown/keyUp ON/OFF.

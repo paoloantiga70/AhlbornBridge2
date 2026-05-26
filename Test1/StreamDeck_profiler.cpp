@@ -297,6 +297,20 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         actionDisplayName = "Load Organ";
         pluginVersion = GetInstalledPluginVersion(pluginUUID);
     }
+    else if (action.actionUUID == "com.ahlbornbridge.switch")
+    {
+        pluginUUID = "com.ahlbornbridge.organ";
+        pluginName = "AhlbornBridge";
+        actionDisplayName = "Ahlborn Switches";
+        pluginVersion = GetInstalledPluginVersion(pluginUUID);
+    }
+    else if (action.actionUUID == "com.ahlbornbridge.activesensing")
+    {
+        pluginUUID = "com.ahlbornbridge.organ";
+        pluginName = "AhlbornBridge";
+        actionDisplayName = "Console Power";
+        pluginVersion = GetInstalledPluginVersion(pluginUUID);
+    }
     else
     {
         pluginName = action.actionUUID;
@@ -312,7 +326,6 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         settings = BuildMidiSettingsJson(action.midi);
     else if (action.actionUUID == "com.ahlbornbridge.organ.load")
     {
-        // Escape organ name for JSON embedding
         std::string safeName;
         for (char c : action.title)
         {
@@ -323,14 +336,62 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         settings = "{\"organIndex\":" + std::to_string(action.organIndex)
             + ",\"organName\":\"" + safeName + "\"}";
     }
+    else if (action.actionUUID == "com.ahlbornbridge.switch")
+    {
+        std::string safeName;
+        for (char c : action.title)
+        {
+            if (c == '"') safeName += "\\\"";
+            else if (c == '\\') safeName += "\\\\";
+            else safeName += c;
+        }
+        settings = "{\"switchIndex\":" + std::to_string(action.organIndex)
+            + ",\"switchIsOn\":false"
+            + ",\"switchName\":\"" + safeName + "\"}";
+    }
+    else if (action.actionUUID == "com.ahlbornbridge.activesensing")
+    {
+        settings = "{}";
+    }
     else
         settings = "{}";
 
-    // MIDI and custom plugin use 2 states (off/on); other actions use 1 state with title
+    // AhlbornBridge native actions (switch, activesensing) use the exact
+    // same structure as when the user manually adds them in Stream Deck:
+    // LinkedTitle=true, empty FontFamily/FontStyle, ShowTitle=true on both
+    // states, no Title field, no image (the plugin renders its own SVG).
     std::string states;
     std::string fontSizeStr = std::to_string(action.fontSize);
+
+    if (action.actionUUID == "com.ahlbornbridge.switch"
+        || action.actionUUID == "com.ahlbornbridge.activesensing")
+    {
+        std::string stateBlock =
+            "{\"FontFamily\":\"\",\"FontSize\":" + fontSizeStr + ","
+            "\"FontStyle\":\"\",\"FontUnderline\":false,\"OutlineThickness\":2,"
+            "\"ShowTitle\":true,\"TitleAlignment\":\"" + action.titleAlignment + "\","
+            "\"TitleColor\":\"" + action.titleColor + "\"}";
+        states = "[" + stateBlock + "," + stateBlock + "]";
+
+        return
+            "{\"ActionID\":\"" + instanceId + "\","
+            "\"LinkedTitle\":true,"
+            "\"Name\":\"" + actionDisplayName + "\","
+            "\"Plugin\":{\"Name\":\"" + pluginName + "\","
+            "\"UUID\":\"" + pluginUUID + "\","
+            "\"Version\":\"" + pluginVersion + "\"},"
+            "\"Resources\":null,"
+            "\"Settings\":" + settings + ","
+            "\"State\":0,"
+            "\"States\":" + states + ","
+            "\"UUID\":\"" + action.actionUUID + "\"}";
+    }
+
+    // MIDI and custom plugin use 2 states (off/on); other actions use 1 state with title
     bool isTwoStateAction = (action.actionUUID == "se.trevligaspel.midi.genericmidi"
-        || action.actionUUID == "com.ahlbornbridge.organ.load");
+        || action.actionUUID == "com.ahlbornbridge.organ.load"
+        || action.actionUUID == "com.ahlbornbridge.switch"
+        || action.actionUUID == "com.ahlbornbridge.activesensing");
     if (isTwoStateAction)
     {
         bool showTitle = !action.title.empty()
@@ -363,7 +424,10 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
             "\"TitleColor\":\"" + action.titleColor + "\"}]";
     }
 
-    bool linkedTitle = !isTwoStateAction;
+    bool linkedTitle = (action.actionUUID != "com.ahlbornbridge.organ.load"
+        && action.actionUUID != "com.ahlbornbridge.switch"
+        && action.actionUUID != "com.ahlbornbridge.activesensing"
+        && !isTwoStateAction);
     return
         "{\"ActionID\":\"" + instanceId + "\","
         "\"LinkedTitle\":" + (linkedTitle ? "true" : "false") + ","
@@ -675,14 +739,14 @@ bool CreateStreamDeckProfile(const std::string& profileName, int deviceType,
 
 bool CreateStreamDeckProfileFromSettings()
 {
-    // Resolve %APPDATA%\AhlbornBridge paths
+    // Resolve %APPDATA%\AhlbornBridge2 paths
     wchar_t appData[MAX_PATH] = {};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
     {
         std::cerr << "CreateStreamDeckProfileFromSettings: cannot resolve AppData.\n";
         return false;
     }
-    std::wstring baseDir = std::wstring(appData) + L"\\AhlbornBridge";
+    std::wstring baseDir = std::wstring(appData) + L"\\AhlbornBridge2";
 
     // Settings.xml path (narrow string for LoadInstalledOrgans)
     std::wstring settingsW = baseDir + L"\\Settings.xml";
@@ -730,6 +794,46 @@ bool CreateStreamDeckProfileFromSettings()
     }
 
     return CreateStreamDeckProfile("AhlbornBridge", -1, keys);
+}
+
+bool CreateStreamDeckSwitchesProfile()
+{
+    // Load AhlbornSwitches from Settings.xml
+    std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+    if (switches.empty())
+    {
+        printf("CreateStreamDeckSwitchesProfile: no switches found in Settings.xml.\n");
+        return false;
+    }
+
+    // Icon paths
+    wchar_t appData[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+        return false;
+    std::wstring iconsDir = std::wstring(appData) + L"\\AhlbornBridge2\\Icons\\";
+    std::string iconOff(iconsDir.begin(), iconsDir.end());
+    std::string iconOn = iconOff;
+    iconOff += "organ-off.png";
+    iconOn  += "organ-on.png";
+
+    std::map<int, KeyAction> keys;
+    for (int i = 0; i < static_cast<int>(switches.size()); ++i)
+    {
+        KeyAction key;
+        key.actionUUID     = "com.ahlbornbridge.switch";
+        key.fontFamily     = "";
+        key.fontSize       = 11;
+        key.titleAlignment = "middle";
+        key.titleColor     = "#ffffff";
+        key.titleColorOn   = "#ffffff";
+        // No imagePath — the plugin renders its own SVG
+        key.organIndex     = i + 1;  // switchIndex is 1-based
+        const std::wstring& wname = switches[i].name;
+        key.title = std::string(wname.begin(), wname.end());
+        keys[i] = key;
+    }
+
+    return CreateStreamDeckProfile("AhlbornBridge Switches", -1, keys);
 }
 
 /*

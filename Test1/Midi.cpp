@@ -54,6 +54,9 @@ static bool g_activeSensingNameLockInit = false;
 static std::atomic<bool> s_activeSensingReopenNeeded{ false };
 std::atomic<int> g_currentLoadedFavoriteIndex{ 0 };
 std::atomic<int> g_currentLoadedInstalledOrganIndex{ 0 };
+std::atomic<int> g_streamDeckLoadingInstalledOrganIndex{ 0 };
+std::atomic<int> g_streamDeckLoadingProgress{ 0 };
+std::atomic<bool> g_streamDeckBiduleSplashActive{ false };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
 std::wstring g_hauptwerkOrganTitle;
 
@@ -353,6 +356,10 @@ namespace
     HANDLE g_deferredCmdWorkerThread = nullptr;
     std::atomic<int> g_pendingInstalledOrganIndex{ 0 };
 
+    // Forward declarations needed by DeferredCmdWorkerThread
+    std::wstring GetInstalledOrganUniqueId(int installedOrganIndex);
+    std::wstring BuildBiduleProfilePathForOrgan(int installedOrganIndex);
+
     DWORD WINAPI DeferredCmdWorkerThread(LPVOID)
     {
         while (running)
@@ -377,6 +384,44 @@ namespace
 					{
 						int idx = g_pendingInstalledOrganIndex.load();
 						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
+							g_streamDeckLoadingInstalledOrganIndex.store(idx);
+							g_streamDeckLoadingProgress.store(0);
+							NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
+
+						// If an organ is already loaded, close Bidule and unload it first,
+						// then wait until Hauptwerk reports standby before proceeding.
+						if (g_currentLoadedInstalledOrganIndex.load() > 0)
+						{
+							printf("[Deferred] Organ already loaded — closing Bidule and unloading before loading new organ.\n");
+							// Close Bidule unconditionally if running: the audio device assignment
+							// may have already been changed, so ShouldUseBiduleForInstalledOrgan
+							// might return false even though Bidule is still open with the old config.
+							if (IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe"))
+							{
+								int prevIdx = g_currentLoadedInstalledOrganIndex.load();
+								std::wstring savePath = BuildBiduleProfilePathForOrgan(prevIdx);
+								if (!savePath.empty())
+								{
+									printf("[Deferred] Saving Bidule profile before unload: %S\n", savePath.c_str());
+									if (SendBiduleOscFileSaveAs(savePath))
+									{
+										size_t sep = savePath.find_last_of(L"\\/");
+										std::wstring profileName = (sep == std::wstring::npos) ? savePath : savePath.substr(sep + 1);
+										SaveInstalledOrganBiduleProfile(GetInstalledOrganUniqueId(prevIdx), profileName);
+										Sleep(300);
+									}
+								}
+								CloseBiduleProcess();
+							}
+							ClickMenu(g_hauptwerkMainWindow, mUNLOAD_ORGAN);
+							// Wait up to 10 s for the organ to be unloaded (watch thread sets index to 0)
+							for (int w = 0; w < 100 && g_currentLoadedInstalledOrganIndex.load() > 0; ++w)
+								Sleep(100);
+							if (g_currentLoadedInstalledOrganIndex.load() > 0)
+								printf("[Deferred] Warning: organ still loaded after unload wait, proceeding anyway.\n");
+							else
+								printf("[Deferred] Organ unloaded successfully, proceeding with load.\n");
+						}
 
                         if (!IsProcessRunningByName(L"Hauptwerk.exe") || g_hauptwerkMainWindow.load() == nullptr)
                         {
@@ -540,12 +585,12 @@ namespace
         {
             std::wstring base(path);
             CoTaskMemFree(path);
-            base += L"\\AhlbornBridge\\Icons";
+            base += L"\\AhlbornBridge2\\Icons";
             return base;
         }
 
         // Fallback to previous hardcoded location
-        return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge\\Icons");
+        return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge2\\Icons");
     }
 
     static const wchar_t* IconPath_A(const wchar_t* filename)
@@ -677,15 +722,28 @@ namespace
             std::wstring path = organ.biduleProfile;
             bool rooted = (path.size() > 2 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'));
             bool unc = (path.size() > 1 && path[0] == L'\\' && path[1] == L'\\');
-            if (!rooted && !unc)
-                path = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + path;
+
+            if (rooted || unc)
+            {
+                const std::wstring legacyRoot = L"\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\";
+                const std::wstring newRoot = L"\\AppData\\Roaming\\AhlbornBridge2\\BiduleProfiles\\";
+                size_t legacyPos = path.find(legacyRoot);
+                if (legacyPos != std::wstring::npos)
+                {
+                    path.replace(legacyPos, legacyRoot.size(), newRoot);
+                    std::wstring uniqueOrganId = GetInstalledOrganUniqueId(installedOrganIndex);
+                    if (!uniqueOrganId.empty())
+                        SaveInstalledOrganBiduleProfile(uniqueOrganId, path);
+                }
+                return path;
+            }
+
+            path = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge2\\BiduleProfiles\\" + path;
             return path;
         }
 
-        if (organ.name.empty())
-            return {};
-
-        return L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + organ.name + L".bidule";
+        // biduleProfile is empty: no profile assigned, do not use a fallback.
+        return {};
     }
 
     void CloseBiduleIfConfigured()
@@ -706,6 +764,22 @@ namespace
             return;
 
         std::wstring savePath = BuildBiduleProfilePathForOrgan(loadedInstalledOrganIndex);
+        if (savePath.empty())
+        {
+            // No profile assigned yet: generate a default path from the organ name so the
+            // current Bidule state can be saved and associated for future loads.
+            std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+            if (loadedInstalledOrganIndex <= static_cast<int>(organs.size()))
+            {
+                const auto& organ = organs[loadedInstalledOrganIndex - 1];
+                if (!organ.name.empty())
+                {
+                    wchar_t appData[MAX_PATH] = {};
+                    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+                        savePath = std::wstring(appData) + L"\\AhlbornBridge2\\BiduleProfiles\\" + organ.name + L".bidule";
+                }
+            }
+        }
         if (!savePath.empty())
         {
             if (SendBiduleOscFileSaveAs(savePath))
@@ -924,14 +998,16 @@ namespace
 			{
 				if (lastState != IconState::Standby || deviceStateChanged)
 				{
+					g_streamDeckLoadingInstalledOrganIndex.store(0);
+					g_streamDeckLoadingProgress.store(0);
 					UpdateTrayIconTooltip(title);
 					UpdateTrayIconFromFile(GetStandbyIconForCurrentDeviceState());
 					lastState = IconState::Standby;
 					isOrganLoaded = false;
 					g_currentLoadedFavoriteIndex = 0;
-					g_currentLoadedInstalledOrganIndex = 0;
-					if (deviceState.load() == DeviceState::Disconnected)
+					if (!g_isLoadingOrgan.load() && !g_pendingOrganLoad.load())
 						CloseBiduleIfConfigured();
+					g_currentLoadedInstalledOrganIndex = 0;
 					g_hauptwerkOrganTitle.clear();
 					NotifyOrganInfoTitleChanged();
 					g_trayIconImageStatus = TrayIconImageStatus::Standby;
@@ -944,6 +1020,7 @@ namespace
 			}
 			else if (std::wcsncmp(title, L"Hauptwerk -", 11) == 0)
 			{
+				g_streamDeckLoadingProgress.store(100);
 				bool enteringOnlineState = (lastState != IconState::Online);
 				if (enteringOnlineState || deviceStateChanged)
 				{
@@ -960,32 +1037,29 @@ namespace
 				if (enteringOnlineState)
 				{
 					int loadedInstalledOrganIndex = g_currentLoadedInstalledOrganIndex.load();
+					printf("[StreamDeck] Online state reached, notifying loaded installed organ index=%d\n", loadedInstalledOrganIndex);
+					NotifyStreamDeckOrganState(loadedInstalledOrganIndex);
 					if (loadedInstalledOrganIndex > 0 && ShouldUseBiduleForInstalledOrgan(loadedInstalledOrganIndex))
 					{
 						std::wstring biduleProfilePath;
 						std::vector<InstalledOrganInfo> organInfos = LoadInstalledOrganInfos();
 						if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
 						{
-							const auto& organ = organInfos[loadedInstalledOrganIndex - 1];
-							biduleProfilePath = organ.biduleProfile;
-							if (!biduleProfilePath.empty())
-							{
-								bool rooted = (biduleProfilePath.size() > 2 && biduleProfilePath[1] == L':' &&
-									(biduleProfilePath[2] == L'\\' || biduleProfilePath[2] == L'/'));
-								bool unc = (biduleProfilePath.size() > 1 && biduleProfilePath[0] == L'\\' && biduleProfilePath[1] == L'\\');
-								if (!rooted && !unc)
-								{
-									biduleProfilePath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\" + biduleProfilePath;
-								}
-							}
+							biduleProfilePath = BuildBiduleProfilePathForOrgan(loadedInstalledOrganIndex);
 						}
 
+						if (biduleProfilePath.empty())
+						{
+							printf("[Bidule] No profile assigned, launching Bidule with default state.\n");
+						}
 						if (!LaunchBidule())
 						{
 							printf("[Bidule] Bidule launch skipped because no executable path is configured or detected.\n");
 						}
 						else
 						{
+							g_streamDeckBiduleSplashActive.store(true);
+							NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
 							ShowBiduleLaunchSplash();
 							UpdateBiduleLaunchSplashProgress(10);
 							if (biduleProfilePath.empty())
@@ -996,21 +1070,29 @@ namespace
 							UpdateBiduleLaunchSplashProgress(30);
 							Sleep(2000);
 							UpdateBiduleLaunchSplashProgress(55);
+							bool shouldShowBiduleWindow = false;
 							if (!biduleProfilePath.empty())
 							{
 								DWORD attrs = GetFileAttributesW(biduleProfilePath.c_str());
 								if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
 								{
 									printf("[BiduleOSC] Profile file not found: %S\n", biduleProfilePath.c_str());
+									shouldShowBiduleWindow = true;
 								}
 								else if (!SendBiduleOscOpenProfile(biduleProfilePath))
 								{
 									printf("[BiduleOSC] Failed to send /open command.\n");
+									shouldShowBiduleWindow = true;
 								}
 							}
 							else
 							{
 								printf("[Bidule] Launch mode for this organ: visible (no BiduleProfile).\n");
+								shouldShowBiduleWindow = true;
+							}
+
+							if (shouldShowBiduleWindow)
+							{
 								bool shown = ShowBiduleWindow();
 								if (!shown)
 									shown = IsBiduleWindowVisible();
@@ -1030,6 +1112,8 @@ namespace
 								UpdateBiduleLaunchSplashProgress(90);
 							}
 							CloseBiduleLaunchSplash();
+							g_streamDeckBiduleSplashActive.store(false);
+							NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
 						}
 					}
 				}
@@ -1155,12 +1239,48 @@ namespace
             pAcc->Release();
         }
 
-        // Log everything found for diagnostics.
-        for (const auto& t : texts)
-            printf("[OrganLoadingWatch] text: %S\n", t.c_str());
-
         // Heuristic: pick the longest string that isn't a generic label,
         // button caption, or short progress indicator.
+        int bestPercent = -1;
+        for (const auto& t : texts)
+        {
+            size_t p = t.find(L'%');
+            if (p != std::wstring::npos && p > 0)
+            {
+                size_t start = p;
+                while (start > 0 && iswdigit(t[start - 1]))
+                    --start;
+                if (start < p)
+                {
+                    int val = _wtoi(t.substr(start, p - start).c_str());
+                    if (val >= 0 && val <= 100 && val > bestPercent)
+                        bestPercent = val;
+                    continue;
+                }
+            }
+
+            // Some Hauptwerk builds expose progress as plain number text (e.g. "90") without '%'.
+            std::wstring trimmed = t;
+            while (!trimmed.empty() && iswspace(trimmed.front())) trimmed.erase(trimmed.begin());
+            while (!trimmed.empty() && iswspace(trimmed.back())) trimmed.pop_back();
+            if (!trimmed.empty() && trimmed.size() <= 3)
+            {
+                bool allDigits = true;
+                for (wchar_t ch : trimmed)
+                {
+                    if (!iswdigit(ch)) { allDigits = false; break; }
+                }
+                if (allDigits)
+                {
+                    int val = _wtoi(trimmed.c_str());
+                    if (val >= 0 && val <= 100 && val > bestPercent)
+                        bestPercent = val;
+                }
+            }
+        }
+        if (bestPercent >= 0)
+            g_streamDeckLoadingProgress.store(bestPercent);
+
         std::wstring best;
         for (const auto& t : texts)
         {
@@ -1232,22 +1352,24 @@ namespace
                     if (!organLoaded)
                     {
                         g_organLoadCancelled = true;
-                        SendUnloadOrganMidiMessage();
+                        SendUnloadOrganMidiMessage(false);
                         printf("[OrganLoadingWatch] CANCEL confirmed (isOrganLoaded=%d)\n", (int)organLoaded);
 
                     }
                     else
                     {
                         g_organLoadCancelled = false;
+                        cancelDetected = false;  // window hidden = load complete, not a cancel
                         printf("[OrganLoadingWatch] Load OK (isOrganLoaded=%d)\n", (int)organLoaded);
                     }
                 }
 
-                // While loading, try to extract the organ title early.
-                if (loading && !titleExtracted)
+                // While loading, keep reading loading-window text (also updates progress),
+                // but extract/match the organ title only once.
+                if (loading)
                 {
                     std::wstring title = TryExtractOrganTitleFromLoadingWindow(hWnd);
-                    if (!title.empty())
+                    if (!title.empty() && !titleExtracted)
                     {
                         printf("[OrganLoadingWatch] Extracted organ title: %S\n", title.c_str());
                         g_hauptwerkOrganTitle = title;
@@ -1304,9 +1426,6 @@ namespace
                                 DWORD midiMsg = CC_ch16 | (BF_0x51 << 8) | ((iidx + 1) << 16);
                                 EnqueueMidiOutMessage(midiMsg);
                                 printf("[OrganLoadingWatch] Sent MIDI BF 51 %02X\n", iidx + 1);
-
-                                // Notify Stream Deck plugin of loaded organ
-                                NotifyStreamDeckOrganState(iidx + 1);
                                 break;
                             }
                         }
@@ -1335,19 +1454,31 @@ namespace
 
                             if (!organLoaded)
                             {
-                                SendUnloadOrganMidiMessage();
-                                printf("[OrganLoadingWatch] Cancel notification sent\n");
-
                                 int rerouteIndex = g_pendingManualRerouteInstalledOrganIndex.exchange(0);
                                 if (rerouteIndex > 0)
                                 {
+                                    // Transient cancel before requeue: do not reset switch visuals
+                                    SendUnloadOrganMidiMessage(false);
+                                    printf("[OrganLoadingWatch] Cancel notification sent (requeue follows)\n");
                                     printf("[AudioPreload] Fallback cancel confirmed. Requeueing installed organ %d via deferred preload flow.\n", rerouteIndex);
                                     EnqueueLoadInstalledOrgan(rerouteIndex);
+                                }
+                                else
+                                {
+                                    // True cancel: reset switch visuals
+                                    SendUnloadOrganMidiMessage(true);
+                                    printf("[OrganLoadingWatch] Cancel notification sent (no requeue)\n");
                                 }
                             }
                             else
                             {
                                 g_pendingManualRerouteInstalledOrganIndex.store(0);
+                                // Organ fully loaded — restore saved switch states.
+                                // Wait briefly to ensure Hauptwerk is ready to receive CC.
+                                int loadedIdx = g_currentLoadedInstalledOrganIndex.load();
+                                printf("[OrganLoadingWatch] Organ load complete, restoring switch states for index=%d\n", loadedIdx);
+                                Sleep(1500);
+                                NotifyStreamDeckSwitchesForOrgan(loadedIdx);
                             }
                         }
                         else
@@ -1382,6 +1513,14 @@ namespace
                 wasLoading = loading;
             }
             g_isLoadingOrgan = loading;
+            if (loading)
+            {
+                NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
+            }
+            else if (!loadingWindowExists)
+            {
+                NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
+            }
             Sleep(200);
         }
         g_isLoadingOrgan = false;
@@ -1842,16 +1981,23 @@ void SetAssignedMidiOutputNames(const std::vector<std::wstring>& names)
             { idx = i; break; }
         }
         if (idx == UINT(-1)) { printf("[SetAssignedMidiOutputNames] '%S' not found\n", name.c_str()); continue; }
+        printf("[SetAssignedMidiOutputNames] Opening slot=%zu '%S' devIdx=%u\n", slot, name.c_str(), idx);
         if (slot == 0)      OpenMidiOutputDevice(idx);
         else if (slot == 1) OpenMidiOutput2Device(idx);
         else
         {
             HMIDIOUT hExtra = nullptr;
-            if (midiOutOpen(&hExtra, idx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR)
+            MMRESULT res = midiOutOpen(&hExtra, idx, 0, 0, CALLBACK_NULL);
+            if (res == MMSYSERR_NOERROR)
             {
                 EnterCriticalSection(&g_midiOutLock);
                 g_midiOuts.push_back(hExtra);
                 LeaveCriticalSection(&g_midiOutLock);
+                printf("[SetAssignedMidiOutputNames] Opened extra output slot=%zu '%S' OK\n", slot, name.c_str());
+            }
+            else
+            {
+                printf("[SetAssignedMidiOutputNames] FAILED to open extra output slot=%zu '%S' err=%u\n", slot, name.c_str(), res);
             }
         }
     }
@@ -2100,6 +2246,9 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 g_pendingOrganLoad = false;
                 g_currentLoadedFavoriteIndex = 0;
                 g_currentLoadedInstalledOrganIndex = 0;
+                g_streamDeckLoadingInstalledOrganIndex.store(0);
+                g_streamDeckLoadingProgress.store(0);
+                g_streamDeckBiduleSplashActive.store(false);
                 g_hauptwerkOrganTitle.clear();
                 NotifyOrganInfoTitleChanged();
             }
@@ -2188,12 +2337,9 @@ bool startsWithFe()
 
 // ---------------------------------------------------------------------------
 // Interactive MIDI input detection.
-// Opens all available MIDI input devices in "sniff" mode, waits up to 30
-// seconds for the first MIDI message, then saves the sender as the assigned
-// input.  "AhlbornBridge Virtual Port" is always added as the default
-// output (the bridge writes here; Hauptwerk reads from "Virtual Port (B)").
-// Both assignments are persisted to Settings.xml and written to the
-// Hauptwerk Config.Config_Hauptwerk_xml.
+// Phase 1: wait indefinitely for a MIDI message (no countdown).
+// Phase 2: confirm or choose a different device from a list.
+// Phase 3: show a progress splash while configuring Hauptwerk MIDI/audio.
 // ---------------------------------------------------------------------------
 static void DetectMidiInputInteractive()
 {
@@ -2204,111 +2350,96 @@ static void DetectMidiInputInteractive()
         return;
     }
 
-    printf("\n[DetectMidi] *** No MIDI input configured. ***\n");
-    printf("[DetectMidi] Press any key/pedal on your MIDI controller now...\n");
-    printf("[DetectMidi] Listening on %u device(s) for 30 seconds.\n\n", numInDevs);
-    fflush(stdout);
-
-    g_detectHitIndex.store(-1);
-    g_detectHandles.clear();
-
+    // -----------------------------------------------------------------------
+    // Build list of available input device names (excluding virtual ports).
+    // -----------------------------------------------------------------------
+    struct DevEntry { UINT index; std::wstring name; };
+    std::vector<DevEntry> availableDevs;
     for (UINT i = 0; i < numInDevs; ++i)
     {
         MIDIINCAPS caps = {};
         if (midiInGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
-        printf("[DetectMidi]   Listening on [%u] %S\n", i, caps.szPname);
+        std::wstring n = caps.szPname;
+        if (n.find(L"AhlbornBridge") != std::wstring::npos) continue;
+        if (n.find(L"Loopback") != std::wstring::npos) continue;
+        availableDevs.push_back({ i, n });
+    }
 
+    printf("\n[DetectMidi] *** No MIDI input configured. ***\n");
+    printf("[DetectMidi] Listening on %zu device(s)...\n\n", availableDevs.size());
+
+    // Open all candidate devices for sniffing
+    g_detectHitIndex.store(-1);
+    g_detectHandles.clear();
+    for (auto& dev : availableDevs)
+    {
         HMIDIIN h = nullptr;
-        if (midiInOpen(&h, i, (DWORD_PTR)DetectMidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
+        if (midiInOpen(&h, dev.index, (DWORD_PTR)DetectMidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
         {
             midiInStart(h);
             g_detectHandles.push_back(h);
+            printf("[DetectMidi]   Listening on [%u] %S\n", dev.index, dev.name.c_str());
         }
     }
 
-    // Show a dialog while waiting (keeps the message pump alive and gives user visual feedback)
-    constexpr DWORD kTimeoutMs = 30000;
+    // -----------------------------------------------------------------------
+    // PHASE 1: wait indefinitely for first MIDI message
+    // -----------------------------------------------------------------------
+    struct Phase1Data { bool skipPressed; };
+    Phase1Data phase1 = { false };
 
-    struct DetectDlgData
-    {
-        DWORD startTick;
-        DWORD timeoutMs;
-    };
-    DetectDlgData dlgData = { GetTickCount(), kTimeoutMs };
+    HFONT hFontNormal = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT hFontBig = CreateFontW(-20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
-    auto detectDlgProc = [](HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR
+    auto phase1Proc = [](HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR
     {
         switch (msg)
         {
         case WM_INITDIALOG:
         {
             SetWindowLongPtrW(hDlg, GWLP_USERDATA, lp);
-            SetWindowTextW(hDlg, L"AhlbornBridge \u2014 Primo avvio");
+            SetWindowTextW(hDlg, L"AhlbornBridge \u2014 First Setup");
             SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             SetForegroundWindow(hDlg);
 
-            HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-            SetWindowLongPtrW(hDlg, DWLP_USER, (LONG_PTR)hFont);
+            auto* fonts = reinterpret_cast<HFONT*>(lp);
+            HFONT hF = fonts[0], hFB = fonts[1];
 
-            HWND hLbl = CreateWindowW(L"STATIC",
-                L"Nessun dispositivo MIDI configurato.\n\n"
-                L"Premere un tasto sulla console/pedaliera\n"
-                L"per rilevare automaticamente il dispositivo MIDI.",
+            HWND h;
+            h = CreateWindowW(L"STATIC", L"MIDI Device Detection",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                20, 20, 340, 80, hDlg, (HMENU)101, nullptr, nullptr);
-            SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+                20, 18, 360, 28, hDlg, nullptr, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)hFB, TRUE);
 
-            HWND hCountdown = CreateWindowW(L"STATIC", L"30",
+            h = CreateWindowW(L"STATIC",
+                L"Press any key or pedal on your console\nto automatically detect the MIDI device.",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                150, 110, 80, 40, hDlg, (HMENU)102, nullptr, nullptr);
-            HFONT hBig = CreateFontW(-28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-            SendMessageW(hCountdown, WM_SETFONT, (WPARAM)hBig, TRUE);
-            // store big font in static id 103 to delete on destroy
-            CreateWindowW(L"STATIC", L"secondi rimanenti",
-                WS_CHILD | WS_VISIBLE | SS_CENTER,
-                80, 152, 220, 20, hDlg, (HMENU)103, nullptr, nullptr);
-            HWND hSub = GetDlgItem(hDlg, 103);
-            if (hSub) SendMessageW(hSub, WM_SETFONT, (WPARAM)hFont, TRUE);
+                20, 58, 360, 44, hDlg, nullptr, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)hF, TRUE);
 
-            HWND hSkip = CreateWindowW(L"BUTTON", L"Salta",
+            h = CreateWindowW(L"STATIC", L"\U0001F3B9  Waiting for MIDI input...",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 112, 360, 24, hDlg, (HMENU)201, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)hF, TRUE);
+
+            h = CreateWindowW(L"BUTTON", L"Skip",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                155, 186, 90, 28, hDlg, (HMENU)IDCANCEL, nullptr, nullptr);
-            SendMessageW(hSkip, WM_SETFONT, (WPARAM)hFont, TRUE);
+                160, 150, 80, 28, hDlg, (HMENU)IDCANCEL, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)hF, TRUE);
 
             SetTimer(hDlg, 1, 100, nullptr);
             return TRUE;
         }
         case WM_TIMER:
-        {
-            if (wp != 1) break;
-            auto* data = reinterpret_cast<DetectDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
-            if (!data) break;
-
-            // Check if MIDI was detected
-            if (g_detectHitIndex.load() >= 0)
+            if (wp == 1 && g_detectHitIndex.load() >= 0)
             {
                 KillTimer(hDlg, 1);
                 EndDialog(hDlg, IDOK);
                 return TRUE;
             }
-
-            DWORD elapsed = GetTickCount() - data->startTick;
-            if (elapsed >= data->timeoutMs)
-            {
-                KillTimer(hDlg, 1);
-                EndDialog(hDlg, IDCANCEL);
-                return TRUE;
-            }
-
-            DWORD remaining = (data->timeoutMs - elapsed + 999) / 1000;
-            wchar_t buf[16];
-            swprintf_s(buf, L"%lu", remaining);
-            HWND hCountdown = GetDlgItem(hDlg, 102);
-            if (hCountdown) SetWindowTextW(hCountdown, buf);
             return TRUE;
-        }
         case WM_COMMAND:
             if (LOWORD(wp) == IDCANCEL)
             {
@@ -2317,100 +2448,286 @@ static void DetectMidiInputInteractive()
                 return TRUE;
             }
             break;
-        case WM_DESTROY:
+        }
+        return FALSE;
+    };
+
+    HFONT fonts[2] = { hFontNormal, hFontBig };
+
+#pragma pack(push, 4)
+    struct { DLGTEMPLATE dt; WORD menu; WORD cls; WORD title; } dlgTpl = {};
+#pragma pack(pop)
+    dlgTpl.dt.style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    dlgTpl.dt.cx = 230;
+    dlgTpl.dt.cy = 120;
+
+    INT_PTR phase1Result = DialogBoxIndirectParamW(GetModuleHandle(nullptr),
+        reinterpret_cast<LPCDLGTEMPLATEW>(&dlgTpl),
+        nullptr, phase1Proc, reinterpret_cast<LPARAM>(fonts));
+
+    // Stop detection handles
+    for (HMIDIIN h : g_detectHandles) { midiInStop(h); midiInReset(h); midiInClose(h); }
+    g_detectHandles.clear();
+
+    if (phase1Result != IDOK)
+    {
+        printf("[DetectMidi] User skipped detection.\n");
+        g_detectHitIndex.store(-1);
+        DeleteObject(hFontNormal);
+        DeleteObject(hFontBig);
+        return;
+    }
+
+    // Resolve detected device name
+    int hit = g_detectHitIndex.load();
+    g_detectHitIndex.store(-1);
+    std::wstring detectedName;
+    {
+        int openCount = 0;
+        for (auto& dev : availableDevs)
         {
-            HFONT hFont = (HFONT)GetWindowLongPtrW(hDlg, DWLP_USER);
-            if (hFont) DeleteObject(hFont);
+            if (openCount == hit) { detectedName = dev.name; break; }
+            ++openCount;
+        }
+    }
+    printf("[DetectMidi] Detected: %S (hit=%d)\n", detectedName.c_str(), hit);
+
+    // -----------------------------------------------------------------------
+    // PHASE 2: confirm device or choose from list
+    // -----------------------------------------------------------------------
+    struct Phase2Data
+    {
+        std::wstring detectedName;
+        std::vector<DevEntry>* devs;
+        std::wstring chosenName;
+        HFONT hF, hFB;
+    };
+    Phase2Data phase2 = { detectedName, &availableDevs, detectedName, hFontNormal, hFontBig };
+
+    auto phase2Proc = [](HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR
+    {
+        switch (msg)
+        {
+        case WM_INITDIALOG:
+        {
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, lp);
+            auto* d = reinterpret_cast<Phase2Data*>(lp);
+            SetWindowTextW(hDlg, L"AhlbornBridge \u2014 Device Detected");
+            SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetForegroundWindow(hDlg);
+
+            HWND h;
+            h = CreateWindowW(L"STATIC", L"MIDI device detected:",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 16, 360, 24, hDlg, nullptr, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hFB, TRUE);
+
+            h = CreateWindowW(L"STATIC", d->detectedName.c_str(),
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 44, 360, 32, hDlg, (HMENU)301, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hFB, TRUE);
+
+            h = CreateWindowW(L"STATIC", L"Or select a different device:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                20, 90, 360, 18, hDlg, nullptr, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
+
+            HWND hList = CreateWindowW(WC_LISTBOXW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
+                20, 110, 360, 88, hDlg, (HMENU)302, nullptr, nullptr);
+            SendMessageW(hList, WM_SETFONT, (WPARAM)d->hF, TRUE);
+
+            int selIdx = 0;
+            for (int i = 0; i < (int)d->devs->size(); ++i)
+            {
+                SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)(*d->devs)[i].name.c_str());
+                if ((*d->devs)[i].name == d->detectedName) selIdx = i;
+            }
+            SendMessageW(hList, LB_SETCURSEL, selIdx, 0);
+
+            h = CreateWindowW(L"BUTTON", L"Use this device",
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                70, 214, 130, 28, hDlg, (HMENU)IDOK, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
+
+            h = CreateWindowW(L"BUTTON", L"Skip",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                220, 214, 80, 28, hDlg, (HMENU)IDCANCEL, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
+
+            return TRUE;
+        }
+        case WM_COMMAND:
+        {
+            auto* d = reinterpret_cast<Phase2Data*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+            if (LOWORD(wp) == IDOK)
+            {
+                // Read selected item from listbox
+                HWND hList = GetDlgItem(hDlg, 302);
+                int sel = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
+                if (sel >= 0 && sel < (int)d->devs->size())
+                    d->chosenName = (*d->devs)[sel].name;
+                EndDialog(hDlg, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDCANCEL)
+            {
+                EndDialog(hDlg, IDCANCEL);
+                return TRUE;
+            }
             break;
         }
         }
         return FALSE;
     };
 
-#pragma pack(push, 4)
-    struct { DLGTEMPLATE dt; WORD menu; WORD cls; WORD title; } dlgTpl = {};
-#pragma pack(pop)
-    dlgTpl.dt.style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    dlgTpl.dt.cx = 200;
-    dlgTpl.dt.cy = 130;
+    dlgTpl.dt.cx = 250;
+    dlgTpl.dt.cy = 160;
+    INT_PTR phase2Result = DialogBoxIndirectParamW(GetModuleHandle(nullptr),
+        reinterpret_cast<LPCDLGTEMPLATEW>(&dlgTpl),
+        nullptr, phase2Proc, reinterpret_cast<LPARAM>(&phase2));
 
+    DeleteObject(hFontNormal);
+    DeleteObject(hFontBig);
+
+    if (phase2Result != IDOK || phase2.chosenName.empty())
+    {
+        printf("[DetectMidi] User cancelled device selection.\n");
+        return;
+    }
+
+    detectedName = phase2.chosenName;
+    printf("[DetectMidi] Chosen device: %S\n", detectedName.c_str());
+
+    // -----------------------------------------------------------------------
+    // PHASE 3: configuration splash with progress bar
+    // -----------------------------------------------------------------------
+    struct Phase3Data
+    {
+        std::wstring deviceName;
+        int progress;       // 0-100
+        std::wstring status;
+        bool done;
+        HWND hDlg;
+        HFONT hF, hFB;
+    };
+    Phase3Data phase3 = { detectedName, 0, L"Starting configuration...", false, nullptr };
+    phase3.hF  = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    phase3.hFB = CreateFontW(-14, 0, 0, 0, FW_BOLD,   FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+
+    auto phase3Proc = [](HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR
+    {
+        switch (msg)
+        {
+        case WM_INITDIALOG:
+        {
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, lp);
+            auto* d = reinterpret_cast<Phase3Data*>(lp);
+            d->hDlg = hDlg;
+            SetWindowTextW(hDlg, L"AhlbornBridge \u2014 Configuring");
+            SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetForegroundWindow(hDlg);
+
+            HWND h;
+            h = CreateWindowW(L"STATIC", L"Configuring MIDI and audio for Hauptwerk",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 16, 360, 22, hDlg, nullptr, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hFB, TRUE);
+
+            std::wstring devLabel = L"Device:  " + d->deviceName;
+            h = CreateWindowW(L"STATIC", devLabel.c_str(),
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 42, 360, 18, hDlg, nullptr, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
+
+            // Progress bar
+            INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_PROGRESS_CLASS };
+            InitCommonControlsEx(&icc);
+            CreateWindowW(PROGRESS_CLASSW, nullptr,
+                WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+                20, 72, 360, 18, hDlg, (HMENU)401, nullptr, nullptr);
+            SendDlgItemMessageW(hDlg, 401, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+            SendDlgItemMessageW(hDlg, 401, PBM_SETPOS, 0, 0);
+
+            h = CreateWindowW(L"STATIC", d->status.c_str(),
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                20, 98, 360, 18, hDlg, (HMENU)402, nullptr, nullptr);
+            SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
+
+            SetTimer(hDlg, 2, 80, nullptr);
+            return TRUE;
+        }
+        case WM_TIMER:
+        {
+            if (wp != 2) break;
+            auto* d = reinterpret_cast<Phase3Data*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+            SendDlgItemMessageW(hDlg, 401, PBM_SETPOS, d->progress, 0);
+            SetDlgItemTextW(hDlg, 402, d->status.c_str());
+            if (d->done)
+            {
+                KillTimer(hDlg, 2);
+                Sleep(600);
+                EndDialog(hDlg, IDOK);
+            }
+            return TRUE;
+        }
+        }
+        return FALSE;
+    };
+
+    // Launch configuration on a background thread, updating phase3 as steps complete
+    struct CfgThreadParam { Phase3Data* d; std::wstring deviceName; std::vector<DevEntry>* devs; };
+    CfgThreadParam cfgParam = { &phase3, detectedName, &availableDevs };
+
+    HANDLE hCfgThread = CreateThread(nullptr, 0, [](LPVOID pv) -> DWORD
+    {
+        auto* p = reinterpret_cast<CfgThreadParam*>(pv);
+        Phase3Data* d = p->d;
+        const std::wstring& name = p->deviceName;
+
+        auto step = [&](int pct, const wchar_t* msg)
+        {
+            d->progress = pct;
+            d->status = msg;
+            Sleep(300);
+        };
+
+        step(10, L"Saving MIDI assignments...");
+        std::vector<std::wstring> inputNames  = { name };
+        std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port" };
+        std::vector<std::wstring> hwOutputs   = { name };
+        SaveAssignedMidiInputNames(inputNames);
+        SaveAssignedMidiOutputNames(outputNames);
+        SaveFixedHauptwerkOutputName(name);
+
+        step(35, L"Writing Hauptwerk MIDI configuration...");
+        WriteHauptwerkMidiConfig(inputNames, hwOutputs);
+
+        step(60, L"Writing Hauptwerk audio configuration...");
+        WriteHauptwerkAudioConfig();
+
+        step(80, L"Opening MIDI devices...");
+        SetAssignedMidiInputNames(inputNames);
+        SetAssignedMidiOutputNames(outputNames);
+
+        step(100, L"Configuration complete.");
+        d->done = true;
+        return 0;
+    }, &cfgParam, 0, nullptr);
+
+    dlgTpl.dt.cx = 250;
+    dlgTpl.dt.cy = 90;
     DialogBoxIndirectParamW(GetModuleHandle(nullptr),
         reinterpret_cast<LPCDLGTEMPLATEW>(&dlgTpl),
-        nullptr, detectDlgProc, reinterpret_cast<LPARAM>(&dlgData));
+        nullptr, phase3Proc, reinterpret_cast<LPARAM>(&phase3));
 
-    // Stop and close all detection handles
-    for (HMIDIIN h : g_detectHandles)
-    {
-        midiInStop(h);
-        midiInReset(h);
-        midiInClose(h);
-    }
+    WaitForSingleObject(hCfgThread, 5000);
+    CloseHandle(hCfgThread);
 
-    int hit = g_detectHitIndex.load();
-    g_detectHandles.clear();
-    g_detectHitIndex.store(-1);
+    DeleteObject(phase3.hF);
+    DeleteObject(phase3.hFB);
 
-    if (hit < 0)
-    {
-        printf("[DetectMidi] Timeout: no MIDI input detected. Continuing without assignment.\n");
-        return;
-    }
-
-    // Resolve the device name from its index in the full device list
-    // (g_detectHandles was built in order, skipping devices that failed to open;
-    //  we need to map `hit` back to the real device index).
-    UINT numDevs = midiInGetNumDevs();
-    int openCount = 0;
-    std::wstring detectedName;
-    for (UINT i = 0; i < numDevs; ++i)
-    {
-        MIDIINCAPS caps = {};
-        if (midiInGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
-        // Check whether this index was successfully opened (same order as above)
-        HMIDIIN probe = nullptr;
-        // We already closed everything; just count the ones that were opened
-        // in the same order. We track success by counting openCount.
-        // Re-test: if the device caps query succeeded it was attempted;
-        // we can't re-open here, so we just count all caps-successful devices.
-        if (openCount == hit)
-        {
-            detectedName = caps.szPname;
-            printf("[DetectMidi] Detected MIDI input: [%u] %S\n", i, caps.szPname);
-            break;
-        }
-        ++openCount;
-    }
-
-    if (detectedName.empty())
-    {
-        printf("[DetectMidi] Could not resolve device name for hit index %d.\n", hit);
-        return;
-    }
-
-    // Build assignment lists
-    std::vector<std::wstring> inputNames  = { detectedName };
-    std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port" };
-    std::vector<std::wstring> hauptwerkOutputNames = { detectedName };
-
-    // Persist to Settings.xml
-    SaveAssignedMidiInputNames(inputNames);
-    SaveAssignedMidiOutputNames(outputNames);
-    SaveFixedHauptwerkOutputName(detectedName);
-    printf("[DetectMidi] Saved assigned input:  %S\n", detectedName.c_str());
-    printf("[DetectMidi] Saved assigned output: AhlbornBridge Virtual Port\n");
-    printf("[DetectMidi] Saved fixed Hauptwerk output: %S\n", detectedName.c_str());
-
-    // Write to Hauptwerk config.
-    // On first install, Hauptwerk must use the auto-detected physical device
-    // as MIDI output; the internal bridge port remains app-internal only.
-    WriteHauptwerkMidiConfig(inputNames, hauptwerkOutputNames);
-
-    // Configure the fixed audio output preset in Hauptwerk config.
-    WriteHauptwerkAudioConfig();
-
-    // Now open the assigned devices for runtime use
-    SetAssignedMidiInputNames(inputNames);
-    SetAssignedMidiOutputNames(outputNames);
+    printf("[DetectMidi] Configuration complete for: %S\n", detectedName.c_str());
 }
 
 bool initMidiState()
@@ -3159,7 +3476,7 @@ void CALLBACK MidiInProc(
 				}
 			}
 			g_pendingOrganLoad = true;
-			SendUnloadOrganMidiMessage();
+			SendUnloadOrganMidiMessage(false);
 			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (static_cast<DWORD>(organIdx) << 16));
 			DeferredCmd organCmd = static_cast<DeferredCmd>(
 				static_cast<DWORD>(DeferredCmd::LoadFavoriteOrgan1) + static_cast<DWORD>(organIdx) - 1);
@@ -3188,6 +3505,44 @@ void CALLBACK MidiInProc(
 			g_pendingInstalledOrganIndex.store(organIdx);
 			g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadInstalledOrgan);
 			break;
+		}
+
+		// Sync Stream Deck switch buttons when matching CC arrives from MIDI input
+		{
+			std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+			for (size_t i = 0; i < switches.size(); ++i)
+			{
+				const AhlbornSwitchInfo& s = switches[i];
+				if (s.channel == static_cast<int>(ch) + 1 &&
+					s.controlChange == static_cast<int>(data1))
+				{
+					int switchIndex = static_cast<int>(i) + 1;
+					if (s.valueOn == static_cast<int>(data2))
+					{
+						NotifyStreamDeckSwitchState(switchIndex, true);
+						int loadedInstalledIndex = g_currentLoadedInstalledOrganIndex.load();
+						if (loadedInstalledIndex > 0)
+						{
+							std::wstring uniqueOrganId = GetInstalledOrganUniqueId(loadedInstalledIndex);
+							if (!uniqueOrganId.empty())
+								SaveOrganSwitchState(uniqueOrganId, switchIndex, true);
+						}
+						break;
+					}
+					if (s.valueOff == static_cast<int>(data2))
+					{
+						NotifyStreamDeckSwitchState(switchIndex, false);
+						int loadedInstalledIndex = g_currentLoadedInstalledOrganIndex.load();
+						if (loadedInstalledIndex > 0)
+						{
+							std::wstring uniqueOrganId = GetInstalledOrganUniqueId(loadedInstalledIndex);
+							if (!uniqueOrganId.empty())
+								SaveOrganSwitchState(uniqueOrganId, switchIndex, false);
+						}
+						break;
+					}
+				}
+			}
 		}
 	}
 		break;

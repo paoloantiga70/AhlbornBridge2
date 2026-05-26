@@ -56,6 +56,7 @@ constexpr int kShowConsoleCheckId = 202;
 constexpr int kCheckForUpdateOnStartCheckId = 203;
 constexpr int kSdSendButtonId = 304;
 constexpr int kSdPluginUpdateButtonId = 305;
+constexpr int kSdSwitchesProfileButtonId = 306;
 constexpr int kMainWindowBehaviorComboId = 401;
 constexpr int kMainDebugConsoleComboId = 402;
 constexpr int kActiveSensingCheckId = 403;
@@ -65,6 +66,7 @@ constexpr int kMainCheckNowButtonId = 404;
 constexpr int kHauptwerkOrganListId = 501;
 constexpr int kHauptwerkAudioDeviceComboId = 502;
 constexpr int kHauptwerkSaveAudioAssignmentButtonId = 503;
+constexpr int kHauptwerkClearBiduleProfileButtonId  = 504;
 constexpr int kBiduleBrowseButtonId = 601;
 constexpr int kBiduleAutoDetectButtonId = 602;
 constexpr int kBiduleCloseOnUnloadCheckId = 603;
@@ -559,6 +561,19 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 22, 76, 120, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdSendButtonId, nullptr, nullptr);
 
+            CreateWindowW(L"BUTTON", L"Switches Profile", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                320, 8, 300, 100, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Create a Stream Deck profile with one\n"
+                L"button for each Ahlborn switch.",
+                WS_CHILD | WS_VISIBLE,
+                332, 32, 270, 36, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Create Switches Profile",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                332, 76, 160, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdSwitchesProfileButtonId, nullptr, nullptr);
+
             CreateWindowW(L"BUTTON", L"Plugin Update", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 10, 116, 300, 80, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
 
@@ -705,6 +720,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(L"BUTTON", L"Save assignment",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 584, 414, 140, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkSaveAudioAssignmentButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Clear Bidule Profile",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                584, 444, 140, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkClearBiduleProfileButtonId, nullptr, nullptr);
 
             RefreshHauptwerkAudioAssignmentsUI();
         }
@@ -997,6 +1016,24 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 MessageBoxW(hWnd, L"Failed to create Stream Deck profile.\nCheck that organs are installed.", L"Stream Deck", MB_OK | MB_ICONERROR);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdSwitchesProfileButtonId)
+        {
+            system("taskkill /f /im StreamDeck.exe >nul 2>&1");
+            Sleep(2000);
+
+            bool ok = CreateStreamDeckSwitchesProfile();
+
+            Sleep(1000);
+            ShellExecuteW(nullptr, L"open",
+                L"C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe",
+                nullptr, nullptr, SW_HIDE);
+
+            if (ok)
+                MessageBoxW(hWnd, L"Switches profile created!\nStream Deck has been restarted.", L"Stream Deck", MB_OK | MB_ICONINFORMATION);
+            else
+                MessageBoxW(hWnd, L"Failed to create Switches profile.\nCheck that switches are configured in Settings.xml.", L"Stream Deck", MB_OK | MB_ICONERROR);
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdPluginUpdateButtonId)
         {
             CheckForPluginUpdateInteractive(hWnd);
@@ -1023,10 +1060,78 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 RefreshHauptwerkAudioAssignmentsUI();
                 ListView_SetItemState(g_hauptwerkOrganListHwnd, selectedOrgan, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
                 SyncHauptwerkAudioComboToSelection();
+
+                // If this organ is currently loaded, offer to reload it with the new audio device.
+                int organOneBased = selectedOrgan + 1;
+                if (g_currentLoadedInstalledOrganIndex.load() == organOneBased)
+                {
+                    int answer = MessageBoxW(hWnd,
+                        L"This organ is currently loaded.\nUnload and reload it now to apply the new audio device?",
+                        L"Hauptwerk", MB_YESNO | MB_ICONQUESTION);
+                    if (answer == IDYES)
+                    {
+                        // EnqueueLoadInstalledOrgan already handles unload+wait internally
+                        // when an organ is currently loaded. No need to enqueue a separate unload.
+                        EnqueueLoadInstalledOrgan(organOneBased);
+                    }
+                }
             }
             else
             {
                 MessageBoxW(hWnd, L"Failed to save the organ audio assignment.", L"Hauptwerk", MB_OK | MB_ICONERROR);
+            }
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkClearBiduleProfileButtonId)
+        {
+            if (!g_hauptwerkOrganListHwnd) return 0;
+            int selectedOrgan = ListView_GetNextItem(g_hauptwerkOrganListHwnd, -1, LVNI_SELECTED);
+            if (selectedOrgan < 0 || selectedOrgan >= static_cast<int>(g_hauptwerkOrgans.size()))
+            {
+                MessageBoxW(hWnd, L"Select an organ first.", L"Hauptwerk", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+            const auto& organ = g_hauptwerkOrgans[selectedOrgan];
+
+            // Build the full path of the .bidule file (same logic as BuildBiduleProfilePathForOrgan)
+            std::wstring profileToDelete;
+            if (!organ.biduleProfile.empty())
+            {
+                const std::wstring& p = organ.biduleProfile;
+                bool rooted = (p.size() > 2 && p[1] == L':');
+                bool unc    = (p.size() > 1 && p[0] == L'\\' && p[1] == L'\\');
+                if (rooted || unc)
+                    profileToDelete = p;
+                else
+                {
+                    wchar_t appData[MAX_PATH] = {};
+                    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+                        profileToDelete = std::wstring(appData) + L"\\AhlbornBridge2\\BiduleProfiles\\" + p;
+                }
+            }
+
+            // Ask confirmation if there is a file to delete
+            if (!profileToDelete.empty())
+            {
+                std::wstring msg = L"Also delete the profile file on disk?\n\n" + profileToDelete;
+                int answer = MessageBoxW(hWnd, msg.c_str(), L"Clear Bidule Profile", MB_YESNOCANCEL | MB_ICONQUESTION);
+                if (answer == IDCANCEL)
+                    return 0;
+                if (answer == IDYES)
+                {
+                    if (!DeleteFileW(profileToDelete.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
+                        MessageBoxW(hWnd, L"Could not delete the profile file.", L"Clear Bidule Profile", MB_OK | MB_ICONWARNING);
+                }
+            }
+
+            if (SaveInstalledOrganBiduleProfile(organ.uniqueOrganId, L""))
+            {
+                RefreshHauptwerkAudioAssignmentsUI();
+                ListView_SetItemState(g_hauptwerkOrganListHwnd, selectedOrgan, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            }
+            else
+            {
+                MessageBoxW(hWnd, L"Failed to clear the Bidule profile.", L"Hauptwerk", MB_OK | MB_ICONERROR);
             }
             return 0;
         }
@@ -1190,12 +1295,12 @@ bool CreateTrayIcon(HINSTANCE hInstance, HWND hWnd)
     {
         return false;
     }
-    // Prefer per-user icons in %APPDATA%\AhlbornBridge\Icons\A_Disabled.png when available.
+    // Prefer per-user icons in %APPDATA%\AhlbornBridge2\Icons\A_Disabled.png when available.
     wchar_t appdataBuf[MAX_PATH] = {};
     std::wstring iconPath;
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdataBuf)))
     {
-        iconPath = std::wstring(appdataBuf) + L"\\AhlbornBridge\\Icons\\A_Disabled.png";
+        iconPath = std::wstring(appdataBuf) + L"\\AhlbornBridge2\\Icons\\A_Disabled.png";
     }
 
     if (!iconPath.empty())
@@ -1576,7 +1681,7 @@ namespace {
         {
             std::wstring result(path);
             CoTaskMemFree(path);
-            result += L"\\AhlbornBridge\\Icons\\";
+            result += L"\\AhlbornBridge2\\Icons\\";
             result += filename;
             return result;
         }
@@ -1590,6 +1695,8 @@ namespace {
         int totalMs;
         bool bottomRight;
         int holdMs;
+        int fadeInMs;
+        int fadeOutMs;
     };
 
     struct TextSplashThreadParam
@@ -1626,6 +1733,8 @@ namespace {
         int totalMs = p->totalMs;
         bool bottomRight = p->bottomRight;
         int holdMs = p->holdMs;
+        int fadeInMs = p->fadeInMs;
+        int fadeOutMs = p->fadeOutMs;
         delete p;
 
         if (imgPath.empty())
@@ -1721,16 +1830,26 @@ namespace {
         SIZE  szWnd = { imgW, imgH };
         POINT ptDst = { x, y };
 
-        constexpr int kFadeSteps = 8;
-        constexpr int kFadeStepDelayMs = 12;
+        constexpr int kFadeSteps = 10;
 
-        for (int i = 0; i <= kFadeSteps; ++i)
+        if (fadeInMs <= 0)
         {
-            BYTE alpha = static_cast<BYTE>((255 * i) / kFadeSteps);
-            BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
             UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
             ShowWindow(hWnd, SW_SHOWNOACTIVATE);
-            Sleep(kFadeStepDelayMs);
+        }
+        else
+        {
+            int fadeInStepDelayMs = (fadeInMs > 0) ? (fadeInMs / kFadeSteps) : 12;
+            if (fadeInStepDelayMs < 1) fadeInStepDelayMs = 1;
+            for (int i = 0; i <= kFadeSteps; ++i)
+            {
+                BYTE alpha = static_cast<BYTE>((255 * i) / kFadeSteps);
+                BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+                UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
+                ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+                Sleep(fadeInStepDelayMs);
+            }
         }
 
         // Hold the splash for the requested duration, then close it.
@@ -1739,13 +1858,24 @@ namespace {
         else if (totalMs > 0)
             Sleep(totalMs);
 
-        for (int i = kFadeSteps; i >= 0; --i)
+        if (fadeOutMs <= 0)
         {
-            BYTE alpha = static_cast<BYTE>((255 * i) / kFadeSteps);
-            BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 0, AC_SRC_ALPHA };
             UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
             ShowWindow(hWnd, SW_SHOWNOACTIVATE);
-            Sleep(kFadeStepDelayMs);
+        }
+        else
+        {
+            int fadeOutStepDelayMs = (fadeOutMs > 0) ? (fadeOutMs / kFadeSteps) : 12;
+            if (fadeOutStepDelayMs < 1) fadeOutStepDelayMs = 1;
+            for (int i = kFadeSteps; i >= 0; --i)
+            {
+                BYTE alpha = static_cast<BYTE>((255 * i) / kFadeSteps);
+                BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+                UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
+                ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+                Sleep(fadeOutStepDelayMs);
+            }
         }
 
         DestroyWindow(hWnd);
@@ -1764,13 +1894,13 @@ namespace {
         return 0;
     }
 
-    static void ShowSplash(const wchar_t* filename, int totalMs = 4000, bool bottomRight = false, int holdMs = 0)
+    static void ShowSplash(const wchar_t* filename, int totalMs = 4000, bool bottomRight = false, int holdMs = 0, int fadeInMs = 96, int fadeOutMs = 96)
     {
         bool expected = false;
         if (!g_splashActive.compare_exchange_strong(expected, true))
             return;
 
-        auto* p = new SplashThreadParam{ GetModuleHandleW(nullptr), BuildSplashImagePath(filename), totalMs, bottomRight, holdMs };
+        auto* p = new SplashThreadParam{ GetModuleHandleW(nullptr), BuildSplashImagePath(filename), totalMs, bottomRight, holdMs, fadeInMs, fadeOutMs };
         HANDLE h = CreateThread(nullptr, 0, SplashThread, p, 0, nullptr);
         if (h) CloseHandle(h);
         else
@@ -1910,12 +2040,14 @@ namespace {
 
 void ShowAhlbornStartedSplash()
 {
-    ShowSplash(L"ahlborn_started.png");
+    // Total 2s: show immediately for 1s, then fade out during the second 1s.
+    ShowSplash(L"ahlborn_started.png", 0, false, 1000, 0, 1000);
 }
 
 void ShowAhlbornClosedSplash()
 {
-    ShowSplash(L"ahlborn_closed.png");
+    // Total 2s: show immediately for 1s, then fade out during the second 1s.
+    ShowSplash(L"ahlborn_closed.png", 0, false, 1000, 0, 1000);
 }
 
 void ShowHauptwerkRestartSplash(const wchar_t* deviceName)

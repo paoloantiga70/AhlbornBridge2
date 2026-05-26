@@ -27,24 +27,41 @@ if (FAILED(hr))
     return 0;
 }
 
-    // Single-instance guard: create a named mutex. If it already exists,
-    // another instance is running and we should exit.
-    const wchar_t* kInstanceMutexName = L"Local\\AhlbornBridge_InstanceMutex";
-    HANDLE hInstanceMutex = CreateMutexW(nullptr, FALSE, kInstanceMutexName);
-    if (hInstanceMutex == nullptr)
-    {
-        // Failed to create mutex, continue (best-effort).
-    }
-    else if (GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        // Another instance is running. Clean up and exit.
-        CloseHandle(hInstanceMutex);
-        return 0;
-    }
+	// Single-instance guard: create a named mutex. If it already exists,
+	// another instance is running and we should exit.
+	const wchar_t* kInstanceMutexName = L"Local\\AhlbornBridge_InstanceMutex";
+	HANDLE hInstanceMutex = CreateMutexW(nullptr, FALSE, kInstanceMutexName);
+	if (hInstanceMutex == nullptr)
+	{
+		// Failed to create mutex, continue (best-effort).
+	}
+	else if (GetLastError() == ERROR_ALREADY_EXISTS)
+	{
+		// Another instance is running. Clean up and exit.
+		CloseHandle(hInstanceMutex);
+		return 0;
+	}
 
-    CloseProcessByName(L"Hauptwerk.exe");
-   
-    // Allocate a console for a GUI application
+	// -----------------------------------------------------------------------
+	// Verify Hauptwerk is installed BEFORE doing anything else (no Settings
+	// writes, no console, no threads).  If not found, inform the user and
+	// abort immediately — they must install Hauptwerk first, then re-run setup.
+	// -----------------------------------------------------------------------
+	if (!InitHauptwerkPaths())
+	{
+		MessageBoxW(nullptr,
+			L"Hauptwerk Virtual Pipe Organ was not found on this system.\n\n"
+			L"Please install Hauptwerk first, then run AhlbornBridge Setup again.",
+			L"AhlbornBridge \u2014 Installation Cancelled",
+			MB_OK | MB_ICONERROR | MB_TOPMOST);
+		if (hInstanceMutex) CloseHandle(hInstanceMutex);
+		CoUninitialize();
+		return 0;
+	}
+
+	CloseProcessByName(L"Hauptwerk.exe");
+
+	// Allocate a console for a GUI application
 //#ifdef _DEBUG
 	if (CONSOLE_ALLOCATION) consoleAllocation();
 
@@ -61,22 +78,17 @@ if (FAILED(hr))
 		}
 	}
 //#endif
-	bool hauptwerkPathsOk = InitHauptwerkPaths(); // Detect / configure Hauptwerk folders
-	if (hauptwerkPathsOk)
-	{
-		StartOrganFolderWatcher(); // Monitor OrganDefinitions for installs/uninstalls
-		printf("[Startup] OrganFolderWatcher started.\n");
-	}
-	else
-	{
-		printf("[Startup] Hauptwerk paths not configured, OrganFolderWatcher not started.\n");
-	}
+
+	// Hauptwerk is present: start dependent subsystems.
+	StartOrganFolderWatcher(); // Monitor OrganDefinitions for installs/uninstalls
+	printf("[Startup] OrganFolderWatcher started.\n");
+
 	StartStreamDeckPipeServer(); // Named pipe IPC for Stream Deck plugin
 
 	// Load Active Sensing settings BEFORE initMidiState so that
 	// RefreshSettingsFile() inside it does not overwrite the saved value.
 	{
-		bool activeSensingEnabled = true;
+		bool activeSensingEnabled = false;
 		LoadActiveSensingEnabled(activeSensingEnabled);
 		g_activeSensingEnabled.store(activeSensingEnabled);
 	}
@@ -125,26 +137,6 @@ if (FAILED(hr))
 	if (!CreateTrayIcon(hInstance, hWnd))
 		return 0;
 
-	if (!hauptwerkPathsOk)
-	{
-		UpdateTrayIconTooltip(L"Hauptwerk not installed!");
-		PWSTR roaming = nullptr;
-		if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming)) && roaming)
-		{
-			std::wstring errIcon(roaming);
-			CoTaskMemFree(roaming);
-			errIcon += L"\\AhlbornBridge\\Icons\\A_Error.png";
-			UpdateTrayIconFromFile(errIcon.c_str());
-		}
-		g_trayIconImageStatus = TrayIconImageStatus::Error;
-
-		MessageBoxW(hWnd,
-			L"Hauptwerk Virtual Pipe Organ was not found on this system.\n"
-			L"Please verify it is installed correctly and restart AhlbornBridge.",
-			L"AhlbornBridge",
-			MB_OK | MB_ICONERROR);
-	}
-	else
 	{
 		// First launch: if no MIDI input device is configured yet, open
 		// Settings automatically so the user can pick the correct ports.

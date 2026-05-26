@@ -3,6 +3,7 @@
 #include "Xml.h"
 #include "Hauptwerk.h"
 #include "StreamDeck_profiler.h"
+#include <algorithm>
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -15,7 +16,7 @@
 #include <thread>
 #include <map>
 
-void SendUnloadOrganMidiMessage()
+void SendUnloadOrganMidiMessage(bool resetSwitches)
 {
     // BF 50 00 = CC ch16, CC#80, value 0
     DWORD msg50 = CC_ch16 | (BF_0x50 << 8) | (0x00 << 16);
@@ -29,7 +30,7 @@ void SendUnloadOrganMidiMessage()
         ok50 ? "enqueued" : "FAILED",
         ok51 ? "enqueued" : "FAILED");
 
-    NotifyStreamDeckOrganUnloaded();
+    NotifyStreamDeckOrganUnloaded(resetSwitches);
 }
 
 // ─── Named pipe server for Stream Deck plugin IPC ───────────────────────
@@ -86,7 +87,7 @@ static std::string BuildOrganListJson()
     wchar_t* appDataPath = nullptr;
     if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appDataPath) != S_OK)
         return "{\"type\":\"organs\",\"list\":[]}";
-    std::wstring settingsW = std::wstring(appDataPath) + L"\\AhlbornBridge\\Settings.xml";
+    std::wstring settingsW = std::wstring(appDataPath) + L"\\AhlbornBridge2\\Settings.xml";
     CoTaskMemFree(appDataPath);
 
     std::string settingsPath(settingsW.begin(), settingsW.end());
@@ -101,6 +102,37 @@ static std::string BuildOrganListJson()
             : organs[i].displayName;
         json += "{\"index\":" + std::to_string(i + 1) +
                 ",\"name\":\"" + EscapeJsonString(name) + "\"}";
+    }
+    json += "]}";
+    return json;
+}
+
+static int JsonExtractInt(const std::string& json, const std::string& key)
+{
+    std::string search = "\"" + key + "\":";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos)
+        return 0;
+    pos += search.size();
+    return atoi(json.c_str() + pos);
+}
+
+static std::string BuildSwitchesPayload()
+{
+    std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+    std::string json = "{\"type\":\"switches\",\"connected\":";
+    json += g_pipeConnected.load() ? "true" : "false";
+    json += ",\"switches\":[";
+    for (size_t i = 0; i < switches.size(); ++i)
+    {
+        if (i > 0) json += ",";
+        std::string name(switches[i].name.begin(), switches[i].name.end());
+        json += "{\"index\":" + std::to_string(i + 1) +
+                ",\"name\":\"" + EscapeJsonString(name) + "\"" +
+                ",\"channel\":" + std::to_string(switches[i].channel) +
+                ",\"cc\":" + std::to_string(switches[i].controlChange) +
+                ",\"valueOn\":" + std::to_string(switches[i].valueOn) +
+                ",\"valueOff\":" + std::to_string(switches[i].valueOff) + "}";
     }
     json += "]}";
     return json;
@@ -129,15 +161,64 @@ static bool IsVstLinkEngineForInstalledOrgan(int installedOrganIndex)
     return false;
 }
 
+static std::wstring ResolveCurrentLoadedOrganUniqueIdForPersistence()
+{
+    std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+    if (organs.empty())
+        return {};
+
+    int loadedInstalledIndex = g_currentLoadedInstalledOrganIndex.load();
+    if (loadedInstalledIndex > 0 && loadedInstalledIndex <= static_cast<int>(organs.size()))
+    {
+        const InstalledOrganInfo& info = organs[loadedInstalledIndex - 1];
+        if (!info.uniqueOrganId.empty())
+            return info.uniqueOrganId;
+        // Fallback: use the positional id attribute when UniqueOrganID is absent
+        if (!info.id.empty())
+            return info.id;
+    }
+
+    if (!g_hauptwerkOrganTitle.empty())
+    {
+        for (const auto& organ : organs)
+        {
+            if ((!organ.name.empty() && _wcsicmp(organ.name.c_str(), g_hauptwerkOrganTitle.c_str()) == 0) ||
+                (!organ.displayName.empty() && _wcsicmp(organ.displayName.c_str(), g_hauptwerkOrganTitle.c_str()) == 0))
+            {
+                if (!organ.uniqueOrganId.empty())
+                    return organ.uniqueOrganId;
+                if (!organ.id.empty())
+                    return organ.id;
+            }
+        }
+    }
+
+    return {};
+}
+
 static std::string BuildStateJson(int loadedIndex)
 {
-    bool vstLink = IsVstLinkEngineForInstalledOrgan(loadedIndex);
     bool consoleConnected = (deviceState.load() == DeviceState::Connected);
     bool hauptwerkRunning = IsProcessRunningByName(L"Hauptwerk.exe");
-    return "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(loadedIndex) +
+    bool loadingVisible = g_isLoadingOrgan.load();
+
+    int loadingIndex = g_streamDeckLoadingInstalledOrganIndex.load();
+    int loadingProgress = std::clamp(g_streamDeckLoadingProgress.load(), 0, 100);
+    bool biduleSplashActive = g_streamDeckBiduleSplashActive.load();
+    if (loadingVisible && loadingIndex <= 0)
+        loadingIndex = loadedIndex;
+
+    int effectiveLoadedIndex = loadingVisible ? 0 : loadedIndex;
+    bool vstLink = IsVstLinkEngineForInstalledOrgan(effectiveLoadedIndex);
+
+    return "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(effectiveLoadedIndex) +
            ",\"vstLink\":" + std::string(vstLink ? "true" : "false") +
            ",\"consoleConnected\":" + std::string(consoleConnected ? "true" : "false") +
-           ",\"hauptwerkRunning\":" + std::string(hauptwerkRunning ? "true" : "false") + "}";
+           ",\"hauptwerkRunning\":" + std::string(hauptwerkRunning ? "true" : "false") +
+           ",\"loadingIndex\":" + std::to_string(loadingIndex) +
+           ",\"loadingProgress\":" + std::to_string(loadingProgress) +
+           ",\"loadingVisible\":" + std::string(loadingVisible ? "true" : "false") +
+           ",\"biduleSplashActive\":" + std::string(biduleSplashActive ? "true" : "false") + "}";
 }
 
 static void HandlePipeMessage(const std::string& msg)
@@ -151,7 +232,11 @@ static void HandlePipeMessage(const std::string& msg)
     else if (msg.find("\"getState\"") != std::string::npos)
     {
         printf("[PipeServer] Client requested state\n");
-        PipeSend(BuildStateJson(g_currentLoadedInstalledOrganIndex.load()));
+        int loadedIdx = g_currentLoadedInstalledOrganIndex.load();
+        PipeSend(BuildStateJson(loadedIdx));
+        // Also push current switch states so the plugin can mirror them immediately
+        if (loadedIdx > 0)
+            NotifyStreamDeckSwitchesForOrgan(loadedIdx);
     }
     else if (msg.find("\"load\"") != std::string::npos)
     {
@@ -187,6 +272,67 @@ static void HandlePipeMessage(const std::string& msg)
         printf("[PipeServer] Toggle Bidule window requested\n");
         bool toggled = ToggleBiduleWindowVisibility();
         PipeSend(std::string("{\"type\":\"ack\",\"command\":\"toggleBiduleWindow\",\"ok\":") + (toggled ? "true" : "false") + "}");
+    }
+    else if (msg.find("\"toggleActiveSensing\"") != std::string::npos)
+    {
+        bool newState = !g_activeSensingEnabled.load();
+        g_activeSensingEnabled.store(newState);
+        SaveActiveSensingEnabled(newState);
+        NotifyStreamDeckActiveSensingState(newState);
+        PipeSend(std::string("{\"type\":\"ack\",\"command\":\"toggleActiveSensing\",\"enabled\":") +
+            (newState ? "true" : "false") + "}");
+    }
+    else if (msg.find("\"getActiveSensing\"") != std::string::npos)
+    {
+        PipeSend(std::string("{\"type\":\"activeSensingState\",\"enabled\":") +
+            (g_activeSensingEnabled.load() ? "true" : "false") + "}");
+    }
+    else if (msg.find("\"getSwitches\"") != std::string::npos)
+    {
+        printf("[PipeServer] Client requested switch list\n");
+        PipeSend(BuildSwitchesPayload());
+    }
+    else if (msg.find("\"switchCc\"") != std::string::npos)
+    {
+        int channel = JsonExtractInt(msg, "channel");
+        int cc = JsonExtractInt(msg, "cc");
+        int value = JsonExtractInt(msg, "value");
+        printf("[PipeServer] Switch CC requested: ch=%d cc=%d value=%d\n", channel, cc, value);
+        SendAhlbornSwitchControlChange(channel, cc, value);
+
+        std::wstring uniqueOrganId = ResolveCurrentLoadedOrganUniqueIdForPersistence();
+        printf("[PipeServer] switchCc persist: loadedIndex=%d uniqueOrganId=%S\n",
+            g_currentLoadedInstalledOrganIndex.load(),
+            uniqueOrganId.empty() ? L"(empty)" : uniqueOrganId.c_str());
+        if (!uniqueOrganId.empty())
+        {
+            std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+            bool matched = false;
+            for (size_t i = 0; i < switches.size(); ++i)
+            {
+                const AhlbornSwitchInfo& s = switches[i];
+                if (s.channel == channel && s.controlChange == cc &&
+                    (value == s.valueOn || value == s.valueOff))
+                {
+                    int switchIndex = static_cast<int>(i) + 1;
+                    bool isOn = (value == s.valueOn);
+                    printf("[PipeServer] switchCc matched switch #%d (valueOn=%d valueOff=%d) -> isOn=%d\n",
+                        switchIndex, s.valueOn, s.valueOff, (int)isOn);
+                    SaveOrganSwitchState(uniqueOrganId, switchIndex, isOn);
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched)
+                printf("[PipeServer] switchCc: no switch matched ch=%d cc=%d value=%d in %zu switches\n",
+                    channel, cc, value, switches.size());
+        }
+        else
+        {
+            printf("[PipeServer] switchCc: uniqueOrganId empty, state NOT saved\n");
+        }
+
+        PipeSend("{\"type\":\"ack\",\"command\":\"switchCc\",\"ok\":true}");
     }
     else
     {
@@ -368,7 +514,7 @@ static void UpdateStreamDeckProfileTitles()
     wchar_t* appDataPath = nullptr;
     if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appDataPath) != S_OK)
         return;
-    std::wstring settingsW = std::wstring(appDataPath) + L"\\AhlbornBridge\\Settings.xml";
+    std::wstring settingsW = std::wstring(appDataPath) + L"\\AhlbornBridge2\\Settings.xml";
     CoTaskMemFree(appDataPath);
 
     std::string settingsPath(settingsW.begin(), settingsW.end());
@@ -590,8 +736,133 @@ void NotifyStreamDeckOrganState(int loadedIndex)
         PipeSend(BuildStateJson(loadedIndex));
 }
 
-void NotifyStreamDeckOrganUnloaded()
+void NotifyStreamDeckOrganUnloaded(bool resetSwitches)
 {
+    if (!g_pipeConnected)
+        return;
+
+    if (resetSwitches)
+    {
+        // Reset all switch states to off in the plugin UI
+        std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+        for (int i = 0; i < static_cast<int>(switches.size()); ++i)
+        {
+            int switchIndex = i + 1;
+            PipeSend(std::string("{\"type\":\"switchState\",\"index\":") +
+                     std::to_string(switchIndex) + ",\"isOn\":false}");
+        }
+    }
+
+    PipeSend(BuildStateJson(0));
+}
+
+void NotifyStreamDeckSwitchState(int switchIndex, bool isOn)
+{
+    if (!g_pipeConnected || switchIndex <= 0)
+    {
+        printf("[NotifyStreamDeckSwitchState] SKIPPED index=%d pipeConnected=%d\n", switchIndex, (int)g_pipeConnected.load());
+        return;
+    }
+    std::string msg = std::string("{\"type\":\"switchState\",\"index\":") +
+             std::to_string(switchIndex) +
+             ",\"isOn\":" + (isOn ? "true" : "false") + "}";
+    printf("[NotifyStreamDeckSwitchState] Sending: %s\n", msg.c_str());
+    PipeSend(msg);
+}
+
+void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
+{
+    if (loadedIndex <= 0)
+        return;
+
+    std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+    if (loadedIndex > static_cast<int>(organs.size()))
+    {
+        printf("[NotifyStreamDeckSwitchesForOrgan] loadedIndex=%d exceeds organs.size()=%d, aborting\n",
+            loadedIndex, (int)organs.size());
+        return;
+    }
+
+    const InstalledOrganInfo& organInfo = organs[loadedIndex - 1];
+    std::wstring uniqueId = organInfo.uniqueOrganId;
+    if (uniqueId.empty())
+        uniqueId = organInfo.id;  // fallback: use positional id when UniqueOrganID is absent
+    if (uniqueId.empty())
+    {
+        printf("[NotifyStreamDeckSwitchesForOrgan] uniqueId empty for loadedIndex=%d, aborting\n", loadedIndex);
+        return;
+    }
+
+    printf("[NotifyStreamDeckSwitchesForOrgan] loadedIndex=%d id=%S uniqueOrganId=%S -> using uniqueId=%S\n",
+        loadedIndex, organInfo.id.c_str(), organInfo.uniqueOrganId.c_str(), uniqueId.c_str());
+
+    std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+    std::map<int, bool> states = LoadOrganSwitchStates(uniqueId);
+
+    printf("[NotifyStreamDeckSwitchesForOrgan] pipeConnected=%d stateCount=%d\n",
+        (int)g_pipeConnected.load(), (int)states.size());
+
+    // Send the state first so the plugin knows an organ is loaded before
+    // receiving switchState messages (which are ignored when loadedIndex == 0).
+    // Use a direct state message with the known loadedIndex instead of
+    // BuildStateJson() which returns loadedIndex=0 when g_isLoadingOrgan is still set.
     if (g_pipeConnected)
-        PipeSend(BuildStateJson(0));
+    {
+        bool consoleConnected = (deviceState.load() == DeviceState::Connected);
+        bool hauptwerkRunning = IsProcessRunningByName(L"Hauptwerk.exe");
+        bool vstLink = IsVstLinkEngineForInstalledOrgan(loadedIndex);
+        std::string stateMsg = "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(loadedIndex) +
+            ",\"vstLink\":" + std::string(vstLink ? "true" : "false") +
+            ",\"consoleConnected\":" + std::string(consoleConnected ? "true" : "false") +
+            ",\"hauptwerkRunning\":" + std::string(hauptwerkRunning ? "true" : "false") +
+            ",\"loadingIndex\":0,\"loadingProgress\":0,\"loadingVisible\":false,\"biduleSplashActive\":false}";
+        PipeSend(stateMsg);
+
+        // Reset all switches to OFF first so stale ON states from the previous
+        // organ are cleared before the new organ's saved states arrive.
+        for (int i = 1; i <= static_cast<int>(switches.size()); ++i)
+            NotifyStreamDeckSwitchState(i, false);
+    }
+
+    for (const auto& [switchIndex, isOn] : states)
+    {
+        // Update Stream Deck UI
+        printf("[NotifyStreamDeckSwitchesForOrgan] Sending switchState #%d isOn=%d pipeConnected=%d\n",
+            switchIndex, (int)isOn, (int)g_pipeConnected.load());
+        if (g_pipeConnected)
+            NotifyStreamDeckSwitchState(switchIndex, isOn);
+
+        // Send the actual CC to Hauptwerk to restore the physical stop state
+        if (switchIndex >= 1 && switchIndex <= static_cast<int>(switches.size()))
+        {
+            const AhlbornSwitchInfo& s = switches[switchIndex - 1];
+            int value = isOn ? s.valueOn : s.valueOff;
+            printf("[NotifyStreamDeckSwitchesForOrgan] Restoring switch #%d ch=%d cc=%d value=%d (isOn=%d)\n",
+                switchIndex, s.channel, s.controlChange, value, (int)isOn);
+            SendAhlbornSwitchControlChange(s.channel, s.controlChange, value);
+        }
+    }
+}
+
+void NotifyStreamDeckActiveSensingState(bool enabled)
+{
+    if (!g_pipeConnected)
+        return;
+    PipeSend(std::string("{\"type\":\"activeSensingState\",\"enabled\":") +
+        (enabled ? "true" : "false") + "}");
+}
+
+void SendAhlbornSwitchControlChange(int channel, int controlChange, int value)
+{
+    if (channel < 1 || channel > 16 || controlChange < 0 || controlChange > 127 || value < 0 || value > 127)
+    {
+        printf("[StreamDeck] Invalid switch CC request: ch=%d cc=%d value=%d\n", channel, controlChange, value);
+        return;
+    }
+
+    DWORD status = static_cast<DWORD>(0xB0 | ((channel - 1) & 0x0F));
+    DWORD midiMsg = status | (static_cast<DWORD>(controlChange) << 8) | (static_cast<DWORD>(value) << 16);
+    bool enqueued = EnqueueMidiOutMessage(midiMsg);
+    printf("[StreamDeck] Send switch CC ch=%d cc=%d value=%d: %s\n",
+        channel, controlChange, value, enqueued ? "enqueued OK" : "FAILED");
 }

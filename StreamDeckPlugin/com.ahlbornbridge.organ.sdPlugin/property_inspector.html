@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8"/>
-    <title>Load Organ</title>
+    <title>AhlbornBridge</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -46,10 +46,16 @@
     </style>
 </head>
 <body>
-    <div class="sdpi-item">
+    <div class="sdpi-item" id="organRow">
         <div class="sdpi-item-label">Organ</div>
         <select id="organSelect">
             <option value="0">-- Select organ --</option>
+        </select>
+    </div>
+    <div class="sdpi-item" id="switchRow" style="display:none;">
+        <div class="sdpi-item-label">Switch</div>
+        <select id="switchSelect">
+            <option value="0">-- Select switch --</option>
         </select>
     </div>
     <div class="info" id="status">Waiting for Stream Deck...</div>
@@ -59,30 +65,137 @@
         var piContext = '';
         var piAction = '';
         var currentSettings = {};
-        var selectEl = document.getElementById('organSelect');
+        var organSelectEl = document.getElementById('organSelect');
+        var switchSelectEl = document.getElementById('switchSelect');
+        var organRowEl = document.getElementById('organRow');
+        var switchRowEl = document.getElementById('switchRow');
         var statusEl = document.getElementById('status');
 
+        function isSwitchAction() {
+            return piAction === 'com.ahlbornbridge.switch';
+        }
+
+        function isActiveSensingAction() {
+            return piAction === 'com.ahlbornbridge.activesensing';
+        }
+
+        function refreshActionLayout() {
+            var switchMode = isSwitchAction();
+            var activeSensingMode = isActiveSensingAction();
+            organRowEl.style.display = (switchMode || activeSensingMode) ? 'none' : 'flex';
+            switchRowEl.style.display = switchMode ? 'flex' : 'none';
+        }
+
         function populateOrgans(organs, connected) {
-            selectEl.innerHTML = '<option value="0">-- Select organ --</option>';
+            organSelectEl.innerHTML = '<option value="0">-- Select organ --</option>';
             organs.forEach(function(o) {
                 var opt = document.createElement('option');
                 opt.value = o.index;
                 opt.textContent = o.index + ' - ' + o.name;
-                selectEl.appendChild(opt);
+                organSelectEl.appendChild(opt);
             });
             if (currentSettings.organIndex) {
-                selectEl.value = currentSettings.organIndex;
+                organSelectEl.value = currentSettings.organIndex;
             }
-            if (organs.length === 0 && !connected) {
-                statusEl.textContent = 'No organs available. AhlbornBridge not connected!';
-            } else {
-                statusEl.textContent = organs.length + ' organs available';
+            if (!isSwitchAction() && !isActiveSensingAction()) {
+                if (organs.length === 0 && !connected) {
+                    statusEl.textContent = 'No organs available. AhlbornBridge not connected!';
+                } else {
+                    statusEl.textContent = organs.length + ' organs available';
+                }
             }
+        }
+
+        function populateSwitches(switches, connected) {
+            switchSelectEl.innerHTML = '<option value="0">-- Select switch --</option>';
+            switches.forEach(function(s) {
+                var opt = document.createElement('option');
+                opt.value = s.index;
+                opt.textContent = s.index + ' - ' + s.name + ' (ch ' + s.channel + ', cc ' + s.cc + ')';
+                switchSelectEl.appendChild(opt);
+            });
+            if (currentSettings.switchIndex) {
+                switchSelectEl.value = currentSettings.switchIndex;
+            }
+            if (isSwitchAction()) {
+                if (switches.length === 0 && !connected) {
+                    statusEl.textContent = 'No switches available. AhlbornBridge not connected!';
+                } else {
+                    statusEl.textContent = switches.length + ' switches available';
+                }
+            }
+        }
+
+        function requestPayloadList() {
+            if (!ws || ws.readyState !== 1) return;
+            if (isActiveSensingAction()) {
+                statusEl.textContent = 'Console Power action: no configuration required';
+                return;
+            }
+            ws.send(JSON.stringify({
+                event: 'sendToPlugin',
+                context: piContext,
+                action: piAction,
+                payload: { piEvent: isSwitchAction() ? 'requestSwitches' : 'requestOrgans' }
+            }));
+        }
+
+        function saveOrganIndex(idx) {
+            currentSettings.organIndex = idx;
+            var url = 'http://127.0.0.1:28781/set?ctx=' + encodeURIComponent(piContext) + '&organ=' + idx;
+            fetch(url).then(function() {
+                statusEl.textContent = 'Saved organ #' + idx;
+            }).catch(function() {
+                new Image().src = url + '&t=' + Date.now();
+                statusEl.textContent = 'Saved organ #' + idx;
+            });
+            if (ws && ws.readyState === 1) {
+                ws.send(JSON.stringify({ event: 'setSettings', context: piContext, payload: { organIndex: idx } }));
+                ws.send(JSON.stringify({
+                    event: 'sendToPlugin',
+                    context: piContext,
+                    action: piAction,
+                    payload: { piEvent: 'setOrganIndex', organIndex: idx }
+                }));
+            }
+        }
+
+        function saveSwitchIndex(idx) {
+            currentSettings.switchIndex = idx;
+            var selectedName = '';
+            if (idx > 0 && switchSelectEl.selectedIndex >= 0) {
+                selectedName = switchSelectEl.options[switchSelectEl.selectedIndex].textContent || '';
+                var dash = selectedName.indexOf(' - ');
+                if (dash >= 0) {
+                    selectedName = selectedName.substring(dash + 3);
+                    var meta = selectedName.indexOf(' (ch ');
+                    if (meta >= 0) selectedName = selectedName.substring(0, meta);
+                }
+            }
+
+            var url = 'http://127.0.0.1:28781/set?ctx=' + encodeURIComponent(piContext) + '&switch=' + idx;
+            fetch(url).then(function() {
+                statusEl.textContent = idx > 0 ? ('Saved switch #' + idx) : 'Switch cleared';
+            }).catch(function() {
+                new Image().src = url + '&t=' + Date.now();
+                statusEl.textContent = idx > 0 ? ('Saved switch #' + idx) : 'Switch cleared';
+            });
+
+            if (ws && ws.readyState === 1) {
+                ws.send(JSON.stringify({
+                    event: 'sendToPlugin',
+                    context: piContext,
+                    action: piAction,
+                    payload: { piEvent: 'setSwitchIndex', switchIndex: idx, switchName: selectedName }
+                }));
+                ws.send(JSON.stringify({ event: 'setSettings', context: piContext, payload: { switchIndex: idx, switchName: selectedName, switchIsOn: false } }));
+            }
+            currentSettings.switchName = selectedName;
+            currentSettings.switchIsOn = false;
         }
 
         // SD calls this global function with connection parameters
         function connectElgatoStreamDeckSocket(inPort, inPluginUUID, inRegisterEvent, inInfo, inActionInfo) {
-            // Handle both string and object for inActionInfo
             var actionInfo = {};
             if (typeof inActionInfo === 'string') {
                 try { actionInfo = JSON.parse(inActionInfo); } catch(e) { }
@@ -93,23 +206,21 @@
             piContext = (actionInfo && actionInfo.context) || '';
             piAction = (actionInfo && actionInfo.action) || '';
             currentSettings = (actionInfo && actionInfo.payload && actionInfo.payload.settings) || {};
+            refreshActionLayout();
 
             if (currentSettings.organIndex) {
-                selectEl.value = currentSettings.organIndex;
+                organSelectEl.value = currentSettings.organIndex;
+            }
+            if (currentSettings.switchIndex) {
+                switchSelectEl.value = currentSettings.switchIndex;
             }
 
             ws = new WebSocket('ws://127.0.0.1:' + inPort);
 
             ws.onopen = function() {
                 ws.send(JSON.stringify({ event: inRegisterEvent, uuid: inPluginUUID }));
-                statusEl.textContent = 'Connected, requesting organs...';
-
-                ws.send(JSON.stringify({
-                    event: 'sendToPlugin',
-                    context: piContext,
-                    action: piAction,
-                    payload: { piEvent: 'requestOrgans' }
-                }));
+                statusEl.textContent = isSwitchAction() ? 'Connected, requesting switches...' : 'Connected, requesting organs...';
+                requestPayloadList();
             };
 
             ws.onmessage = function(evt) {
@@ -118,56 +229,32 @@
 
                 if (msg.event === 'sendToPropertyInspector') {
                     var pl = msg.payload || {};
-                    if (pl.organs) {
-                            populateOrgans(pl.organs, pl.connected);
-                        }
+                    if (pl.organs) populateOrgans(pl.organs, pl.connected);
+                    if (pl.switches) populateSwitches(pl.switches, pl.connected);
                 }
                 else if (msg.event === 'didReceiveSettings') {
                     var s = (msg.payload && msg.payload.settings) || {};
                     if (s.organIndex !== undefined) {
                         currentSettings.organIndex = s.organIndex;
-                        selectEl.value = s.organIndex;
+                        organSelectEl.value = s.organIndex;
+                    }
+                    if (s.switchIndex !== undefined) {
+                        currentSettings.switchIndex = s.switchIndex;
+                        switchSelectEl.value = s.switchIndex;
                     }
                 }
             };
 
-            ws.onclose = function() {
-                statusEl.textContent = 'Disconnected';
-            };
-
-            ws.onerror = function() {
-                statusEl.textContent = 'Connection error';
-            };
+            ws.onclose = function() { statusEl.textContent = 'Disconnected'; };
+            ws.onerror = function() { statusEl.textContent = 'Connection error'; };
         }
 
-        selectEl.addEventListener('change', function() {
-            var idx = parseInt(selectEl.value) || 0;
-            currentSettings.organIndex = idx;
+        organSelectEl.addEventListener('change', function() {
+            saveOrganIndex(parseInt(organSelectEl.value) || 0);
+        });
 
-            // Direct HTTP to plugin (bypasses broken SD relay)
-            var url = 'http://127.0.0.1:28781/set?ctx=' + encodeURIComponent(piContext) + '&organ=' + idx;
-            fetch(url).then(function() {
-                statusEl.textContent = 'Saved organ #' + idx;
-            }).catch(function(e) {
-                // Fallback: fire-and-forget via Image (no CORS restrictions)
-                new Image().src = url + '&t=' + Date.now();
-                statusEl.textContent = 'Saved organ #' + idx;
-            });
-
-            // Also try SD API paths (in case they start working in future)
-            if (ws && ws.readyState === 1) {
-                ws.send(JSON.stringify({
-                    event: 'setSettings',
-                    context: piContext,
-                    payload: { organIndex: idx }
-                }));
-                ws.send(JSON.stringify({
-                    event: 'sendToPlugin',
-                    context: piContext,
-                    action: piAction,
-                    payload: { piEvent: 'setOrganIndex', organIndex: idx }
-                }));
-            }
+        switchSelectEl.addEventListener('change', function() {
+            saveSwitchIndex(parseInt(switchSelectEl.value) || 0);
         });
     </script>
 </body>

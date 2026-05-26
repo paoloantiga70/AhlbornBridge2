@@ -117,6 +117,9 @@ extern std::atomic<bool> g_activeSensingEnabled;
 extern std::wstring g_activeSensingOutputName;
 extern std::atomic<int> g_currentLoadedFavoriteIndex;
 extern std::atomic<int> g_currentLoadedInstalledOrganIndex;
+extern std::atomic<int> g_streamDeckLoadingInstalledOrganIndex;
+extern std::atomic<int> g_streamDeckLoadingProgress;
+extern std::atomic<bool> g_streamDeckBiduleSplashActive;
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;

@@ -44,6 +44,23 @@ namespace
 	constexpr wchar_t kEndpointName[]    = L"AhlbornBridge Virtual Port";
 	constexpr wchar_t kEndpointUniqueId[] = L"ahlbornbridge-virtual";
 	constexpr wchar_t kSessionName[]     = L"AhlbornBridge";
+
+	bool IsMidi2EndpointOptInEnabled()
+	{
+		wchar_t value[16] = {};
+		DWORD len = GetEnvironmentVariableW(L"AHLBORN_ENABLE_MIDI2", value, _countof(value));
+		if (len == 0)
+		{
+			// Default behavior: enabled (first-install friendly).
+			// Set AHLBORN_ENABLE_MIDI2=0 to force-disable.
+			return true;
+		}
+
+		wchar_t c = value[0];
+		if (c == L'0' || c == L'N' || c == L'n' || c == L'F' || c == L'f')
+			return false;
+		return true;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +70,12 @@ bool EnableMidi2Endpoint()
 {
 	if (g_enabled.load())
 		return true;
+
+	if (!IsMidi2EndpointOptInEnabled())
+	{
+		printf("[Midi2] Disabled by opt-out (set AHLBORN_ENABLE_MIDI2=1 to re-enable).\n");
+		return false;
+	}
 
 	try
 	{
