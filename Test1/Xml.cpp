@@ -104,7 +104,36 @@ namespace
 <o><nam>Decima Quinta 4'</nam><h>1</h><c>70</c><d>69</d><e>5</e></o>
 <o><nam>Ripieno IV</nam><h>1</h><c>70</c><d>72</d><e>8</e></o>
 <o><nam>Controfagotto 16'</nam><h>1</h><c>70</c><d>74</d><e>10</e></o>
-<o><nam>Regale 4'</nam><h>1</h><c>70</c><d>76</d><e>12</e></o>)";
+<o><nam>Regale 4'</nam><h>1</h><c>70</c><d>76</d><e>12</e></o>
+<o><nam>Unione I-Ped</nam><h>1</h><c>70</c><d>77</d><e>13</e></o>
+<o><nam>Unione II-Ped</nam><h>1</h><c>70</c><d>78</d><e>14</e></o>
+<o><nam>Quintadena 16'</nam><h>2</h><c>70</c><d>66</d><e>2</e></o>
+<o><nam>Principale 8'</nam><h>2</h><c>70</c><d>67</d><e>3</e></o>
+<o><nam>Flauto a camino 8'</nam><h>2</h><c>70</c><d>64</d><e>0</e></o>
+<o><nam>Ottava 4'</nam><h>2</h><c>70</c><d>68</d><e>4</e></o>
+<o><nam>Flauto a cuspide 4'</nam><h>2</h><c>70</c><d>65</d><e>1</e></o>
+<o><nam>Decima quinta 2'</nam><h>2</h><c>70</c><d>69</d><e>5</e></o>
+<o><nam>Ripieno 4 File</nam><h>2</h><c>70</c><d>73</d><e>9</e></o>
+<o><nam>Voce umana 8'</nam><h>2</h><c>70</c><d>77</d><e>13</e></o>
+<o><nam>Tromba 8'</nam><h>2</h><c>70</c><d>75</d><e>11</e></o>
+<o><nam>Ripieno G.O.</nam><h>2</h><c>70</c><d>79</d><e>15</e></o>
+<o><nam>Unione II-I'</nam><h>2</h><c>70</c><d>80</d><e>16</e></o>
+<o><nam>Bordone 8'</nam><h>3</h><c>70</c><d>65</d><e>1</e></o>
+<o><nam>Viola da gamba 8'</nam><h>3</h><c>70</c><d>74</d><e>10</e></o>
+<o><nam>Principale 4'</nam><h>3</h><c>70</c><d>69</d><e>5</e></o>
+<o><nam>Flauto a camino 4'</nam><h>3</h><c>70</c><d>66</d><e>2</e></o>
+<o><nam>Nazardo 2 2/3'</nam><h>3</h><c>70</c><d>72</d><e>8</e></o>
+<o><nam>Flautino 2'</nam><h>3</h><c>70</c><d>68</d><e>4</e></o>
+<o><nam>Cimbalo 3 file</nam><h>3</h><c>70</c><d>76</d><e>12</e></o>
+<o><nam>Sesquialtera 2 file</nam><h>3</h><c>70</c><d>84</d><e>20</e></o>
+<o><nam>Cromorno 8'</nam><h>3</h><c>70</c><d>81</d><e>17</e></o>
+<o><nam>Ripieno Rec.</nam><h>3</h><c>70</c><d>83</d><e>19</e></o>
+<o><nam>Tremolo</nam><h>3</h><c>92</c><d>127</d><e>0</e></o>
+<o><nam>Ance</nam><h>16</h><c>71</c><d>67</d><e>3</e></o>
+<o><nam>Tutti</nam><h>16</h><c>71</c><d>66</d><e>2</e></o>
+<o><nam>Pedale Auto</nam><h>16</h><c>71</c><d>65</d><e>1</e></o>
+<o><nam>Fissatore</nam><h>16</h><c>71</c><d>70</d><e>6</e><m>1</m></o>
+<o><nam>Annullatore</nam><h>16</h><c>71</c><d>0</d><e>0</e></o>)";
 
     // Cached assigned MIDI device name lists (new dynamic multi-device model).
     std::vector<std::wstring> s_assignedInputNames;
@@ -1923,6 +1952,59 @@ bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
     printf("[WriteHauptwerkMidiConfig] PreviouslySeenDevice: %zu inputs, %zu outputs found.\n",
            seenInputs.size(), seenOutputs.size());
 
+    // --- Inject virtual ports into PreviouslySeenDevice if not already present ---
+    // Hauptwerk uses this list to decide if a device is "new" and needs a user prompt.
+    // If our virtual ports are missing, inject them so Hauptwerk silently accepts them.
+    {
+        // Generate a stable numeric ID from a device name using djb2 hash, clamped to 5 digits.
+        auto makeStableId = [](const std::wstring& name) -> std::wstring
+        {
+            unsigned long hash = 5381;
+            for (wchar_t c : name)
+                hash = ((hash << 5) + hash) + (unsigned long)c;
+            // Keep in range 10000-99999 for a plausible 5-digit Hauptwerk ID.
+            unsigned long id = 10000 + (hash % 90000);
+            return std::to_wstring(id);
+        };
+
+        // Virtual port names: (A) is input+output, (B) is input+output.
+        struct VirtualPort { std::wstring name; std::wstring typ; std::vector<SeenDevice>* list; };
+        std::vector<VirtualPort> toCheck = {
+            { L"AhlbornBridge Virtual Port",     L"2", &seenInputs  },
+            { L"AhlbornBridge Virtual Port",     L"3", &seenOutputs },
+            { L"AhlbornBridge Virtual Port (B)", L"2", &seenInputs  },
+            { L"AhlbornBridge Virtual Port (B)", L"3", &seenOutputs },
+        };
+
+        const std::wstring kPSD = L"<ObjectList ObjectType=\"PreviouslySeenDevice\">";
+        size_t psdPos = hwXml.find(kPSD);
+
+        for (auto& vp : toCheck)
+        {
+            bool found = false;
+            for (const auto& dev : *vp.list)
+                if (dev.name == vp.name) { found = true; break; }
+
+            if (!found)
+            {
+                std::wstring id = makeStableId(vp.name + vp.typ);
+                std::wstring newNode = L"\r\n<o><typ>" + vp.typ + L"</typ><id>" + id + L"</id><nam>" + vp.name + L"</nam></o>";
+                vp.list->push_back({ id, vp.name });
+
+                // Inject into the PreviouslySeenDevice section in the XML.
+                if (psdPos != std::wstring::npos)
+                {
+                    size_t insertAt = psdPos + kPSD.size();
+                    hwXml.insert(insertAt, newNode);
+                    // Recalculate psdPos since we modified the string.
+                    psdPos = hwXml.find(kPSD);
+                }
+                printf("[WriteHauptwerkMidiConfig] Injected virtual port into PreviouslySeenDevice: '%S' (typ=%S id=%S)\n",
+                       vp.name.c_str(), vp.typ.c_str(), id.c_str());
+            }
+        }
+    }
+
     auto extractSectionPortNames = [&](const std::wstring& objectType) -> std::vector<std::wstring>
     {
         std::vector<std::wstring> names;
@@ -3622,6 +3704,7 @@ std::vector<AhlbornSwitchInfo> LoadAhlbornSwitches()
         if (TryGetTagValue(item, L"<c>", L"</c>", val)) info.controlChange = static_cast<int>(val);
         if (TryGetTagValue(item, L"<d>", L"</d>", val)) info.valueOn = static_cast<int>(val);
         if (TryGetTagValue(item, L"<e>", L"</e>", val)) info.valueOff = static_cast<int>(val);
+        if (TryGetTagValue(item, L"<m>", L"</m>", val)) info.momentary = (val != 0);
         result.push_back(info);
         pos = end + 4;
     }

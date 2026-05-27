@@ -7,6 +7,8 @@
 // ---------------------------------------------------------------------------
 
 #include "Midi2Endpoint.h"
+#include <windows.h>
+#include <winsvc.h>
 
 // ---- C++/WinRT ----
 #define WINRT_LEAN_AND_MEAN
@@ -47,20 +49,65 @@ namespace
 
 	bool IsMidi2EndpointOptInEnabled()
 	{
+		// Allow explicit override via environment variable.
 		wchar_t value[16] = {};
 		DWORD len = GetEnvironmentVariableW(L"AHLBORN_ENABLE_MIDI2", value, _countof(value));
-		if (len == 0)
+		if (len > 0)
 		{
-			// Default behavior: enabled (first-install friendly).
-			// Set AHLBORN_ENABLE_MIDI2=0 to force-disable.
+			wchar_t c = value[0];
+			if (c == L'0' || c == L'N' || c == L'n' || c == L'F' || c == L'f')
+			{
+				printf("[Midi2] Virtual ports disabled by environment variable (AHLBORN_ENABLE_MIDI2=0).\n");
+				return false;
+			}
+			printf("[Midi2] Virtual ports enabled by environment variable (AHLBORN_ENABLE_MIDI2=1).\n");
 			return true;
 		}
 
-		wchar_t c = value[0];
-		if (c == L'0' || c == L'N' || c == L'n' || c == L'F' || c == L'f')
+		// Auto-detect: check if Windows MIDI Services is installed via SCM,
+		// without loading any WinRT/SDK code that could cause ABI mismatch crashes.
+		SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+		if (!hScm)
+		{
+			printf("[Midi2] Cannot open SCM — virtual ports disabled.\n");
 			return false;
-		return true;
+		}
+
+		bool serviceFound = false;
+		for (const wchar_t* svcName : { L"MidiSrv2", L"WindowsMidiService", L"midisrv" })
+		{
+			SC_HANDLE hSvc = OpenServiceW(hScm, svcName, SERVICE_QUERY_STATUS);
+			if (hSvc) { serviceFound = true; CloseServiceHandle(hSvc); break; }
+		}
+		CloseServiceHandle(hScm);
+
+		if (serviceFound)
+			printf("[Midi2] Windows MIDI Services detected — virtual ports will be created.\n");
+		else
+			printf("[Midi2] Windows MIDI Services not installed on this PC — virtual ports unavailable.\n"
+				   "[Midi2] Install Windows MIDI Services from https://aka.ms/midisrv to enable them.\n");
+
+		return serviceFound;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// IsMidi2ServiceInstalled (public)
+// ---------------------------------------------------------------------------
+bool IsMidi2ServiceInstalled()
+{
+	SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+	if (!hScm)
+		return false;
+
+	bool serviceFound = false;
+	for (const wchar_t* svcName : { L"MidiSrv2", L"WindowsMidiService", L"midisrv" })
+	{
+		SC_HANDLE hSvc = OpenServiceW(hScm, svcName, SERVICE_QUERY_STATUS);
+		if (hSvc) { serviceFound = true; CloseServiceHandle(hSvc); break; }
+	}
+	CloseServiceHandle(hScm);
+	return serviceFound;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +120,7 @@ bool EnableMidi2Endpoint()
 
 	if (!IsMidi2EndpointOptInEnabled())
 	{
-		printf("[Midi2] Disabled by opt-out (set AHLBORN_ENABLE_MIDI2=1 to re-enable).\n");
+		// IsMidi2EndpointOptInEnabled already printed the reason (service not found or env var=0).
 		return false;
 	}
 

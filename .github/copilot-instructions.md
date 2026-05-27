@@ -3,6 +3,7 @@
 ## General Guidelines
 - Do not run builds unless the user explicitly asks for one.
 - When updating runtime settings, use the user settings file at C:\Users\paolo\AppData\Roaming\AhlbornBridge2\Settings.xml instead of build output copies.
+- Respond in English.
 
 ## Project Guidelines
 - Use a Hauptwerk-style Win32 classic preferences UI with tabs for the Settings window instead of the current simple dialog.

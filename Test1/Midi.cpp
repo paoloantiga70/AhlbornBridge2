@@ -317,7 +317,8 @@ namespace
         LoadFavoriteOrgan30,
         LoadFavoriteOrgan31,
         LoadFavoriteOrgan32,
-        LoadInstalledOrgan      // payload: g_pendingInstalledOrganIndex (1-based)
+        LoadInstalledOrgan,     // payload: g_pendingInstalledOrganIndex (1-based)
+        ToggleBidule            // toggles Bidule visibility
     };
 
     constexpr unsigned int kDeferredCmdQueueCapacity = 64; // power of 2
@@ -536,10 +537,16 @@ namespace
 						{
 							printf("[Deferred] Installed organ index %d not found (list size=%zu).\n",
 								idx, names.size());
+							}
+							break;
 						}
-						break;
-					}
-				default:
+						case DeferredCmd::ToggleBidule:
+						{
+							printf("[Deferred] Executing ToggleBiduleWindowVisibility...\n");
+							ToggleBiduleWindowVisibility();
+							break;
+						}
+						default:
 				{
 					DWORD cmdVal = static_cast<DWORD>(cmd);
 					DWORD base   = static_cast<DWORD>(DeferredCmd::LoadFavoriteOrgan1);
@@ -752,10 +759,13 @@ namespace
         if (loadedInstalledOrganIndex <= 0)
             return;
 
-        if (!ShouldUseBiduleForInstalledOrgan(loadedInstalledOrganIndex))
+        // Save and close Bidule if it is actually running, regardless of whether
+        // the assigned audio device is "Hauptwerk VST Link". This covers the first
+        // load where Bidule is launched but no device has been assigned yet.
+        bool biduleRunning = IsProcessRunningByName(L"Bidule.exe") || IsProcessRunningByName(L"bidule.exe");
+        if (!biduleRunning)
             return;
 
-        printf("[Bidule] save-on-unload triggered.\n");
         bool closeOnUnload = true;
         if (!LoadBiduleCloseOnUnload(closeOnUnload))
             closeOnUnload = true;
@@ -763,6 +773,7 @@ namespace
         if (!closeOnUnload)
             return;
 
+        printf("[Bidule] save-on-unload triggered (organ index %d).\n", loadedInstalledOrganIndex);
         std::wstring savePath = BuildBiduleProfilePathForOrgan(loadedInstalledOrganIndex);
         if (savePath.empty())
         {
@@ -1908,6 +1919,11 @@ void EnqueueUnloadOrgan()
     g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan0);
 }
 
+void EnqueueToggleBidule()
+{
+    g_deferredCmdQueue.TryEnqueue(DeferredCmd::ToggleBidule);
+}
+
 // Close all dynamic inputs and reopen from the new name list.
 void SetAssignedMidiInputNames(const std::vector<std::wstring>& names)
 {
@@ -2779,13 +2795,16 @@ bool initMidiState()
             printf("[initMidiState] First launch detected - starting interactive MIDI detection.\n");
             fflush(stdout);
 
+            // Create MIDI2 virtual ports BEFORE opening devices so that
+            // the virtual ports are visible when SetAssignedMidiOutputNames runs.
+            EnableMidi2Endpoint();
+
             // DetectMidiInputInteractive persists the assignment and opens
             // the devices itself, so we can return early after it runs.
             DetectMidiInputInteractive();
             bool routerEnabled = false;
             if (LoadMidiRouterEnabled(routerEnabled))
                 g_midiRouterEnabled = routerEnabled;
-            EnableMidi2Endpoint();
             RefreshSettingsFile();
             return true;
         }
@@ -3509,6 +3528,19 @@ void CALLBACK MidiInProc(
 
 		// Sync Stream Deck switch buttons when matching CC arrives from MIDI input
 		{
+			// Stampa diagnostica immediata per qualsiasi CC 71 o 0x47 in ingresso
+			if (data1 == 71)
+			{
+				printf("[MIDI DIAGNOSTIC] CC 71 received - ch (0-based)=%d, data2 (value)=%d\n", ch, data2);
+			}
+
+			// Se viene ricevuto il CC del Fissatore (CC 71, valore ON 70 - accettiamo qualsiasi canale per sicurezza, oppure canale 16 (0x0F))
+			if (data1 == 71 && data2 == 70)
+			{
+				printf("[MidiInProc] Received Fissatore ON (CC71 v70) -> Enqueueing ToggleBidule\n");
+				g_deferredCmdQueue.TryEnqueue(DeferredCmd::ToggleBidule);
+			}
+
 			std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
 			for (size_t i = 0; i < switches.size(); ++i)
 			{

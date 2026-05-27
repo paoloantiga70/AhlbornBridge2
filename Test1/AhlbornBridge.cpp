@@ -6,6 +6,7 @@
 #include "Xml.h"
 #include "AutoUpdate.h"
 #include "StreamDeck_profiler.h"
+#include "Midi2Endpoint.h"
 #include <tlhelp32.h>
 #include <cwchar>
 #include <windows.h>
@@ -59,7 +60,23 @@ if (FAILED(hr))
 		return 0;
 	}
 
+	// Verify Windows MIDI Services is installed.
+	if (!IsMidi2ServiceInstalled())
+	{
+		MessageBoxW(nullptr,
+			L"Windows MIDI Services was not found on this system.\n\n"
+			L"AhlbornBridge requires Windows MIDI Services to create virtual MIDI ports.\n\n"
+			L"Please install it from:\nhttps://aka.ms/midisrv\n\nthen run AhlbornBridge Setup again.",
+			L"AhlbornBridge \u2014 Installation Cancelled",
+			MB_OK | MB_ICONERROR | MB_TOPMOST);
+		if (hInstanceMutex) CloseHandle(hInstanceMutex);
+		CoUninitialize();
+		return 0;
+	}
+
 	CloseProcessByName(L"Hauptwerk.exe");
+	CloseProcessByName(L"Bidule.exe");
+	CloseProcessByName(L"bidule.exe");
 
 	// Allocate a console for a GUI application
 //#ifdef _DEBUG
@@ -67,7 +84,7 @@ if (FAILED(hr))
 
 	// Apply saved console visibility setting.
 	{
-		bool showConsole = true;
+		bool showConsole = false;
 		if (LoadShowDebugConsole(showConsole))
 		{
 			HWND hConsoleWnd = GetConsoleWindow();
@@ -83,8 +100,6 @@ if (FAILED(hr))
 	StartOrganFolderWatcher(); // Monitor OrganDefinitions for installs/uninstalls
 	printf("[Startup] OrganFolderWatcher started.\n");
 
-	StartStreamDeckPipeServer(); // Named pipe IPC for Stream Deck plugin
-
 	// Load Active Sensing settings BEFORE initMidiState so that
 	// RefreshSettingsFile() inside it does not overwrite the saved value.
 	{
@@ -93,7 +108,7 @@ if (FAILED(hr))
 		g_activeSensingEnabled.store(activeSensingEnabled);
 	}
 
-	initMidiState(); // Initialize MIDI state
+	initMidiState(); // Initialize MIDI state (includes first-launch MIDI wizard if needed)
 	printf("[Startup] MIDI state initialized.\n");
 
 	// Apply and persist the Active Sensing output name (lock is ready after initMidiState).
@@ -101,12 +116,60 @@ if (FAILED(hr))
 		std::wstring activeSensingOutputName;
 		LoadActiveSensingOutputName(activeSensingOutputName);
 		if (activeSensingOutputName.empty())
-			activeSensingOutputName = L"Default App Loopback (A)";
+		{
+			// Try to find a suitable loopback output on this system.
+			// Prefer "Default App Loopback (A)", then any port containing "(A)" or "Loopback".
+			UINT numDevs = midiOutGetNumDevs();
+			std::wstring candidate;
+			for (UINT i = 0; i < numDevs; ++i)
+			{
+				MIDIOUTCAPS caps = {};
+				if (midiOutGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
+					continue;
+				std::wstring name = caps.szPname;
+				if (name == L"Default App Loopback (A)")
+				{
+					candidate = name;
+					break;
+				}
+				if (candidate.empty() &&
+					(name.find(L"(A)") != std::wstring::npos ||
+					 name.find(L"Loopback") != std::wstring::npos ||
+					 name.find(L"loopback") != std::wstring::npos))
+				{
+					candidate = name;
+				}
+			}
+			if (!candidate.empty())
+				activeSensingOutputName = candidate;
+			else
+				activeSensingOutputName = L"Default App Loopback (A)"; // keep as placeholder
+		}
+		SetActiveSensingOutputName(activeSensingOutputName);
 		SaveActiveSensingOutputName(activeSensingOutputName);
 	}
 
 	// Auto-detect and persist Bidule path at startup (instead of waiting for Settings UI).
 	DetectBiduleExePath();
+
+	// Start Stream Deck pipe server AFTER MIDI init and first-launch wizard are complete,
+	// and only if Stream Deck is actually installed on this system.
+	{
+		wchar_t sdPluginPath[MAX_PATH] = {};
+		if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, sdPluginPath)))
+		{
+			std::wstring sdPath = std::wstring(sdPluginPath) + L"\\Elgato\\StreamDeck";
+			DWORD attr = GetFileAttributesW(sdPath.c_str());
+			if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+			{
+				StartStreamDeckPipeServer();
+			}
+			else
+			{
+				printf("[Startup] Stream Deck not detected — pipe server not started.\n");
+			}
+		}
+	}
 
 	startsWithFe();  // Start the MIDI processing thread
 	printf("[Startup] MIDI processing thread started.\n");
@@ -203,6 +266,8 @@ void consoleAllocation()
 {
     if (AllocConsole())
     {
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         FILE* fp;
         freopen_s(&fp, "CONIN$", "r", stdin);
         freopen_s(&fp, "CONOUT$", "w", stdout);

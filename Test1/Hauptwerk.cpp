@@ -673,7 +673,7 @@ bool LaunchHauptwerkAndDismissWelcome()
             {
                 std::wstring errIcon(roaming);
                 CoTaskMemFree(roaming);
-                errIcon += L"\\AhlbornBridge\\Icons\\A_Error.png";
+                errIcon += L"\\AhlbornBridge2\\Icons\\A_Error.png";
                 UpdateTrayIconFromFile(errIcon.c_str());
             }
         }

@@ -29,6 +29,7 @@ struct AhlbornSwitchInfo
     int controlChange = 0;
     int valueOn = 127;
     int valueOff = 0;
+    bool momentary = false;
 };
 
 // ---------- Dynamic multi-device assignment (new API) ----------

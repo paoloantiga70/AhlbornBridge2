@@ -113,6 +113,7 @@ struct SwitchEntry
     int cc = 0;
     int valueOn = 127;
     int valueOff = 0;
+    bool momentary = false;
 };
 static std::mutex g_organsMutex;
 static std::vector<OrganEntry> g_organs;
@@ -496,17 +497,29 @@ static std::string BuildSwitchButtonSvg(const std::string& title, bool isOn, int
     const bool isEmpty = (title == "Empty");
     const bool isOffline = (title == "Disconnected.");
 
-    std::string outerBorder = isOffline ? "#ff4d4f" : isOn ? "#d4b86a" : "#8b949e";
-    std::string bodyFill = isOffline ? "#351012" : isOn ? "#f2e8c9" : "#2f343a";
-    std::string bodyInset = isOffline ? "#4f1012" : isOn ? "#e6d8a8" : "#3a4048";
-    std::string badgeFill = isOffline ? "#4f1012" : isOn ? "#5a4720" : "#20262d";
-    std::string badgeStroke = isOffline ? "#ff4d4f" : isOn ? "#d4b86a" : "#8b949e";
-    std::string badgeText = isOffline ? "OFFLINE" : (midiChannel == 1 ? "PEDALE" : midiChannel == 2 ? "MANUALE I" : midiChannel == 3 ? "MANUALE II" : "SWITCH");
-    std::string badgeTextColor = isOffline ? "#ffd6d6" : isOn ? "#ffe08a" : "#c9d1d9";
-    std::string titleColor = isOffline ? "#ffd6d6" : isOn ? "#2b2412" : "#f0f6fc";
-    std::string titleShadow = isOn ? "#c9bb90" : "#111111";
-    std::string ledFill = isOffline ? "#ff4d4f" : isOn ? "#ffd33d" : "#5a6169";
-    std::string ledStroke = isOffline ? "#ffd6d6" : isOn ? "#fff1b8" : "#c9d1d9";
+    // Per-channel accent colours
+    // ch1=PEDALE: blue  ch2=G.O.: gold  ch3=RECIT.: green  other: grey
+    struct ChAccent { const char* hi; const char* lo; const char* bodyOn; const char* bodyOff; const char* insetOn; const char* insetOff; const char* badgeOn; const char* textOn; const char* shadowOn; };
+    ChAccent accent;
+    if      (midiChannel == 1) accent = { "#4a9eff", "#1a4a8a", "#c8e0ff", "#2f343a", "#a8ccf5", "#3a4048", "#1a3a6a", "#ddeeff", "#90b8e0" }; // blue
+    else if (midiChannel == 2) accent = { "#d4b86a", "#5a4720", "#f2e8c9", "#2f343a", "#e6d8a8", "#3a4048", "#5a4720", "#ffe08a", "#c9bb90" }; // gold (original)
+    else if (midiChannel == 3) accent = { "#39d353", "#123c1f", "#d4f5da", "#2f343a", "#b8ecbf", "#3a4048", "#0f3d18", "#c8f5d0", "#80cc90" }; // green
+    else                       accent = { "#8b949e", "#2a2f36", "#e0e4e8", "#2f343a", "#c8cdd2", "#3a4048", "#20262d", "#c9d1d9", "#606870" }; // grey
+
+    std::string accentHi  = isOffline ? "#ff4d4f" : accent.hi;
+    std::string accentLo  = isOffline ? "#4f1012" : accent.lo;
+
+    std::string outerBorder    = isOffline ? "#ff4d4f" : accentHi;
+    std::string bodyFill       = isOffline ? "#351012" : isOn ? accent.bodyOn  : accent.bodyOff;
+    std::string bodyInset      = isOffline ? "#4f1012" : isOn ? accent.insetOn : accent.insetOff;
+    std::string badgeFill      = isOffline ? "#4f1012" : isOn ? accent.badgeOn : "#20262d";
+    std::string badgeStroke    = isOffline ? "#ff4d4f" : accentHi;
+    std::string badgeText      = isOffline ? "OFFLINE" : (midiChannel == 1 ? "PEDALE" : midiChannel == 2 ? "G.O." : midiChannel == 3 ? "RECIT." : "SWITCH");
+    std::string badgeTextColor = isOffline ? "#ffd6d6" : isOn ? accent.textOn : "#c9d1d9";
+    std::string titleColor     = isOffline ? "#ffd6d6" : isOn ? accent.bodyOff : "#f0f6fc";
+    std::string titleShadow    = isOn ? accent.shadowOn : "#111111";
+    std::string ledFill        = isOffline ? "#ff4d4f" : isOn ? accentHi : "#5a6169";
+    std::string ledStroke      = isOffline ? "#ffd6d6" : isOn ? accent.textOn : "#c9d1d9";
 
     std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg'>";
     svg += "<rect width='144' height='144' rx='14' fill='#0f1115'/>";
@@ -522,7 +535,7 @@ static std::string BuildSwitchButtonSvg(const std::string& title, bool isOn, int
         int fontSize = (int)lines.size() >= 4 ? 15 : (int)lines.size() == 3 ? 17 : 19;
         int lineHeight = fontSize + 4;
         int totalHeight = (int)lines.size() * lineHeight;
-        int startY = 79 - (totalHeight / 2) + fontSize;
+        int startY = 58 - (totalHeight / 2) + fontSize;
         for (int i = 0; i < (int)lines.size(); ++i)
         {
             int y = startY + i * lineHeight;
@@ -531,9 +544,9 @@ static std::string BuildSwitchButtonSvg(const std::string& title, bool isOn, int
         }
     }
 
-    svg += "<rect x='26' y='103' width='92' height='16' rx='8' fill='#11161c' stroke='" + outerBorder + "' stroke-width='1'/>";
-    svg += "<circle cx='42' cy='111' r='6' fill='" + ledFill + "' stroke='" + ledStroke + "' stroke-width='1.8'/>";
-    svg += "<text x='78' y='116' font-family='Arial' font-size='12' fill='" + badgeTextColor + "' text-anchor='middle' font-weight='bold'>" + std::string(isOn ? "ON" : isOffline ? "OFF" : "OFF") + "</text>";
+    svg += "<rect x='26' y='116' width='92' height='16' rx='8' fill='#11161c' stroke='" + outerBorder + "' stroke-width='1'/>";
+    svg += "<circle cx='42' cy='124' r='6' fill='" + ledFill + "' stroke='" + ledStroke + "' stroke-width='1.8'/>";
+    svg += "<text x='78' y='129' font-family='Arial' font-size='12' fill='" + badgeTextColor + "' text-anchor='middle' font-weight='bold'>" + std::string(isOn ? "ON" : isOffline ? "OFF" : "OFF") + "</text>";
     svg += "</svg>";
     return svg;
 }
@@ -1204,6 +1217,7 @@ static void ParseSwitchList(const std::string& json)
         e.cc = JsonExtractInt(obj, "cc");
         e.valueOn = JsonExtractInt(obj, "valueOn");
         e.valueOff = JsonExtractInt(obj, "valueOff");
+        e.momentary = (JsonExtractInt(obj, "momentary") != 0);
         if (e.index > 0)
             switches.push_back(e);
 
@@ -1239,6 +1253,54 @@ static void ParseSwitchList(const std::string& json)
     std::string payload = BuildSwitchesPayload();
     for (const auto& target : targets)
         SdSendToPropertyInspector(target.first, target.second, payload);
+
+    // Persiste il flag momentary nelle settings di ogni pulsante switch visibile
+    {
+        std::lock_guard<std::mutex> lk(g_buttonsMutex);
+        for (const auto& [ctx, info] : g_visibleButtons)
+        {
+            if (info.action != "com.ahlbornbridge.switch") continue;
+            int idx = 0;
+            {
+                // recupera switchIndex dalle settings correnti tramite g_switches
+                std::lock_guard<std::mutex> sk(g_switchesMutex);
+                for (const auto& s : g_switches)
+                {
+                    // cerca per nome nel buttonInfo non disponibile qui;
+                    // usiamo un secondo loop separato sotto
+                    (void)s;
+                }
+            }
+        }
+    }
+    // Aggiorna settings momentary per tutti i pulsanti switch visibili
+    {
+        std::vector<std::pair<std::string,int>> ctxSwitchIndex;
+        {
+            std::lock_guard<std::mutex> lk(g_buttonsMutex);
+            for (const auto& [ctx, info] : g_visibleButtons)
+            {
+                if (info.action == "com.ahlbornbridge.switch" && info.switchIndex > 0)
+                    ctxSwitchIndex.push_back({ctx, info.switchIndex});
+            }
+        }
+        std::lock_guard<std::mutex> sk(g_switchesMutex);
+        for (const auto& [ctx, sidx] : ctxSwitchIndex)
+        {
+            for (const auto& s : g_switches)
+            {
+                if (s.index == sidx)
+                {
+                    std::string sj = "{\"switchIndex\":" + std::to_string(s.index)
+                        + ",\"switchName\":\"" + EscapeJson(s.name) + "\""
+                        + ",\"switchIsOn\":false"
+                        + ",\"momentary\":" + (s.momentary ? "true" : "false") + "}";
+                    SdSetSettings(ctx, sj);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 static void HandlePipeMessage(const std::string& msg)
@@ -1802,18 +1864,6 @@ static void HandleSdEvent(const std::string& json)
 
         if (action == "com.ahlbornbridge.switch")
         {
-            int loadedNow = 0;
-            {
-                std::lock_guard<std::mutex> sl(g_stateMutex);
-                loadedNow = g_loadedOrganIndex;
-            }
-            if (loadedNow <= 0)
-            {
-                Log("[SD] keyDown: switch ignored because no organ is loaded");
-                UpdateButtonForContext(context, organIndex);
-                return;
-            }
-
             SwitchEntry selected{};
             bool found = false;
             int switchIndex = JsonExtractInt(settings, "switchIndex");
@@ -1829,8 +1879,50 @@ static void HandleSdEvent(const std::string& json)
                     }
                 }
             }
+            bool momentaryFromSettings = (JsonExtractInt(settings, "momentary") != 0) ||
+                                           (JsonExtractString(settings, "momentary") == "true");
+            Log("[SD] keyDown switch: switchIndex=%d found=%d momentary=%d momentarySettings=%d loadedNow=%d", switchIndex, (int)found, found ? (int)selected.momentary : -1, (int)momentaryFromSettings, loaded);
+            bool isMomentary = (found && selected.momentary) || momentaryFromSettings;
+            if (isMomentary)
+            {
+                // Momentary: keyDown invia ON, keyUp invia OFF (nessun controllo organo caricato)
+                {
+                    std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                    auto it = g_visibleButtons.find(context);
+                    if (it != g_visibleButtons.end())
+                    {
+                        it->second.switchIsOn = true;
+                        if (it->second.organName.empty())
+                            it->second.organName = selected.name;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> sk(g_switchStateMutex);
+                    g_currentSwitchStateByIndex[selected.index] = true;
+                }
+                if (found)
+                {
+                    PipeSend("{\"type\":\"switchCc\",\"channel\":" + std::to_string(selected.channel) +
+                             ",\"cc\":" + std::to_string(selected.cc) + ",\"value\":" + std::to_string(selected.valueOn) + "}");
+                }
+                UpdateButtonForContext(context, organIndex);
+                return;
+            }
+
+            int loadedNow = 0;
+            {
+                std::lock_guard<std::mutex> sl(g_stateMutex);
+                loadedNow = g_loadedOrganIndex;
+            }
+            if (loadedNow <= 0)
+            {
+                Log("[SD] keyDown: switch ignored because no organ is loaded");
+                UpdateButtonForContext(context, organIndex);
+                return;
+            }
             if (found)
             {
+                // Toggle: ogni pressione inverte lo stato
                 bool currentOn = false;
                 {
                     std::lock_guard<std::mutex> sk(g_switchStateMutex);
@@ -1853,7 +1945,6 @@ static void HandleSdEvent(const std::string& json)
                     std::lock_guard<std::mutex> sk(g_switchStateMutex);
                     g_currentSwitchStateByIndex[selected.index] = nextOn;
                 }
-
                 int value = nextOn ? selected.valueOn : selected.valueOff;
                 PipeSend("{\"type\":\"switchCc\",\"channel\":" + std::to_string(selected.channel) +
                          ",\"cc\":" + std::to_string(selected.cc) + ",\"value\":" + std::to_string(value) + "}");
@@ -1976,6 +2067,50 @@ static void HandleSdEvent(const std::string& json)
         std::string payload = JsonExtractObject(json, "payload");
         std::string settings = JsonExtractObject(payload, "settings");
         int organIndex = JsonExtractInt(settings, "organIndex");
+
+        // Gestione momentary per switch
+        if (action == "com.ahlbornbridge.switch")
+        {
+            int switchIndex = JsonExtractInt(settings, "switchIndex");
+            SwitchEntry selected{};
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> sk(g_switchesMutex);
+                for (const auto& s : g_switches)
+                {
+                    if (s.index == switchIndex)
+                    {
+                        selected = s;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            bool momentaryFromSettings = (JsonExtractInt(settings, "momentary") != 0) ||
+                                           (JsonExtractString(settings, "momentary") == "true");
+            Log("[SD] keyUp switch: switchIndex=%d found=%d momentary=%d momentarySettings=%d", switchIndex, (int)found, found ? (int)selected.momentary : -1, (int)momentaryFromSettings);
+            bool isMomentary = (found && selected.momentary) || momentaryFromSettings;
+            if (isMomentary)
+            {
+                {
+                    std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                    auto it = g_visibleButtons.find(context);
+                    if (it != g_visibleButtons.end())
+                        it->second.switchIsOn = false;
+                }
+                {
+                    std::lock_guard<std::mutex> sk(g_switchStateMutex);
+                    g_currentSwitchStateByIndex[selected.index] = false;
+                }
+                if (found)
+                {
+                    PipeSend("{\"type\":\"switchCc\",\"channel\":" + std::to_string(selected.channel) +
+                             ",\"cc\":" + std::to_string(selected.cc) + ",\"value\":" + std::to_string(selected.valueOff) + "}");
+                }
+                UpdateButtonForContext(context, organIndex);
+            }
+            return;
+        }
 
         KeyHoldInfo hold;
         bool hasHold = false;
@@ -2124,21 +2259,24 @@ static void HandleSdEvent(const std::string& json)
         {
             int switchIndex = JsonExtractInt(payload, "switchIndex");
             std::string switchName = JsonExtractString(payload, "switchName");
-            if (switchName.empty())
+            bool isMomentary = false;
             {
                 std::lock_guard<std::mutex> sk(g_switchesMutex);
                 for (const auto& s : g_switches)
                 {
                     if (s.index == switchIndex)
                     {
-                        switchName = s.name;
+                        if (switchName.empty())
+                            switchName = s.name;
+                        isMomentary = s.momentary;
                         break;
                     }
                 }
             }
             std::string settingsJson = "{\"switchIndex\":" + std::to_string(switchIndex)
                 + ",\"switchName\":\"" + EscapeJson(switchName) + "\""
-                + ",\"switchIsOn\":false}";
+                + ",\"switchIsOn\":false"
+                + ",\"momentary\":" + (isMomentary ? "true" : "false") + "}";
             SdSetSettings(context, settingsJson);
             {
                 std::lock_guard<std::mutex> lk(g_buttonsMutex);

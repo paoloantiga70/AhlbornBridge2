@@ -1477,7 +1477,7 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 					wchar_t appdata[MAX_PATH] = {};
 					if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata)))
 					{
-						std::wstring errIcon = std::wstring(appdata) + L"\\AhlbornBridge\\Icons\\A_Error.png";
+						std::wstring errIcon = std::wstring(appdata) + L"\\AhlbornBridge2\\Icons\\A_Error.png";
 						UpdateTrayIconFromFile(errIcon.c_str());
 					}
 					UpdateTrayIconTooltip(L"Hauptwerk launch failed");
@@ -1534,7 +1534,7 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		}
 		case ID_TRAY_BIDULE_OSC_TEST:
 		{
-			std::wstring testPath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\OSC_Test.bidule";
+			std::wstring testPath = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge2\\BiduleProfiles\\OSC_Test.bidule";
 			if (SendBiduleOscOpenProfile(testPath))
 				MessageBoxW(hWnd, L"OSC test sent: /open OSC_Test.bidule", L"Bidule OSC", MB_OK | MB_ICONINFORMATION);
 			else

@@ -19,6 +19,10 @@
 #include <windows.h>
 #include <cstdint>
 
+// Returns true if Windows MIDI Services (midisrv) is installed on this system.
+// Use this for prerequisite checks before attempting to create virtual ports.
+bool IsMidi2ServiceInstalled();
+
 // Returns true if the virtual MIDI 2.0 endpoint was successfully created.
 bool EnableMidi2Endpoint();
 

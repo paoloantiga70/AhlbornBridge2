@@ -132,7 +132,8 @@ static std::string BuildSwitchesPayload()
                 ",\"channel\":" + std::to_string(switches[i].channel) +
                 ",\"cc\":" + std::to_string(switches[i].controlChange) +
                 ",\"valueOn\":" + std::to_string(switches[i].valueOn) +
-                ",\"valueOff\":" + std::to_string(switches[i].valueOff) + "}";
+                ",\"valueOff\":" + std::to_string(switches[i].valueOff) +
+                ",\"momentary\":" + (switches[i].momentary ? "1" : "0") + "}";
     }
     json += "]}";
     return json;
@@ -299,6 +300,13 @@ static void HandlePipeMessage(const std::string& msg)
         int value = JsonExtractInt(msg, "value");
         printf("[PipeServer] Switch CC requested: ch=%d cc=%d value=%d\n", channel, cc, value);
         SendAhlbornSwitchControlChange(channel, cc, value);
+
+        // Fissatore press (CC 71, value 70 = ON) toggles Bidule window visibility
+        if (cc == AHLBORN_FISSATORE_CC && value == AHLBORN_FISSATORE_DN)
+        {
+            printf("[PipeServer] Fissatore press from Stream Deck -> EnqueueToggleBidule\n");
+            EnqueueToggleBidule();
+        }
 
         std::wstring uniqueOrganId = ResolveCurrentLoadedOrganUniqueIdForPersistence();
         printf("[PipeServer] switchCc persist: loadedIndex=%d uniqueOrganId=%S\n",

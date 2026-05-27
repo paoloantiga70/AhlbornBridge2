@@ -85,6 +85,8 @@ void StopTrayIconFlashing();
 void EnqueueLoadInstalledOrgan(int index);
 // Enqueue a deferred command to unload the current organ.
 void EnqueueUnloadOrgan();
+// Enqueue a deferred command to toggle Bidule window visibility.
+void EnqueueToggleBidule();
 enum class FeStatus
 {
     None,
