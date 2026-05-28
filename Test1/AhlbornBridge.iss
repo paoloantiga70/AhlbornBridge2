@@ -24,8 +24,8 @@ Source: "*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubd
 ; Installa la cartella Icons nella posizione Roaming dell'utente corrente usata dal runtime e dal collegamento
 Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge2\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; File di configurazione da includere esplicitamente (anche in Roaming come Icons)
-Source: "Settings.xml"; DestDir: "{userappdata}\AhlbornBridge2"; Flags: ignoreversion
+; File di configurazione: copiato solo alla prima installazione, preservato negli aggiornamenti
+Source: "Settings.xml"; DestDir: "{userappdata}\AhlbornBridge2"; Flags: onlyifdoesntexist
 
 ; Se preferisci specificare file singoli, sostituisci il pattern * con percorsi espliciti
 ; Source: "Release\AhlbornBridge.exe"; DestDir: "{app}"; Flags: ignoreversion

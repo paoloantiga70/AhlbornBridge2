@@ -25,12 +25,15 @@
 
 #include <atomic>
 #include <cstdio>
+#include <windows.h>
 
 // ---------------------------------------------------------------------------
 // Namespace aliases
 // ---------------------------------------------------------------------------
 namespace midi2    = winrt::Microsoft::Windows::Devices::Midi2;
 namespace loopback = winrt::Microsoft::Windows::Devices::Midi2::Endpoints::Loopback;
+
+static std::atomic<DWORD> g_lastForwardedTick{ 0 };
 
 // ---------------------------------------------------------------------------
 // Module-private state
@@ -251,11 +254,17 @@ void ForwardToMidi2Endpoint(DWORD wmidiMsg)
 
 		// timestamp 0 = send immediately
 		g_conn.SendSingleMessageWords(static_cast<uint64_t>(0), ump);
+		g_lastForwardedTick.store(GetTickCount(), std::memory_order_relaxed);
 	}
 	catch (...)
 	{
 		// Swallow silently — must not disrupt the MIDI callback chain
 	}
+}
+
+DWORD GetMidi2EndpointLastMsgTime()
+{
+	return g_lastForwardedTick.load(std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------

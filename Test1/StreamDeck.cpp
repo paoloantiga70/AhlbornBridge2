@@ -301,18 +301,37 @@ static void HandlePipeMessage(const std::string& msg)
         printf("[PipeServer] Switch CC requested: ch=%d cc=%d value=%d\n", channel, cc, value);
         SendAhlbornSwitchControlChange(channel, cc, value);
 
-        // Fissatore press (CC 71, value 70 = ON) toggles Bidule window visibility
+        // Fissatore press (CC 71, value 70 = ON) toggles Bidule window visibility OR sends ENTER if auto-detecting
         if (cc == AHLBORN_FISSATORE_CC && value == AHLBORN_FISSATORE_DN)
         {
-            printf("[PipeServer] Fissatore press from Stream Deck -> EnqueueToggleBidule\n");
-            EnqueueToggleBidule();
+            if (g_autoDetectMidiSettingsActive.load())
+            {
+                HWND hAutoDetectDlg = FindWindowW(nullptr, L"Auto-detecting MIDI settings");
+                if (hAutoDetectDlg && IsWindow(hAutoDetectDlg))
+                {
+                    printf(">>> [PipeServer FISSATORE] Auto-detecting ACTIVE! Simulating ENTER key on 'Auto-detecting MIDI settings' (HWND=%p) <<<\n", (void*)hAutoDetectDlg);
+                    PostMessageW(hAutoDetectDlg, WM_KEYDOWN, VK_RETURN, 0);
+                    PostMessageW(hAutoDetectDlg, WM_KEYUP, VK_RETURN, 0);
+                }
+                else
+                {
+                    printf("[PipeServer] Fissatore press from Stream Deck -> EnqueueToggleBidule (Auto-detecting flag was true, but window was missing)\n");
+                    EnqueueToggleBidule();
+                }
+            }
+            else
+            {
+                printf("[PipeServer] Fissatore press from Stream Deck -> EnqueueToggleBidule\n");
+                EnqueueToggleBidule();
+            }
         }
 
         std::wstring uniqueOrganId = ResolveCurrentLoadedOrganUniqueIdForPersistence();
         printf("[PipeServer] switchCc persist: loadedIndex=%d uniqueOrganId=%S\n",
             g_currentLoadedInstalledOrganIndex.load(),
             uniqueOrganId.empty() ? L"(empty)" : uniqueOrganId.c_str());
-        if (!uniqueOrganId.empty())
+        // Fissatore is a function button and must NOT persist its state in XML or memory.
+        if (!uniqueOrganId.empty() && cc != AHLBORN_FISSATORE_CC)
         {
             std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
             bool matched = false;

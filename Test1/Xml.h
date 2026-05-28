@@ -124,6 +124,9 @@ bool LoadHauptwerkAppPath(std::wstring& path);
 // preserved in Hauptwerk's EnabledMIDIOutputPort list.
 std::wstring LoadPrimaryHauptwerkOutputName();
 
+// Read actual enabled MIDI input and output ports straight from Hauptwerk's Config.Config_Hauptwerk_xml
+void ReadActualHauptwerkMidiPorts(std::vector<std::wstring>& inputNames, std::vector<std::wstring>& outputNames);
+
 // Start/stop a background thread that monitors the OrganDefinitions folder
 // for file additions or removals and automatically calls ReloadInstalledOrgans().
 void StartOrganFolderWatcher();
@@ -141,3 +144,7 @@ bool SaveMidiOutput2DeviceEnabled(bool enabled);
 
 bool SaveStreamDeckSettings(int ccNumber, const std::wstring& midiOut, const std::wstring& midiIn);
 bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& midiIn);
+
+// Returns the path to the AhlbornBridge2 settings directory in the current user's AppData\Roaming.
+// Always use this instead of hardcoded paths so it works correctly on any user account.
+std::wstring GetSettingsDirPath();

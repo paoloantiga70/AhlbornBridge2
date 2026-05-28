@@ -6,10 +6,10 @@
 // reads APP_VERSION from this header and patches the Inno Setup
 // installer script automatically.
 // ---------------------------------------------------------------
-#define APP_VERSION_MAJOR 0
-#define APP_VERSION_MINOR 9
-#define APP_VERSION_PATCH 55
-#define APP_VERSION "0.9.55"
+#define APP_VERSION_MAJOR 1
+#define APP_VERSION_MINOR 0
+#define APP_VERSION_PATCH 44
+#define APP_VERSION "1.0.44"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

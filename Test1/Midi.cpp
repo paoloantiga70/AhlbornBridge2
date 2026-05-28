@@ -59,6 +59,7 @@ std::atomic<int> g_streamDeckLoadingProgress{ 0 };
 std::atomic<bool> g_streamDeckBiduleSplashActive{ false };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
 std::wstring g_hauptwerkOrganTitle;
+std::atomic<bool> g_autoDetectMidiSettingsActive{ false };
 
 void CloseHauptwerkProcess();
 
@@ -108,6 +109,12 @@ namespace
     };
 
     MidiOutQueue g_midiOutQueue;
+    // Separate queue for bridge input→output forwarding.
+    // Only written by MidiInProc; drained only to non-Hauptwerk output slots.
+    MidiOutQueue g_bridgeFwdQueue;
+    // Number of leading g_midiOuts slots reserved for Hauptwerk outputs.
+    // Messages from MidiInProc must skip these to avoid feedback loops.
+    std::atomic<int> g_hwOutputSlotCount{ 0 };
     HANDLE g_midiOutWorkerThread = nullptr;
 
     DWORD WINAPI MidiOutWorkerThread(LPVOID)
@@ -133,6 +140,25 @@ namespace
                 LeaveCriticalSection(&g_midiOutLock);
                 dispatched = true;
             }
+            // Bridge-forward queue: skip leading Hauptwerk-only slots.
+            const int fwdStart = g_hwOutputSlotCount.load(std::memory_order_relaxed);
+            while (g_bridgeFwdQueue.TryDequeue(msg))
+            {
+                EnterCriticalSection(&g_midiOutLock);
+                int slot = 0;
+                for (HMIDIOUT out : g_midiOuts)
+                {
+                    if (slot >= fwdStart && out != nullptr)
+                    {
+                        midiOutShortMsg(out, msg);
+                        if (slot < kMaxOutputSlots)
+                            g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
+                    }
+                    ++slot;
+                }
+                LeaveCriticalSection(&g_midiOutLock);
+                dispatched = true;
+            }
             if (!dispatched)
             {
                 Sleep(1);
@@ -147,6 +173,23 @@ namespace
             for (HMIDIOUT out : g_midiOuts)
             {
                 if (out != nullptr)
+                {
+                    midiOutShortMsg(out, msg);
+                    if (slot < kMaxOutputSlots)
+                        g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
+                }
+                ++slot;
+            }
+            LeaveCriticalSection(&g_midiOutLock);
+        }
+        const int fwdStartDrain = g_hwOutputSlotCount.load(std::memory_order_relaxed);
+        while (g_bridgeFwdQueue.TryDequeue(msg))
+        {
+            EnterCriticalSection(&g_midiOutLock);
+            int slot = 0;
+            for (HMIDIOUT out : g_midiOuts)
+            {
+                if (slot >= fwdStartDrain && out != nullptr)
                 {
                     midiOutShortMsg(out, msg);
                     if (slot < kMaxOutputSlots)
@@ -733,19 +776,35 @@ namespace
             if (rooted || unc)
             {
                 const std::wstring legacyRoot = L"\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\";
-                const std::wstring newRoot = L"\\AppData\\Roaming\\AhlbornBridge2\\BiduleProfiles\\";
+                const std::wstring newRoot    = L"\\AppData\\Roaming\\AhlbornBridge2\\BiduleProfiles\\";
                 size_t legacyPos = path.find(legacyRoot);
                 if (legacyPos != std::wstring::npos)
                 {
-                    path.replace(legacyPos, legacyRoot.size(), newRoot);
+                    // Replace the old absolute prefix with the current user's settings dir.
+                    std::wstring filename = path.substr(legacyPos + legacyRoot.size());
+                    path = GetSettingsDirPath() + L"\\BiduleProfiles\\" + filename;
                     std::wstring uniqueOrganId = GetInstalledOrganUniqueId(installedOrganIndex);
                     if (!uniqueOrganId.empty())
                         SaveInstalledOrganBiduleProfile(uniqueOrganId, path);
                 }
+                // Also fix any absolute path that contains AhlbornBridge2 with a different user.
+                else
+                {
+                    const std::wstring marker = L"\\AhlbornBridge2\\BiduleProfiles\\";
+                    size_t markerPos = path.find(marker);
+                    if (markerPos != std::wstring::npos)
+                    {
+                        std::wstring filename = path.substr(markerPos + marker.size());
+                        path = GetSettingsDirPath() + L"\\BiduleProfiles\\" + filename;
+                        std::wstring uniqueOrganId = GetInstalledOrganUniqueId(installedOrganIndex);
+                        if (!uniqueOrganId.empty())
+                            SaveInstalledOrganBiduleProfile(uniqueOrganId, path);
+                    }
+                }
                 return path;
             }
 
-            path = L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge2\\BiduleProfiles\\" + path;
+            path = GetSettingsDirPath() + L"\\BiduleProfiles\\" + path;
             return path;
         }
 
@@ -825,10 +884,22 @@ namespace
             : kIconOnline;
     }
 
-        void OnHauptwerkShortPress()
-        {
+		void OnHauptwerkShortPress()
+		{
 			// Short press of the Hauptwerk "fissatore" key detected (press+release within threshold).
 			printf("Hauptwerk [FISSATORE] short press detected.\n");
+
+			if (g_autoDetectMidiSettingsActive.load())
+			{
+				HWND hAutoDetectDlg = FindWindowW(nullptr, L"Auto-detecting MIDI settings");
+				if (hAutoDetectDlg && IsWindow(hAutoDetectDlg))
+				{
+					printf(">>> [FISSATORE] Auto-detecting ACTIVE! Simulating ENTER key on 'Auto-detecting MIDI settings' (HWND=%p) <<<\n", (void*)hAutoDetectDlg);
+					PostMessageW(hAutoDetectDlg, WM_KEYDOWN, VK_RETURN, 0);
+					PostMessageW(hAutoDetectDlg, WM_KEYUP, VK_RETURN, 0);
+					return;
+				}
+			}
 
 			// Toggle Hauptwerk main window visibility if it is available.
 			HWND mainWindow = g_hauptwerkMainWindow;
@@ -998,12 +1069,31 @@ namespace
                 continue;
             }
 
-            wchar_t title[512] = {};
-            if (GetWindowTextW(mainWindow, title, static_cast<int>(_countof(title))) == 0)
-            {
-                Sleep(200);
-                continue;
-            }
+			wchar_t title[512] = {};
+			if (GetWindowTextW(mainWindow, title, static_cast<int>(_countof(title))) == 0)
+			{
+				Sleep(200);
+				continue;
+			}
+
+			// Also monitor if Hauptwerk's "Auto-detecting MIDI settings" dialog is open
+			HWND hAutoDetectDlg = FindWindowW(nullptr, L"Auto-detecting MIDI settings");
+			if (hAutoDetectDlg != nullptr && IsWindow(hAutoDetectDlg))
+			{
+				if (!g_autoDetectMidiSettingsActive.load())
+				{
+					g_autoDetectMidiSettingsActive.store(true);
+					printf("[TitleMonitor] Dialog 'Auto-detecting MIDI settings' detected!\n");
+				}
+			}
+			else
+			{
+				if (g_autoDetectMidiSettingsActive.load())
+				{
+					g_autoDetectMidiSettingsActive.store(false);
+					printf("[TitleMonitor] Dialog 'Auto-detecting MIDI settings' is no longer present.\n");
+				}
+			}
 
 			if (std::wcscmp(title, L"Hauptwerk") == 0)
 			{
@@ -1793,6 +1883,22 @@ bool OpenMidiOutputDevice(UINT devIndex)
 		return false;
 	}
 
+	// Safety guard: the bridge must never open a physical output device.
+	// Only AhlbornBridge Virtual Port is permitted.
+	{
+		std::wstring devName = caps.szPname;
+		if (devName.find(L"AhlbornBridge") == std::wstring::npos)
+		{
+			printf("[OpenMidiOutputDevice] BLOCKED: attempted to open physical output '%S'. Only AhlbornBridge Virtual Port is allowed.\n", caps.szPname);
+			MessageBoxW(nullptr,
+				(std::wstring(L"MIDI loop prevention:\n\nThe bridge attempted to open a physical MIDI output device:\n\n") + devName + L"\n\nThis is not allowed. Only \"AhlbornBridge Virtual Port\" may be opened as output.\nThe operation has been blocked.").c_str(),
+				L"AhlbornBridge — Output Device Blocked",
+				MB_OK | MB_ICONERROR);
+			g_outputDeviceOpen = false;
+			return false;
+		}
+	}
+
 	printf("[OpenMidiOutputDevice] : Opening Midi output device 01: [%S]\n", caps.szPname);
 
 	if (midiOutOpen(&hMidiOut, devIndex, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
@@ -1821,6 +1927,22 @@ bool OpenMidiOutput2Device(UINT devIndex)
 		printf("Failed to query output device 2 capabilities for device %u.\n", devIndex);
 		g_output2DeviceOpen = false;
 		return false;
+	}
+
+	// Safety guard: the bridge must never open a physical output device.
+	// Only AhlbornBridge Virtual Port is permitted.
+	{
+		std::wstring devName = caps.szPname;
+		if (devName.find(L"AhlbornBridge") == std::wstring::npos)
+		{
+			printf("[OpenMidiOutput2Device] BLOCKED: attempted to open physical output '%S'. Only AhlbornBridge Virtual Port is allowed.\n", caps.szPname);
+			MessageBoxW(nullptr,
+				(std::wstring(L"MIDI loop prevention:\n\nThe bridge attempted to open a physical MIDI output device:\n\n") + devName + L"\n\nThis is not allowed. Only \"AhlbornBridge Virtual Port\" may be opened as output.\nThe operation has been blocked.").c_str(),
+				L"AhlbornBridge — Output Device Blocked",
+				MB_OK | MB_ICONERROR);
+			g_output2DeviceOpen = false;
+			return false;
+		}
 	}
 
 	printf("Opening Midi output device 02: [%S]\n", caps.szPname);
@@ -1970,9 +2092,13 @@ void SetAssignedMidiInputNames(const std::vector<std::wstring>& names)
     if (!anyOpened) g_inputDeviceOpen = false;
 }
 
-// Close all dynamic outputs and reopen from the new name list.
-void SetAssignedMidiOutputNames(const std::vector<std::wstring>& names)
+// The bridge only ever opens AhlbornBridge Virtual Port as its output.
+// Physical output devices (Focusrite, etc.) are owned exclusively by Hauptwerk.
+// This function closes any currently open output handles and reopens only the
+// virtual port, regardless of what names are passed in.
+void SetAssignedMidiOutputNames(const std::vector<std::wstring>& /*names*/)
 {
+    // Close all currently open output handles.
     EnterCriticalSection(&g_midiOutLock);
     for (size_t i = 2; i < g_midiOuts.size(); ++i)
     {
@@ -1984,37 +2110,19 @@ void SetAssignedMidiOutputNames(const std::vector<std::wstring>& names)
     LeaveCriticalSection(&g_midiOutLock);
     g_outputDeviceOpen  = false;
     g_output2DeviceOpen = false;
+    g_hwOutputSlotCount.store(0, std::memory_order_relaxed);
 
+    // Reopen only AhlbornBridge Virtual Port.
     UINT numOutDevs = midiOutGetNumDevs();
-    for (size_t slot = 0; slot < names.size(); ++slot)
+    for (UINT i = 0; i < numOutDevs; ++i)
     {
-        const std::wstring& name = names[slot];
-        UINT idx = UINT(-1);
-        for (UINT i = 0; i < numOutDevs; ++i)
+        MIDIOUTCAPS caps = {};
+        if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+            std::wstring(caps.szPname) == L"AhlbornBridge Virtual Port")
         {
-            MIDIOUTCAPS caps = {};
-            if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && name == caps.szPname)
-            { idx = i; break; }
-        }
-        if (idx == UINT(-1)) { printf("[SetAssignedMidiOutputNames] '%S' not found\n", name.c_str()); continue; }
-        printf("[SetAssignedMidiOutputNames] Opening slot=%zu '%S' devIdx=%u\n", slot, name.c_str(), idx);
-        if (slot == 0)      OpenMidiOutputDevice(idx);
-        else if (slot == 1) OpenMidiOutput2Device(idx);
-        else
-        {
-            HMIDIOUT hExtra = nullptr;
-            MMRESULT res = midiOutOpen(&hExtra, idx, 0, 0, CALLBACK_NULL);
-            if (res == MMSYSERR_NOERROR)
-            {
-                EnterCriticalSection(&g_midiOutLock);
-                g_midiOuts.push_back(hExtra);
-                LeaveCriticalSection(&g_midiOutLock);
-                printf("[SetAssignedMidiOutputNames] Opened extra output slot=%zu '%S' OK\n", slot, name.c_str());
-            }
-            else
-            {
-                printf("[SetAssignedMidiOutputNames] FAILED to open extra output slot=%zu '%S' err=%u\n", slot, name.c_str(), res);
-            }
+            OpenMidiOutputDevice(i);
+            printf("[SetAssignedMidiOutputNames] Opened AhlbornBridge Virtual Port (slot 0)\n");
+            break;
         }
     }
 }
@@ -2710,7 +2818,7 @@ static void DetectMidiInputInteractive()
 
         step(10, L"Saving MIDI assignments...");
         std::vector<std::wstring> inputNames  = { name };
-        std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port" };
+        std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port", name };
         std::vector<std::wstring> hwOutputs   = { name };
         SaveAssignedMidiInputNames(inputNames);
         SaveAssignedMidiOutputNames(outputNames);
@@ -2743,7 +2851,79 @@ static void DetectMidiInputInteractive()
     DeleteObject(phase3.hF);
     DeleteObject(phase3.hFB);
 
-    printf("[DetectMidi] Configuration complete for: %S\n", detectedName.c_str());
+    // -----------------------------------------------------------------------
+    // PHASE 4: Ready screen — inform the user the app is in the tray bar
+    // -----------------------------------------------------------------------
+    {
+        HFONT hFN = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HFONT hFB = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+
+        struct Phase4Fonts { HFONT hF; HFONT hFB; };
+        Phase4Fonts p4fonts = { hFN, hFB };
+
+        auto phase4Proc = [](HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR
+        {
+            switch (msg)
+            {
+            case WM_INITDIALOG:
+            {
+                SetWindowLongPtrW(hDlg, GWLP_USERDATA, lp);
+                auto* f = reinterpret_cast<Phase4Fonts*>(lp);
+                SetWindowTextW(hDlg, L"AhlbornBridge \u2014 Ready");
+                SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                SetForegroundWindow(hDlg);
+
+                HWND h;
+                h = CreateWindowW(L"STATIC", L"\u2705  Setup complete!",
+                    WS_CHILD | WS_VISIBLE | SS_CENTER,
+                    20, 18, 360, 26, hDlg, nullptr, nullptr, nullptr);
+                SendMessageW(h, WM_SETFONT, (WPARAM)f->hFB, TRUE);
+
+                h = CreateWindowW(L"STATIC",
+                    L"AhlbornBridge is now running in the background.\n\n"
+                    L"You can find it in the Windows system tray bar\n"
+                    L"(bottom-right corner of the taskbar).\n\n"
+                    L"Right-click the tray icon to access all options.",
+                    WS_CHILD | WS_VISIBLE | SS_CENTER,
+                    20, 54, 360, 90, hDlg, nullptr, nullptr, nullptr);
+                SendMessageW(h, WM_SETFONT, (WPARAM)f->hF, TRUE);
+
+                h = CreateWindowW(L"BUTTON", L"Got it!",
+                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    140, 156, 120, 30, hDlg, (HMENU)IDOK, nullptr, nullptr);
+                SendMessageW(h, WM_SETFONT, (WPARAM)f->hFB, TRUE);
+
+                return TRUE;
+            }
+            case WM_COMMAND:
+                if (LOWORD(wp) == IDOK)
+                {
+                    EndDialog(hDlg, IDOK);
+                    return TRUE;
+                }
+                break;
+            case WM_KEYDOWN:
+                if (wp == VK_RETURN || wp == VK_ESCAPE)
+                {
+                    EndDialog(hDlg, IDOK);
+                    return TRUE;
+                }
+                break;
+            }
+            return FALSE;
+        };
+
+        dlgTpl.dt.cx = 250;
+        dlgTpl.dt.cy = 140;
+        DialogBoxIndirectParamW(GetModuleHandle(nullptr),
+            reinterpret_cast<LPCDLGTEMPLATEW>(&dlgTpl),
+            nullptr, phase4Proc, reinterpret_cast<LPARAM>(&p4fonts));
+
+        DeleteObject(hFN);
+        DeleteObject(hFB);
+    }
 }
 
 bool initMidiState()
@@ -2785,13 +2965,6 @@ bool initMidiState()
         printf("[initMidiState] Assigned inputs loaded: %zu\n", assignedInputs.size());
         if (assignedInputs.empty())
         {
-            // Force console visible so the user can see the detection prompt.
-            HWND hConsole = GetConsoleWindow();
-            if (hConsole)
-            {
-                ShowWindow(hConsole, SW_SHOW);
-                SetForegroundWindow(hConsole);
-            }
             printf("[initMidiState] First launch detected - starting interactive MIDI detection.\n");
             fflush(stdout);
 
@@ -2844,20 +3017,13 @@ bool initMidiState()
         if (!anyOpened) g_inputDeviceOpen = false;
     }
 
-    // ---- Open all assigned MIDI output devices ----
-    auto assignedOutputs = LoadAssignedMidiOutputNames();
+    // ---- Open bridge MIDI output: only AhlbornBridge Virtual Port ----
+    // The bridge must never open physical output devices (Focusrite, etc.) because
+    // those are owned exclusively by Hauptwerk. Opening a physical device both as
+    // input and output through the bridge causes a MIDI feedback loop.
+    g_hwOutputSlotCount.store(0, std::memory_order_relaxed);
     std::vector<std::wstring> runtimeOutputs;
-    auto appendRuntimeOutput = [&](const std::wstring& name)
-    {
-        if (name.empty())
-            return;
-        if (std::find(runtimeOutputs.begin(), runtimeOutputs.end(), name) != runtimeOutputs.end())
-            return;
-        runtimeOutputs.push_back(name);
-    };
-    appendRuntimeOutput(LoadPrimaryHauptwerkOutputName());
-    for (const auto& name : assignedOutputs)
-        appendRuntimeOutput(name);
+    runtimeOutputs.push_back(L"AhlbornBridge Virtual Port");
 
     if (runtimeOutputs.empty())
     {
@@ -3315,19 +3481,13 @@ void CALLBACK MidiInProc(
 	uint8_t data1 = (msg >> 8) & 0xFF;
 	uint8_t data2 = (msg >> 16) & 0xFF;
 
-	if (g_midiRouterEnabled.load() && hMidiOut != nullptr)
+	if (g_midiRouterEnabled.load())
 	{
-		// Do not forward command messages (CC ch16 + BF_0x50/BF_0x51) to avoid
-		// signal loops when the Stream Deck receives on the output port.
-		bool isCommandMsg = (status == CC_ch16 && (data1 == BF_0x50 || data1 == BF_0x51));
-		if (!isCommandMsg)
-		{
-			g_midiOutQueue.TryEnqueue(msg);
-		}
+		// Forward to assigned bridge outputs (skips Hauptwerk-only slots).
+		// AhlbornBridge Virtual Port is in AssignedMidiOutputs and is
+		// opened as a WinMM device, so WinMM forwarding is sufficient.
+		g_bridgeFwdQueue.TryEnqueue(msg);
 	}
-
-	// Also publish the message on the Windows MIDI Services virtual endpoint
-	ForwardToMidi2Endpoint(msg);
 
 	if (status == ALL_RESET)
 	{
@@ -3433,21 +3593,10 @@ void CALLBACK MidiInProc(
 			setNoteOn(ch, data1);
 		else
 			setNoteOff(ch, data1);
-		if (g_midiRouterEnabled.load() && hMidiOut != nullptr)
-		{
-			if (data2 > 0)
-				setOutputNoteOn(ch, data1);
-			else
-				setOutputNoteOff(ch, data1);
-		}
 		break;
 
 	case 0x80: // Note Off
 		setNoteOff(ch, data1);
-		if (g_midiRouterEnabled.load() && hMidiOut != nullptr)
-		{
-			setOutputNoteOff(ch, data1);
-		}
 		break;
 
 	case 0xB0: // Control Change channels 1-16

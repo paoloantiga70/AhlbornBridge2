@@ -36,3 +36,7 @@ void DisableMidi2Endpoint();
 
 // Returns true if the endpoint is currently active.
 bool IsMidi2EndpointEnabled();
+
+// Returns the GetTickCount() timestamp of the last message forwarded to the
+// virtual endpoint, or 0 if no message has been forwarded yet.
+DWORD GetMidi2EndpointLastMsgTime();

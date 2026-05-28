@@ -42,7 +42,7 @@ static void LogInit()
     GetTempPathW(MAX_PATH, tmpPath);
     std::wstring logPath = std::wstring(tmpPath) + L"AhlbornBridgeSD.log";
     g_logFile = _wfsopen(logPath.c_str(), L"a", _SH_DENYNO);
-    if (g_logFile) setvbuf(g_logFile, NULL, _IONBF, 0);
+    if (g_logFile) setvbuf(g_logFile, NULL, _IOLBF, 4096);
 }
 
 static void Log(const char* fmt, ...)
@@ -86,6 +86,9 @@ struct ButtonInfo
     std::string organName;
     int switchIndex = 0;
     bool switchIsOn = false;
+    // Cache to avoid redundant WS messages
+    std::string lastSvg;
+    int lastState = -1;
 };
 static std::mutex g_buttonsMutex;
 static std::map<std::string, ButtonInfo> g_visibleButtons; // context -> info
@@ -1008,11 +1011,19 @@ static void UpdateAllButtons()
             : (isSwitchAction
                 ? BuildSwitchButtonSvg(title, st == 1, switchChannel)
                 : BuildButtonSvg(title, st == 1, st == 1 && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkOn));
-        SdSetImage(ctx, svg, 0);
-        SdSetImage(ctx, svg, 1);
-        SdSetTitle(ctx, "", 0);
-        SdSetTitle(ctx, "", 1);
-        SdSetState(ctx, st);
+        if (svg != info.lastSvg)
+        {
+            SdSetImage(ctx, svg, 0);
+            SdSetImage(ctx, svg, 1);
+            SdSetTitle(ctx, "", 0);
+            SdSetTitle(ctx, "", 1);
+            info.lastSvg = svg;
+        }
+        if (st != info.lastState)
+        {
+            SdSetState(ctx, st);
+            info.lastState = st;
+        }
     }
 }
 
@@ -1088,11 +1099,33 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
         : (isSwitchAction
             ? BuildSwitchButtonSvg(title, isLoaded, switchChannel)
             : BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkState));
+    int newState = isLoaded ? 1 : 0;
+    {
+        std::lock_guard<std::mutex> lk(g_buttonsMutex);
+        auto it = g_visibleButtons.find(context);
+        if (it != g_visibleButtons.end())
+        {
+            if (svg != it->second.lastSvg)
+            {
+                SdSetImage(context, svg, 0);
+                SdSetImage(context, svg, 1);
+                SdSetTitle(context, "", 0);
+                SdSetTitle(context, "", 1);
+                it->second.lastSvg = svg;
+            }
+            if (newState != it->second.lastState)
+            {
+                SdSetState(context, newState);
+                it->second.lastState = newState;
+            }
+            return;
+        }
+    }
     SdSetImage(context, svg, 0);
     SdSetImage(context, svg, 1);
     SdSetTitle(context, "", 0);
     SdSetTitle(context, "", 1);
-    SdSetState(context, isLoaded ? 1 : 0);
+    SdSetState(context, newState);
 }
 
 // ─── Named pipe communication
@@ -1819,6 +1852,16 @@ static void HandleSdEvent(const std::string& json)
         SdSetTitle(context, "", 0);
         SdSetTitle(context, "", 1);
         SdSetState(context, isLoaded ? 1 : 0);
+        // Seed the cache so UpdateAllButtons skips redundant sends for this button
+        {
+            std::lock_guard<std::mutex> lk(g_buttonsMutex);
+            auto it = g_visibleButtons.find(context);
+            if (it != g_visibleButtons.end())
+            {
+                it->second.lastSvg = svg;
+                it->second.lastState = isLoaded ? 1 : 0;
+            }
+        }
 
         // Schedule delayed refresh to handle bulk willAppear during profile load
         g_lastWillAppearTick = GetTickCount64();

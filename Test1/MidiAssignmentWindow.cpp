@@ -6,6 +6,8 @@
 #include "MidiAssignmentWindow.h"
 #include "Midi.h"
 #include "Xml.h"
+#include "Midi2Endpoint.h"
+#include "Hauptwerk.h"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -133,9 +135,13 @@ static void LvSetupReportMode(HWND hLv, bool withLed)
 	col.pszText = const_cast<wchar_t*>(L"");
 	ListView_InsertColumn(hLv, 0, &col);
 
-	col.cx      = 260;
+	col.cx      = 200;
 	col.pszText = const_cast<wchar_t*>(L"Device");
 	ListView_InsertColumn(hLv, 1, &col);
+
+	col.cx      = 180;
+	col.pszText = const_cast<wchar_t*>(L"Role");
+	ListView_InsertColumn(hLv, 2, &col);
 }
 
 // Add an item to a plain list-mode or single-column report listview
@@ -277,8 +283,6 @@ static std::vector<std::wstring> CollectAssignedInputNames(HWND hLv)
 		std::wstring name = LvGetItemName(hLv, i, true);
 		if (name.empty())
 			continue;
-		if (IsFixedAssignedInputName(name))
-			name = g_fixedInputName;
 		names.push_back(name);
 	}
 	return names;
@@ -287,13 +291,14 @@ static std::vector<std::wstring> CollectAssignedInputNames(HWND hLv)
 static std::vector<std::wstring> CollectPersistedOutputNames(HWND hLv)
 {
 	std::vector<std::wstring> names;
+	// Always yield AhlbornBridge Virtual Port as the first/must-have output.
 	names.push_back(L"AhlbornBridge Virtual Port");
 
 	int n = ListView_GetItemCount(hLv);
 	for (int i = 0; i < n; ++i)
 	{
 		std::wstring name = LvGetItemName(hLv, i, true);
-		if (name.empty() || IsFixedAssignedOutputName(name) || IsInternalMidiPort(name))
+		if (name.empty() || IsInternalMidiPort(name) || name == L"AhlbornBridge Virtual Port")
 			continue;
 		names.push_back(name);
 	}
@@ -382,10 +387,7 @@ static void PopulateInputViews(HWND hAvail, HWND hAssign)
 	}
 	for (auto& name : assigned)
 	{
-		if (!g_fixedInputName.empty() && name == g_fixedInputName)
-			LvAddLedItem(hAssign, GetFixedInputDisplayName().c_str());
-		else
-			LvAddLedItem(hAssign, name.c_str());
+		LvAddLedItem(hAssign, name.c_str());
 	}
 }
 
@@ -404,7 +406,6 @@ static void PopulateAvailableOutputView(
 		if (midiOutGetDevCaps(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
 		std::wstring name = caps.szPname;
 		if (IsInternalMidiPort(name)) continue;
-		if (!g_fixedOutputName.empty() && name == g_fixedOutputName) continue;
 		if (std::find(assignedOutputs.begin(), assignedOutputs.end(), name) != assignedOutputs.end()) continue;
 		LvAddItem(hAvail, name.c_str());
 	}
@@ -417,7 +418,7 @@ static std::vector<std::wstring> CollectAssignedOutputNames(HWND hLv)
 	for (int i = 0; i < n; ++i)
 	{
 		std::wstring name = LvGetItemName(hLv, i, true);
-		if (name.empty() || IsFixedAssignedOutputName(name) || IsInternalMidiPort(name))
+		if (name.empty() || IsInternalMidiPort(name))
 			continue;
 		names.push_back(name);
 	}
@@ -428,12 +429,12 @@ static void PopulateOutputViews(HWND hAvail, HWND hAssign)
 {
 	ListView_DeleteAllItems(hAssign);
 
-	auto assignedOutputs = LoadAssignedMidiOutputNames();
+	std::vector<std::wstring> hwActualInputs, hwActualOutputs;
+	ReadActualHauptwerkMidiPorts(hwActualInputs, hwActualOutputs);
+
 	auto assignedInputs  = LoadAssignedMidiInputNames();
-	PopulateAvailableOutputView(hAvail, assignedOutputs, assignedInputs);
-	if (!g_fixedOutputName.empty())
-		LvAddLedItem(hAssign, GetFixedOutputDisplayName().c_str());
-	for (auto& name : assignedOutputs)
+	PopulateAvailableOutputView(hAvail, hwActualOutputs, assignedInputs);
+	for (auto& name : hwActualOutputs)
 	{
 		if (IsInternalMidiPort(name))
 			continue;
@@ -472,7 +473,16 @@ static void PopulateInternalBridgePortsView(HWND hLv)
 	}
 
 	for (const auto& name : ports)
+	{
 		LvAddLedItem(hLv, name.c_str());
+		int idx = ListView_GetItemCount(hLv) - 1;
+		const wchar_t* role = L"";
+		if (name == L"AhlbornBridge Virtual Port")
+			role = L"AhlbornBridge MIDI Output (BRIDGE)";
+		else if (name == L"AhlbornBridge Virtual Port (B)")
+			role = L"Hauptwerk MIDI Input (BRIDGE)";
+		ListView_SetItemText(hLv, idx, 2, const_cast<wchar_t*>(role));
+	}
 }
 
 static void RefreshInternalBridgePortLeds(HWND hLv)
@@ -484,9 +494,14 @@ static void RefreshInternalBridgePortLeds(HWND hLv)
 	for (int i = 0; i < n; ++i)
 	{
 		std::wstring name = LvGetItemName(hLv, i, true);
-		DWORD lastIn = GetMidiInputLastMsgByDeviceName(name);
+		DWORD lastIn  = GetMidiInputLastMsgByDeviceName(name);
 		DWORD lastOut = GetMidiOutputLastMsgByDeviceName(name);
-		DWORD last = (lastIn > lastOut) ? lastIn : lastOut;
+		DWORD last    = (lastIn > lastOut) ? lastIn : lastOut;
+		if (name == L"AhlbornBridge Virtual Port")
+		{
+			DWORD fwd = GetMidi2EndpointLastMsgTime();
+			if (fwd > last) last = fwd;
+		}
 		if (bridgeEnabled && name == L"AhlbornBridge Virtual Port (B)")
 		{
 			DWORD mirrored = GetMidiOutputLastMsgByDeviceName(L"AhlbornBridge Virtual Port");
@@ -513,11 +528,6 @@ static void SyncOutputAvailabilityFromCurrentUi()
 	if (!hAvailOut || !hAssignIn || !hAssignOut) return;
 
 	auto assignedInputs  = LvCollectNames(hAssignIn, true);
-	for (auto& name : assignedInputs)
-	{
-		if (IsFixedAssignedInputName(name))
-			name = g_fixedInputName;
-	}
 	auto assignedOutputs = CollectAssignedOutputNames(hAssignOut);
 	PopulateAvailableOutputView(hAvailOut, assignedOutputs, assignedInputs);
 }
@@ -559,10 +569,20 @@ static void ApplyCurrentOutputAssignments(HWND hWnd)
 	HWND hAssignOut = GetDlgItem(hWnd, IDC_TV_ASSIGN_OUT);
 	if (!hAssignIn || !hAssignOut) return;
 
+	if (IsProcessRunningByName(L"Hauptwerk.exe") || IsProcessRunningByName(L"hauptwerk.exe"))
+	{
+		MessageBoxW(hWnd, 
+			L"Hauptwerk is currently running!\n\nPlease close Hauptwerk before changing and applying MIDI output port assignments. Otherwise, Hauptwerk will overwrite the configuration file upon closing.", 
+			L"Hauptwerk Running", 
+			MB_OK | MB_ICONWARNING);
+
+		// Force refresh to restore previous state from Hauptwerk configuration
+		PostMessageW(hWnd, kRefreshListsMsg, 0, 0);
+		return;
+	}
+
 	auto inputs = CollectAssignedInputNames(hAssignIn);
 	auto outputs = CollectPersistedOutputNames(hAssignOut);
-	SaveAssignedMidiOutputNames(outputs);
-	SetAssignedMidiOutputNames(outputs);
 	WriteHauptwerkMidiConfig(inputs, outputs);
 	g_initialAssignedOutputs = outputs;
 	UpdateApplyButtonState(hWnd);
@@ -607,8 +627,11 @@ static void RefreshOutputLeds(HWND hAssignOut)
 	DWORD now = GetTickCount();
 	for (int i = 0; i < n; ++i)
 	{
-		DWORD last = GetMidiOutputSlotLastMsg(i);
-		int imgIdx = (last != 0 && (now - last) < kActivityWindowMs) ? 1 : 0;
+		// Output assigned devices are owned by Hauptwerk, not the bridge.
+		// The bridge only opens AhlbornBridge Virtual Port as its output.
+		// We have no activity timestamp for Hauptwerk-owned devices,
+		// so all LEDs in this list are kept off to avoid misleading the user.
+		int imgIdx = 0;
 		LVITEMW lvi = {};
 		lvi.mask     = LVIF_IMAGE;
 		lvi.iItem    = i;
@@ -705,11 +728,11 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		int iy = margin;
 		iy = makeSection(iy, IDC_TV_AVAIL_IN,  IDC_TV_ASSIGN_IN,
 						 IDC_BTN_ADD_IN, IDC_BTN_REM_IN, IDC_BTN_UP_IN, IDC_BTN_DOWN_IN,
-						 L"MIDI Inputs", true);
+						 L"AhlbornBridge MIDI Input Ports", true);
 		iy += sectionGap;
 		iy = makeSection(iy, IDC_TV_AVAIL_OUT, IDC_TV_ASSIGN_OUT,
 					 IDC_BTN_ADD_OUT, IDC_BTN_REM_OUT, IDC_BTN_UP_OUT, IDC_BTN_DOWN_OUT,
-					 L"MIDI Outputs", true);
+					 L"Hauptwerk MIDI Output Ports", true);
 		iy += sectionGap;
 
 		int totalW = margin + colW + 8 + arrowW + 8 + colW + 6 + arrowW + margin;
@@ -743,8 +766,8 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		g_lvs[3] = GetDlgItem(hWnd, IDC_TV_ASSIGN_OUT);
 		g_internalBridgeLv = hInternal;
 		auto assignedInputs = LoadAssignedMidiInputNames();
-		g_fixedInputName = assignedInputs.empty() ? std::wstring{} : assignedInputs.front();
-		g_fixedOutputName = LoadPrimaryHauptwerkOutputName();
+		g_fixedInputName = std::wstring{};
+		g_fixedOutputName = std::wstring{};
 
 		PopulateInputViews (g_lvs[0], g_lvs[1]);
 		PopulateOutputViews(g_lvs[2], g_lvs[3]);
@@ -805,24 +828,18 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 			return 0;
 		case IDC_BTN_REM_IN:
 		{
-			int sel = LvGetSelected(hAssignIn);
-			if (IsFixedAssignedInputItem(hAssignIn, sel, true)) return 0;
 			MoveSelected(hAssignIn, true, hAvailIn, false);
 			ApplyCurrentInputAssignments(hWnd);
 			return 0;
 		}
 		case IDC_BTN_UP_IN:
 		{
-			int sel = LvGetSelected(hAssignIn);
-			if (IsFixedAssignedInputItem(hAssignIn, sel, true) || IsFixedAssignedInputItem(hAssignIn, sel - 1, true)) return 0;
 			LvMoveItem(hAssignIn, true, true);
 			ApplyCurrentInputAssignments(hWnd);
 			return 0;
 		}
 		case IDC_BTN_DOWN_IN:
 		{
-			int sel = LvGetSelected(hAssignIn);
-			if (IsFixedAssignedInputItem(hAssignIn, sel, true) || IsFixedAssignedInputItem(hAssignIn, sel + 1, true)) return 0;
 			LvMoveItem(hAssignIn, false, true);
 			ApplyCurrentInputAssignments(hWnd);
 			return 0;
@@ -833,24 +850,18 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 			return 0;
 		case IDC_BTN_REM_OUT:
 		{
-			int sel = LvGetSelected(hAssignOut);
-			if (IsFixedAssignedOutputItem(hAssignOut, sel, true)) return 0;
 			MoveSelected(hAssignOut, true, hAvailOut, false);
 			ApplyCurrentOutputAssignments(hWnd);
 			return 0;
 		}
 		case IDC_BTN_UP_OUT:
 		{
-			int sel = LvGetSelected(hAssignOut);
-			if (IsFixedAssignedOutputItem(hAssignOut, sel, true) || IsFixedAssignedOutputItem(hAssignOut, sel - 1, true)) return 0;
 			LvMoveItem(hAssignOut, true, true);
 			ApplyCurrentOutputAssignments(hWnd);
 			return 0;
 		}
 		case IDC_BTN_DOWN_OUT:
 		{
-			int sel = LvGetSelected(hAssignOut);
-			if (IsFixedAssignedOutputItem(hAssignOut, sel, true) || IsFixedAssignedOutputItem(hAssignOut, sel + 1, true)) return 0;
 			LvMoveItem(hAssignOut, false, true);
 			ApplyCurrentOutputAssignments(hWnd);
 			return 0;
@@ -868,10 +879,22 @@ static LRESULT CALLBACK MidiAssignWndProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 		{
 			auto inputs  = CollectAssignedInputNames(hAssignIn);
 			auto outputs = CollectPersistedOutputNames(hAssignOut);
+
+			bool outputsChanged = (outputs != g_initialAssignedOutputs);
+			if (outputsChanged)
+			{
+				if (IsProcessRunningByName(L"Hauptwerk.exe") || IsProcessRunningByName(L"hauptwerk.exe"))
+				{
+					MessageBoxW(hWnd, 
+						L"Hauptwerk is currently running!\n\nPlease close Hauptwerk before changing and applying MIDI output port assignments. Otherwise, Hauptwerk will overwrite the configuration file upon closing.", 
+						L"Hauptwerk Running", 
+						MB_OK | MB_ICONWARNING);
+					return 0;
+				}
+			}
+
 			SaveAssignedMidiInputNames(inputs);
-			SaveAssignedMidiOutputNames(outputs);
 			SetAssignedMidiInputNames(inputs);
-			SetAssignedMidiOutputNames(outputs);
 			WriteHauptwerkMidiConfig(inputs, outputs);
 			g_initialAssignedInputs  = inputs;
 			g_initialAssignedOutputs = outputs;

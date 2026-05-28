@@ -12,24 +12,23 @@
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
+// Returns the path to the AhlbornBridge2 settings directory for the current user.
+std::wstring GetSettingsDirPath()
+{
+    wchar_t buf[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, buf)))
+    {
+        std::wstring dir(buf);
+        dir += L"\\AhlbornBridge2";
+        return dir;
+    }
+    return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge2");
+}
+
 namespace
 {
     // Settings are stored per-user in the Roaming AppData folder.
-    // Path: %APPDATA%\TuaApp\Settings.xml
-
-    std::wstring GetSettingsDirPath()
-    {
-        wchar_t buf[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, buf)))
-        {
-            std::wstring dir(buf);
-            dir += L"\\AhlbornBridge2";
-            return dir;
-        }
-
-        // Fallback to C:\Users\Default\AppData\Roaming\TuaApp if retrieval fails
-        return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge2");
-    }
+    // Path: %APPDATA%\AhlbornBridge2\Settings.xml
 
     std::wstring GetSettingsFilePath()
     {
@@ -478,7 +477,7 @@ namespace
         return names;
     }
 
-    void ReadActualHauptwerkMidiPorts(std::vector<std::wstring>& inputNames, std::vector<std::wstring>& outputNames)
+    void ReadActualHauptwerkMidiPortsImpl(std::vector<std::wstring>& inputNames, std::vector<std::wstring>& outputNames)
     {
         inputNames.clear();
         outputNames.clear();
@@ -1321,8 +1320,6 @@ namespace
 			L"    </CurrentMidiOutputDevices>\r\n"
 			L"    <AssignedMidiInputs>\r\n" + assignedInputSection +
 			L"    </AssignedMidiInputs>\r\n"
-			L"    <AssignedMidiOutputs>\r\n" + assignedOutputSection +
-			L"    </AssignedMidiOutputs>\r\n"
 			L"    <HauptwerkMidiInputsActual>\r\n" + actualHauptwerkInputSection +
 			L"    </HauptwerkMidiInputsActual>\r\n"
 			L"    <HauptwerkMidiOutputsActual>\r\n" + actualHauptwerkOutputSection +
@@ -1340,6 +1337,7 @@ namespace
 			L"    <RootFolder_HauptwerkUserData>" + s_rootHauptwerkUserData + L"</RootFolder_HauptwerkUserData>\r\n"
 			L"    <RootFolder_HauptwerkSampleSetsAndComponents>" + s_rootHauptwerkSampleSets + L"</RootFolder_HauptwerkSampleSetsAndComponents>\r\n"
 			L"    <RootFolder_HauptwerkInternalWorkingFiles>" + s_rootHauptwerkWorkingFiles + L"</RootFolder_HauptwerkInternalWorkingFiles>\r\n"
+			L"    <AppDataPath>" + GetSettingsDirPath() + L"</AppDataPath>\r\n"
 			L"  </Options>\r\n"
 			L"  <StandbyeOrgans>\r\n" + standbyOrgans +
 			L"  </StandbyeOrgans>\r\n"
@@ -1611,6 +1609,13 @@ bool SaveInstalledOrganBiduleProfile(const std::wstring& uniqueOrganId, const st
     if (uniqueOrganId.empty())
         return false;
 
+    // Always store only the filename (relative to BiduleProfiles folder),
+    // never an absolute path, so the setting works on any user account or PC.
+    std::wstring profileToSave = biduleProfile;
+    size_t sep = profileToSave.find_last_of(L"\\/");
+    if (sep != std::wstring::npos)
+        profileToSave = profileToSave.substr(sep + 1);
+
     EnsureInstalledOrgansLoaded();
     std::wstring xml = s_cachedInstalledOrgans;
     size_t pos = 0;
@@ -1872,8 +1877,13 @@ bool SaveAssignedMidiOutputNames(const std::vector<std::wstring>& names)
 	return WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
 }
 
+void ReadActualHauptwerkMidiPorts(std::vector<std::wstring>& inputNames, std::vector<std::wstring>& outputNames)
+{
+	ReadActualHauptwerkMidiPortsImpl(inputNames, outputNames);
+}
+
 bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
-                              const std::vector<std::wstring>& outputNames)
+							  const std::vector<std::wstring>& outputNames)
 {
     // Build path to Config.Config_Hauptwerk_xml
     std::wstring userDataRoot = s_rootHauptwerkUserData;
@@ -3362,16 +3372,9 @@ void RefreshSettingsFile()
                 printf("Reopening MIDI input device 02: [%S]\n", input2Name.c_str());
                 SwitchMidiInput2Device(idx);
             }
-            if (!outputName.empty() && FindMidiOutputDeviceIndex(outputName, idx))
-            {
-                printf("Reopening MIDI output device 01: [%S]\n", outputName.c_str());
-                SwitchMidiOutputDevice(idx);
-            }
-            if (!output2Name.empty() && FindMidiOutputDeviceIndex(output2Name, idx))
-            {
-                printf("Reopening MIDI output device 02: [%S]\n", output2Name.c_str());
-                SwitchMidiOutput2Device(idx);
-            }
+            // Physical output devices are owned exclusively by Hauptwerk.
+            // The bridge only opens AhlbornBridge Virtual Port as its output.
+            // Do not reopen any physical MIDI output devices here.
         }
 
         // Update the snapshot to reflect the current device state after

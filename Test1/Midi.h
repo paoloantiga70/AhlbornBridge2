@@ -154,6 +154,7 @@ extern std::atomic<HWND> g_hauptwerkMainWindow;
 extern std::atomic<bool> g_hauptwerkKeyHeld;
 extern std::atomic<TrayIconImageStatus> g_trayIconImageStatus;
 extern std::wstring g_hauptwerkOrganTitle;
+extern std::atomic<bool> g_autoDetectMidiSettingsActive;
 
 // Inline functions ******************************************************
 
