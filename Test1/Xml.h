@@ -79,6 +79,8 @@ bool SaveShowDebugConsole(bool enabled);
 bool LoadShowDebugConsole(bool& enabled);
 bool SaveCheckForUpdateOnStart(bool enabled);
 bool LoadCheckForUpdateOnStart(bool& enabled);
+bool SaveLastSeenAppVersion(const std::wstring& version);
+bool LoadLastSeenAppVersion(std::wstring& version);
 bool SaveBidulePath(const std::wstring& path);
 bool LoadBidulePath(std::wstring& path);
 bool SaveBiduleCloseOnUnload(bool enabled);

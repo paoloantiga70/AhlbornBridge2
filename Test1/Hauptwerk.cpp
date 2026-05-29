@@ -6,16 +6,23 @@
 #include <windows.h>
 #include <cstdio>
 #include <cwchar>
+#include <cwctype>
 #include <tlhelp32.h>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <thread>
+#include <atomic>
 #include <shlobj.h>
 #include <knownfolders.h>
 #include <shellapi.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <winsvc.h>
 
 #pragma comment(lib, "Ws2_32.lib")
+
+extern bool isOrganLoaded;
 
 namespace
 {
@@ -24,6 +31,8 @@ namespace
         DWORD processId;
         HWND hwnd;
     };
+
+    std::atomic<bool> g_hauptwerkRealtimeEnforcerRunning{ false };
 
     // Return true for plain top-level windows belonging to a process.
     // The original implementation also required the window to have
@@ -231,6 +240,241 @@ namespace
         ctx.pid = bidulePid;
         EnumWindows(EnumBiduleWindowsProc, reinterpret_cast<LPARAM>(&ctx));
         return ctx.foundCandidate;
+    }
+
+    std::wstring TrimPipeResponse(const std::wstring& input)
+    {
+        size_t start = 0;
+        while (start < input.size() && (iswspace(input[start]) || input[start] == L'\0' || input[start] == 0xFEFF))
+            ++start;
+
+        size_t end = input.size();
+        while (end > start && (iswspace(input[end - 1]) || input[end - 1] == L'\0'))
+            --end;
+
+        return input.substr(start, end - start);
+    }
+
+    bool EnsureProcessManagerServiceRunning()
+    {
+        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+        if (!scm)
+        {
+            printf("[ProcessManager] OpenSCManager failed (err=%lu).\n", GetLastError());
+            return false;
+        }
+
+        SC_HANDLE service = OpenServiceW(scm, L"AhlbornBridgeProcessManager", SERVICE_QUERY_STATUS | SERVICE_START);
+        if (!service)
+        {
+            printf("[ProcessManager] OpenService failed (err=%lu).\n", GetLastError());
+            CloseServiceHandle(scm);
+            return false;
+        }
+
+        SERVICE_STATUS_PROCESS status{};
+        DWORD bytesNeeded = 0;
+        bool ok = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &bytesNeeded) != FALSE;
+        if (ok && status.dwCurrentState == SERVICE_RUNNING)
+        {
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return true;
+        }
+
+        printf("[ProcessManager] Service not running, attempting auto-start...\n");
+
+        if (!StartServiceW(service, 0, nullptr))
+        {
+            DWORD err = GetLastError();
+            if (err != ERROR_SERVICE_ALREADY_RUNNING)
+            {
+                printf("[ProcessManager] StartService failed (err=%lu).\n", err);
+                CloseServiceHandle(service);
+                CloseServiceHandle(scm);
+                return false;
+            }
+        }
+
+        const DWORD startTick = GetTickCount();
+        const DWORD timeoutMs = 8000;
+        while (GetTickCount() - startTick < timeoutMs)
+        {
+            ZeroMemory(&status, sizeof(status));
+            bytesNeeded = 0;
+            if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &bytesNeeded))
+            {
+                printf("[ProcessManager] QueryServiceStatusEx failed (err=%lu).\n", GetLastError());
+                break;
+            }
+
+            if (status.dwCurrentState == SERVICE_RUNNING)
+            {
+                printf("[ProcessManager] Service auto-started successfully.\n");
+                CloseServiceHandle(service);
+                CloseServiceHandle(scm);
+                return true;
+            }
+
+            if (status.dwCurrentState == SERVICE_STOPPED)
+                break;
+
+            Sleep(250);
+        }
+
+        printf("[ProcessManager] Service did not reach RUNNING state after auto-start attempt.\n");
+        CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        return false;
+    }
+
+    bool SendProcessManagerCommand(const std::wstring& command, std::wstring& response)
+    {
+        HANDLE hPipe = CreateFileW(
+            L"\\\\.\\pipe\\AhlbornBridgeProcessManager",
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr);
+
+        if (hPipe == INVALID_HANDLE_VALUE)
+        {
+            const DWORD firstPipeErr = GetLastError();
+            printf("[ProcessManager] Pipe open failed (err=%lu), trying service auto-start...\n", firstPipeErr);
+
+            if (!EnsureProcessManagerServiceRunning())
+                return false;
+
+            hPipe = CreateFileW(
+                L"\\\\.\\pipe\\AhlbornBridgeProcessManager",
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr);
+
+            if (hPipe == INVALID_HANDLE_VALUE)
+            {
+                printf("[ProcessManager] Pipe open failed after auto-start (err=%lu).\n", GetLastError());
+                return false;
+            }
+        }
+
+        DWORD mode = PIPE_READMODE_MESSAGE;
+        SetNamedPipeHandleState(hPipe, &mode, nullptr, nullptr);
+
+        DWORD bytesWritten = 0;
+        const DWORD bytesToWrite = static_cast<DWORD>(command.size() * sizeof(wchar_t));
+        BOOL writeOk = WriteFile(hPipe, command.data(), bytesToWrite, &bytesWritten, nullptr);
+        if (!writeOk || bytesWritten != bytesToWrite)
+        {
+            CloseHandle(hPipe);
+            return false;
+        }
+
+        wchar_t buffer[512] = {};
+        DWORD bytesRead = 0;
+        BOOL readOk = ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, nullptr);
+        CloseHandle(hPipe);
+        if (!readOk || bytesRead == 0)
+            return false;
+
+        buffer[bytesRead / sizeof(wchar_t)] = L'\0';
+        response = TrimPipeResponse(buffer);
+        return true;
+    }
+
+    bool IsPriorityResponse(const std::wstring& response, const wchar_t* priorityName)
+    {
+        std::wstring upper = response;
+        for (wchar_t& ch : upper)
+            ch = static_cast<wchar_t>(towupper(ch));
+
+        std::wstring token = L"PRIORITY=";
+        token += priorityName;
+        return upper.find(token) != std::wstring::npos;
+    }
+
+    bool IsOrganCurrentlyLoadedInHauptwerk()
+    {
+        // Require both the canonical runtime flag and a confirmed loaded-title
+        // shape to avoid transient false positives at startup.
+        if (!isOrganLoaded)
+            return false;
+
+        HWND mainWindow = g_hauptwerkMainWindow.load();
+        if (!mainWindow || !IsWindow(mainWindow))
+            return false;
+
+        wchar_t title[512] = {};
+        if (GetWindowTextW(mainWindow, title, static_cast<int>(_countof(title))) <= 0)
+            return false;
+
+        return std::wcsncmp(title, L"Hauptwerk -", 11) == 0;
+    }
+
+    void RequestHauptwerkRealtimePriorityViaService()
+    {
+        bool expected = false;
+        if (!g_hauptwerkRealtimeEnforcerRunning.compare_exchange_strong(expected, true))
+            return;
+
+        std::thread([]()
+            {
+                printf("[ProcessManager] Priority policy enforcer started (REALTIME only when organ is loaded).\n");
+                bool realtimeAppliedForLoadedState = false;
+
+                bool lastOrganLoaded = false;
+                while (IsProcessRunning(L"Hauptwerk.exe"))
+                {
+                    Sleep(2000);
+
+                    const bool organLoaded = IsOrganCurrentlyLoadedInHauptwerk();
+                    std::wstring check;
+                    if (!SendProcessManagerCommand(L"GET_PRIORITY Hauptwerk.exe", check))
+                        continue;
+
+                    if (organLoaded != lastOrganLoaded)
+                    {
+                        printf("[ProcessManager] organLoaded state changed -> %d\n", organLoaded ? 1 : 0);
+                        lastOrganLoaded = organLoaded;
+                    }
+
+                    if (organLoaded)
+                    {
+                        if (!IsPriorityResponse(check, L"REALTIME"))
+                        {
+                            std::wstring apply;
+                            if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe REALTIME", apply))
+                            {
+                                printf("[ProcessManager] Organ loaded: enforcing REALTIME -> %S\n", apply.c_str());
+                                realtimeAppliedForLoadedState = true;
+                            }
+                        }
+                        else
+                        {
+                            realtimeAppliedForLoadedState = true;
+                        }
+                    }
+                    else
+                    {
+                        if (!IsPriorityResponse(check, L"HIGH"))
+                        {
+                            std::wstring restore;
+                            if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe HIGH", restore))
+                                printf("[ProcessManager] Organ not loaded: restoring HIGH -> %S\n", restore.c_str());
+                        }
+
+                        realtimeAppliedForLoadedState = false;
+                    }
+                }
+
+                g_hauptwerkRealtimeEnforcerRunning.store(false);
+                printf("[ProcessManager] Priority policy enforcer stopped.\n");
+            }).detach();
     }
 }
 
@@ -640,6 +884,7 @@ bool LaunchHauptwerkAndDismissWelcome()
 					// foreground so the user sees an effect.
 					ShowWindow(mainWindow, SW_RESTORE);
 					SetForegroundWindow(mainWindow);
+					RequestHauptwerkRealtimePriorityViaService();
 			}
 		}
 		// Return false so callers know we didn't launch a new instance;
@@ -732,6 +977,7 @@ bool LaunchHauptwerkAndDismissWelcome()
 
 	ShowWindow(mainWindow, SW_RESTORE);
 	SetForegroundWindow(mainWindow);
+	RequestHauptwerkRealtimePriorityViaService();
 
 	ReloadStandbyOrgans();
 

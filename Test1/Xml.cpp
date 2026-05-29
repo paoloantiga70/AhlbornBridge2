@@ -87,6 +87,7 @@ namespace
 
     std::wstring s_cachedBidulePath;
     bool s_cachedBiduleCloseOnUnload = true;
+    std::wstring s_cachedLastSeenAppVersion;
 
     // Cached audio output devices (all entries from AudioOutputDevice in Hauptwerk config,
     // persisted to <Audio><Devices> in Settings.xml).
@@ -1270,10 +1271,15 @@ namespace
 			// Ensure audio settings are loaded (cached on first call).
 			EnsureAudioSettingsLoaded();
 
-			// Preserve the existing AhlbornSwitches table if it is already present in Settings.xml.
+			// Preserve data from existing Settings.xml.
 			std::wstring existingXml;
 			if (TryReadSettingsXml(existingXml))
 			{
+				std::wstring optionsSection;
+				if (TryGetSection(existingXml, L"Options", optionsSection))
+					TryGetTagStringValue(optionsSection, L"<LastSeenAppVersion>", L"</LastSeenAppVersion>", s_cachedLastSeenAppVersion);
+
+				// Preserve the existing AhlbornSwitches table if it is already present in Settings.xml.
 				std::wstring streamDeckSection;
 				if (TryGetSection(existingXml, L"StreamDeck", streamDeckSection))
 				{
@@ -1335,7 +1341,8 @@ namespace
 			L"    <CloseSettingsOnDisconnect>" + std::to_wstring(closeSettingsOnDisconnect ? 1 : 0) + L"</CloseSettingsOnDisconnect>\r\n"
 			L"    <ShowDebugConsole>" + std::to_wstring(showDebugConsole ? 1 : 0) + L"</ShowDebugConsole>\r\n"
 			L"    <CheckForUpdateOnStart>" + std::to_wstring(checkForUpdateOnStart ? 1 : 0) + L"</CheckForUpdateOnStart>\r\n"
-            L"    <BidulePath>" + s_cachedBidulePath + L"</BidulePath>\r\n"
+			L"    <LastSeenAppVersion>" + s_cachedLastSeenAppVersion + L"</LastSeenAppVersion>\r\n"
+			L"    <BidulePath>" + s_cachedBidulePath + L"</BidulePath>\r\n"
             L"    <BiduleCloseOnUnload>" + std::to_wstring(s_cachedBiduleCloseOnUnload ? 1 : 0) + L"</BiduleCloseOnUnload>\r\n"
 			L"    <ActiveSensingEnabled>" + std::to_wstring(g_activeSensingEnabled.load() ? 1 : 0) + L"</ActiveSensingEnabled>\r\n"
 			L"    <ActiveSensingOutput>" + g_activeSensingOutputName + L"</ActiveSensingOutput>\r\n"
@@ -2871,6 +2878,75 @@ bool SaveCheckForUpdateOnStart(bool enabled)
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
     return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, enabled, devEnabled);
+}
+
+bool LoadLastSeenAppVersion(std::wstring& version)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    if (!TryGetTagStringValue(optionsSection, L"<LastSeenAppVersion>", L"</LastSeenAppVersion>", version))
+    {
+        version.clear();
+        return true;
+    }
+
+    return true;
+}
+
+bool SaveLastSeenAppVersion(const std::wstring& version)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    const std::wstring openTag = L"<LastSeenAppVersion>";
+    const std::wstring closeTag = L"</LastSeenAppVersion>";
+    const std::wstring replacement = openTag + version + closeTag;
+
+    size_t start = xml.find(openTag);
+    if (start != std::wstring::npos)
+    {
+        size_t end = xml.find(closeTag, start + openTag.size());
+        if (end == std::wstring::npos)
+            return false;
+        end += closeTag.size();
+        xml.replace(start, end - start, replacement);
+    }
+    else
+    {
+        const std::wstring optionsClose = L"</Options>";
+        size_t optionsPos = xml.find(optionsClose);
+        if (optionsPos == std::wstring::npos)
+            return false;
+
+        std::wstring insertion = L"    " + replacement + L"\r\n";
+        xml.insert(optionsPos, insertion);
+    }
+
+    int utf8Size = WideCharToMultiByte(CP_UTF8, 0, xml.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Size <= 0)
+        return false;
+
+    std::string utf8(utf8Size - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, xml.c_str(), -1, utf8.data(), utf8Size, nullptr, nullptr);
+
+    std::wstring settingsFile = GetSettingsFilePath();
+    HANDLE fileHandle = CreateFileW(settingsFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fileHandle == INVALID_HANDLE_VALUE)
+        return false;
+
+    DWORD bytesWritten = 0;
+    BOOL ok = WriteFile(fileHandle, utf8.data(), static_cast<DWORD>(utf8.size()), &bytesWritten, nullptr);
+    CloseHandle(fileHandle);
+
+    return ok != FALSE && bytesWritten == static_cast<DWORD>(utf8.size());
 }
 
 bool LoadActiveSensingEnabled(bool& enabled)

@@ -7,6 +7,7 @@
 #include "AutoUpdate.h"
 #include "StreamDeck_profiler.h"
 #include "Midi2Endpoint.h"
+#include "Version.h"
 #include <tlhelp32.h>
 #include <cwchar>
 #include <windows.h>
@@ -211,6 +212,25 @@ if (FAILED(hr))
 		return 0;
 
 	{
+		std::wstring currentVersion =
+			std::to_wstring(APP_VERSION_MAJOR) + L"." +
+			std::to_wstring(APP_VERSION_MINOR) + L"." +
+			std::to_wstring(APP_VERSION_PATCH);
+
+		std::wstring lastSeenVersion;
+		LoadLastSeenAppVersion(lastSeenVersion);
+		if (lastSeenVersion != currentVersion)
+		{
+			std::wstring whatsNew =
+				L"What's new in " + currentVersion + L":\n\n"
+				L"- Process Manager service now auto-starts when needed.\n"
+				L"- Hauptwerk priority policy: REALTIME only when an organ is loaded; HIGH in standby.\n"
+				L"- Improved Process Manager diagnostics in startup logs.\n"
+				L"- More robust bridge-to-service pipe connectivity and retries.";
+			MessageBoxW(hWnd, whatsNew.c_str(), L"AhlbornBridge - What's New", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+			SaveLastSeenAppVersion(currentVersion);
+		}
+
 		// First launch: if no MIDI input device is configured yet, open
 		// Settings automatically so the user can pick the correct ports.
 		UINT dummyId = 0;
