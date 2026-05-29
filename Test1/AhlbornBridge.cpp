@@ -153,21 +153,31 @@ if (FAILED(hr))
 	DetectBiduleExePath();
 
 	// Start Stream Deck pipe server AFTER MIDI init and first-launch wizard are complete,
-	// and only if Stream Deck is actually installed on this system.
+	// and only if Stream Deck is actually installed on this system and the user has enabled it.
 	{
-		wchar_t sdPluginPath[MAX_PATH] = {};
-		if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, sdPluginPath)))
+		bool pipeServerEnabled = true;
+		LoadStreamDeckPipeServerEnabled(pipeServerEnabled);
+
+		if (pipeServerEnabled)
 		{
-			std::wstring sdPath = std::wstring(sdPluginPath) + L"\\Elgato\\StreamDeck";
-			DWORD attr = GetFileAttributesW(sdPath.c_str());
-			if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+			wchar_t sdPluginPath[MAX_PATH] = {};
+			if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, sdPluginPath)))
 			{
-				StartStreamDeckPipeServer();
+				std::wstring sdPath = std::wstring(sdPluginPath) + L"\\Elgato\\StreamDeck";
+				DWORD attr = GetFileAttributesW(sdPath.c_str());
+				if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+				{
+					StartStreamDeckPipeServer();
+				}
+				else
+				{
+					printf("[Startup] Stream Deck not detected — pipe server not started.\n");
+				}
 			}
-			else
-			{
-				printf("[Startup] Stream Deck not detected — pipe server not started.\n");
-			}
+		}
+		else
+		{
+			printf("[Startup] Stream Deck pipe server disabled in settings.\n");
 		}
 	}
 

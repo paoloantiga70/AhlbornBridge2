@@ -45,6 +45,7 @@ static HWND g_biduleCloseOnUnloadCheckHwnd = nullptr;
 static HWND g_biduleOscAddressEditHwnd = nullptr;
 static HWND g_biduleOscValueEditHwnd = nullptr;
 static HWND g_biduleOscPortEditHwnd = nullptr;
+static HWND g_sdPipeServerCheckHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -57,6 +58,7 @@ constexpr int kCheckForUpdateOnStartCheckId = 203;
 constexpr int kSdSendButtonId = 304;
 constexpr int kSdPluginUpdateButtonId = 305;
 constexpr int kSdSwitchesProfileButtonId = 306;
+constexpr int kSdPipeServerCheckId = 307;
 constexpr int kMainWindowBehaviorComboId = 401;
 constexpr int kMainDebugConsoleComboId = 402;
 constexpr int kActiveSensingCheckId = 403;
@@ -104,6 +106,17 @@ namespace
             LoadBiduleCloseOnUnload(closeOnUnload);
             SendMessageW(g_biduleCloseOnUnloadCheckHwnd, BM_SETCHECK,
                 closeOnUnload ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+    }
+
+    void RefreshStreamDeckSettingsUI()
+    {
+        if (g_sdPipeServerCheckHwnd)
+        {
+            bool pipeServerEnabled = true;
+            LoadStreamDeckPipeServerEnabled(pipeServerEnabled);
+            SendMessageW(g_sdPipeServerCheckHwnd, BM_SETCHECK,
+                pipeServerEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
         }
     }
 
@@ -586,6 +599,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(L"BUTTON", L"Check for Update",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 22, 176, 140, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdPluginUpdateButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Pipe Server Settings", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 204, 300, 60, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            g_sdPipeServerCheckHwnd = CreateWindowW(L"BUTTON", L"Enable Stream Deck pipe server",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                22, 228, 270, 20, g_settingsStreamDeckPageHwnd, (HMENU)kSdPipeServerCheckId, nullptr, nullptr);
         }
 
         {
@@ -1039,6 +1059,19 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CheckForPluginUpdateInteractive(hWnd);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdPipeServerCheckId)
+        {
+            BOOL isChecked = SendMessage(g_sdPipeServerCheckHwnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool enabled = isChecked != FALSE;
+            SaveStreamDeckPipeServerEnabled(enabled);
+
+            if (enabled)
+                StartStreamDeckPipeServer();
+            else
+                StopStreamDeckPipeServer();
+
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkSaveAudioAssignmentButtonId)
         {
             if (!g_hauptwerkOrganListHwnd || !g_hauptwerkAudioDeviceComboHwnd)
@@ -1226,6 +1259,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             if (g_settingsStreamDeckPageHwnd)
             {
                 ShowWindow(g_settingsStreamDeckPageHwnd, sel == 5 ? SW_SHOW : SW_HIDE);
+                if (sel == 5)
+                    RefreshStreamDeckSettingsUI();
             }
             if (g_settingsAboutPageHwnd)
             {
@@ -1268,6 +1303,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_hauptwerkAudioDeviceComboHwnd = nullptr;
         g_bidulePathEditHwnd = nullptr;
         g_biduleCloseOnUnloadCheckHwnd = nullptr;
+        g_sdPipeServerCheckHwnd = nullptr;
         g_biduleOscAddressEditHwnd = nullptr;
         g_biduleOscValueEditHwnd = nullptr;
         g_biduleOscPortEditHwnd = nullptr;

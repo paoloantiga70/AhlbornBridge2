@@ -82,6 +82,7 @@ namespace
     std::wstring s_cachedStreamDeckMidiIn;
     std::wstring s_cachedFixedHauptwerkOutput;
     std::wstring s_cachedOrganSwitchStates;
+    bool s_cachedStreamDeckPipeServerEnabled = true;
     bool s_streamDeckSettingsLoaded = false;
 
     std::wstring s_cachedBidulePath;
@@ -1086,6 +1087,11 @@ namespace
 		TryGetTagStringValue(section, L"<MidiOut>", L"</MidiOut>", s_cachedStreamDeckMidiOut);
 		TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", s_cachedStreamDeckMidiIn);
 		TryGetTagStringValue(section, L"<FixedHauptwerkOutput>", L"</FixedHauptwerkOutput>", s_cachedFixedHauptwerkOutput);
+		{
+			std::wstring pipeServerEnabledStr;
+			if (TryGetTagStringValue(section, L"<PipeServerEnabled>", L"</PipeServerEnabled>", pipeServerEnabledStr))
+				s_cachedStreamDeckPipeServerEnabled = (pipeServerEnabledStr != L"0");
+		}
 		std::wstring switchStatesSection;
 		if (TryGetSection(section, L"OrganSwitchStates", switchStatesSection))
 		{
@@ -1347,6 +1353,7 @@ namespace
 				L"    <CC>" + s_cachedStreamDeckCC + L"</CC>\r\n"
 				L"    <MidiOut>" + s_cachedStreamDeckMidiOut + L"</MidiOut>\r\n"
 				L"    <MidiIn>" + s_cachedStreamDeckMidiIn + L"</MidiIn>\r\n"
+				L"    <PipeServerEnabled>" + std::to_wstring(s_cachedStreamDeckPipeServerEnabled ? 1 : 0) + L"</PipeServerEnabled>\r\n"
 			L"    <FixedHauptwerkOutput>" + s_cachedFixedHauptwerkOutput + L"</FixedHauptwerkOutput>\r\n"
 			L"    <AhlbornSwitches>\r\n"
 				+ ahlbornSwitches + L"\r\n"
@@ -4342,5 +4349,45 @@ bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& 
     ccNumber = static_cast<int>(cc);
     TryGetTagStringValue(section, L"<MidiOut>", L"</MidiOut>", midiOut);
     TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", midiIn);
+    return true;
+}
+
+bool SaveStreamDeckPipeServerEnabled(bool enabled)
+{
+    s_cachedStreamDeckPipeServerEnabled = enabled;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadStreamDeckPipeServerEnabled(bool& enabled)
+{
+    EnsureStreamDeckSettingsLoaded();
+    enabled = s_cachedStreamDeckPipeServerEnabled;
     return true;
 }

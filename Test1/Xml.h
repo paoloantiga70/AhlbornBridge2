@@ -144,6 +144,8 @@ bool SaveMidiOutput2DeviceEnabled(bool enabled);
 
 bool SaveStreamDeckSettings(int ccNumber, const std::wstring& midiOut, const std::wstring& midiIn);
 bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& midiIn);
+bool SaveStreamDeckPipeServerEnabled(bool enabled);
+bool LoadStreamDeckPipeServerEnabled(bool& enabled);
 
 // Returns the path to the AhlbornBridge2 settings directory in the current user's AppData\Roaming.
 // Always use this instead of hardcoded paths so it works correctly on any user account.

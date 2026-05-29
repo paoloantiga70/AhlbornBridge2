@@ -21,6 +21,8 @@ CRITICAL_SECTION g_midiOutLock;
 // Dynamic multi-device lists (protected by g_midiOutLock for outputs)
 static std::vector<HMIDIIN>  g_midiIns;
 static std::vector<HMIDIOUT> g_midiOuts;
+static std::atomic<bool> g_midiMonitorEnabled{ true };
+static std::atomic<bool> g_midiMonitorFilterFeEnabled{ true };
 
 // Per-slot last-message timestamp for activity indicators.
 // Index matches the slot order: 0 = hMidiIn, 1 = hMidiIn2, 2+ = g_midiIns extras.
@@ -69,6 +71,90 @@ namespace
     std::wstring GetInstalledOrganOutputDeviceName(int installedOrganIndex);
     bool ShouldUseBiduleForInstalledOrgan(int installedOrganIndex);
     void CloseBiduleIfConfigured();
+
+    static std::wstring MidiTypeToString(uint8_t status, uint8_t data2)
+    {
+        const uint8_t type = status & 0xF0;
+        switch (type)
+        {
+        case 0x80: return L"NoteOff";
+        case 0x90: return data2 == 0 ? L"NoteOff" : L"NoteOn";
+        case 0xA0: return L"PolyAftertouch";
+        case 0xB0: return L"ControlChange";
+        case 0xC0: return L"ProgramChange";
+        case 0xD0: return L"ChannelAftertouch";
+        case 0xE0: return L"PitchBend";
+        default:
+            break;
+        }
+
+        if (status == ACTIVE_SENSING) return L"ActiveSensing";
+        if (status == ALL_RESET) return L"SystemReset";
+        return L"System";
+    }
+
+    static std::wstring GetMidiInDeviceName(HMIDIIN hIn)
+    {
+        if (!hIn) return L"(null)";
+        UINT id = 0;
+        MIDIINCAPSW caps{};
+        if (midiInGetID(hIn, &id) == MMSYSERR_NOERROR &&
+            midiInGetDevCapsW(id, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+        {
+            return caps.szPname;
+        }
+        return L"(unknown-in)";
+    }
+
+    static std::wstring GetMidiOutDeviceName(HMIDIOUT hOut)
+    {
+        if (!hOut) return L"(null)";
+        UINT id = 0;
+        MIDIOUTCAPSW caps{};
+        if (midiOutGetID(hOut, &id) == MMSYSERR_NOERROR &&
+            midiOutGetDevCapsW(id, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+        {
+            return caps.szPname;
+        }
+        return L"(unknown-out)";
+    }
+
+    static void LogMidiMonitorEvent(bool isInput, const std::wstring& deviceName, DWORD msg)
+    {
+        if (!g_midiMonitorEnabled.load(std::memory_order_relaxed))
+            return;
+
+        const uint8_t status = static_cast<uint8_t>(msg & 0xFF);
+        if (status == ACTIVE_SENSING && g_midiMonitorFilterFeEnabled.load(std::memory_order_relaxed))
+            return;
+
+        const uint8_t data1 = static_cast<uint8_t>((msg >> 8) & 0xFF);
+        const uint8_t data2 = static_cast<uint8_t>((msg >> 16) & 0xFF);
+        const uint8_t channel = (status & 0x0F) + 1;
+        const std::wstring type = MidiTypeToString(status, data2);
+
+        if ((status & 0xF0) >= 0x80 && (status & 0xF0) <= 0xE0)
+        {
+            printf("\n[MIDI MON][%s][%S] ch=%u type=%S status=0x%02X d1=%u d2=%u\n\n",
+                isInput ? "IN" : "OUT",
+                deviceName.c_str(),
+                static_cast<unsigned>(channel),
+                type.c_str(),
+                status,
+                static_cast<unsigned>(data1),
+                static_cast<unsigned>(data2));
+        }
+        else
+        {
+            printf("\n[MIDI MON][%s][%S] type=%S status=0x%02X d1=%u d2=%u\n\n",
+                isInput ? "IN" : "OUT",
+                deviceName.c_str(),
+                type.c_str(),
+                status,
+                static_cast<unsigned>(data1),
+                static_cast<unsigned>(data2));
+        }
+    }
 
     // ---------------------------------------------------------------
     // Lock-free SPSC ring buffer for MIDI output routing.
@@ -132,6 +218,7 @@ namespace
                     if (out != nullptr)
                     {
                         midiOutShortMsg(out, msg);
+                        LogMidiMonitorEvent(false, GetMidiOutDeviceName(out), msg);
                         if (slot < kMaxOutputSlots)
                             g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
                     }
@@ -151,6 +238,7 @@ namespace
                     if (slot >= fwdStart && out != nullptr)
                     {
                         midiOutShortMsg(out, msg);
+                        LogMidiMonitorEvent(false, GetMidiOutDeviceName(out), msg);
                         if (slot < kMaxOutputSlots)
                             g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
                     }
@@ -175,6 +263,7 @@ namespace
                 if (out != nullptr)
                 {
                     midiOutShortMsg(out, msg);
+                    LogMidiMonitorEvent(false, GetMidiOutDeviceName(out), msg);
                     if (slot < kMaxOutputSlots)
                         g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
                 }
@@ -192,6 +281,7 @@ namespace
                 if (slot >= fwdStartDrain && out != nullptr)
                 {
                     midiOutShortMsg(out, msg);
+                    LogMidiMonitorEvent(false, GetMidiOutDeviceName(out), msg);
                     if (slot < kMaxOutputSlots)
                         g_outputSlotLastMsg[slot].store(GetTickCount(), std::memory_order_relaxed);
                 }
@@ -298,6 +388,10 @@ namespace
                 midiOutClose(hOut);
                 hOut = nullptr;
                 s_activeSensingOpenedName.clear();
+            }
+            else
+            {
+                LogMidiMonitorEvent(false, GetMidiOutDeviceName(hOut), ACTIVE_SENSING);
             }
 
             Sleep(kIntervalMs);
@@ -3476,6 +3570,7 @@ void CALLBACK MidiInProc(
 	}
 
 	DWORD msg = (DWORD)dwParam1;
+	LogMidiMonitorEvent(true, GetMidiInDeviceName(hMidiIn), msg);
 
 	uint8_t status = msg & 0xFF;
 	uint8_t data1 = (msg >> 8) & 0xFF;
@@ -3575,16 +3670,6 @@ void CALLBACK MidiInProc(
 
 	uint8_t type = status & 0xF0;
 	uint8_t ch = status & 0x0F;
-
-	// For Note On/Off only print a short marker '---'
-	if (type == 0x90 || type == 0x80)
-	{
-		printf("[MIDI ACTIVITY] +%lldms ---\n", (long long)ms);
-	}
-	else
-	{
-		printf("[MIDI ACTIVITY] +%lldms status=0x%02X data1=%u data2=%u\n", (long long)ms, status, data1, data2);
-	}
 
 	switch (type)
 	{
@@ -3742,4 +3827,26 @@ void SetActiveSensingOutputName(const std::wstring& name)
 	LeaveCriticalSection(&g_activeSensingNameLock);
 	s_activeSensingReopenNeeded.store(true);
 	printf("[ActiveSensingSender] Target output changed to: [%S]\n", name.empty() ? L"Default App Loopback (A)" : name.c_str());
+}
+
+void SetMidiMonitorEnabled(bool enabled)
+{
+	g_midiMonitorEnabled.store(enabled, std::memory_order_relaxed);
+	printf("[MIDI MON] %s\n", enabled ? "enabled" : "disabled");
+}
+
+bool IsMidiMonitorEnabled()
+{
+	return g_midiMonitorEnabled.load(std::memory_order_relaxed);
+}
+
+void SetMidiMonitorFilterFeEnabled(bool enabled)
+{
+	g_midiMonitorFilterFeEnabled.store(enabled, std::memory_order_relaxed);
+	printf("[MIDI MON] FE filter %s\n", enabled ? "enabled" : "disabled");
+}
+
+bool IsMidiMonitorFilterFeEnabled()
+{
+	return g_midiMonitorFilterFeEnabled.load(std::memory_order_relaxed);
 }

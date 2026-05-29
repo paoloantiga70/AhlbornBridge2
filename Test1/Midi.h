@@ -75,6 +75,12 @@ bool IsOutputChannelActive(int ch);
 void ClearOutputNotes();
 // Enqueue a raw MIDI message for the output worker thread.
 bool EnqueueMidiOutMessage(DWORD msg);
+// Enable/disable verbose MIDI monitor tracing on debug console.
+void SetMidiMonitorEnabled(bool enabled);
+bool IsMidiMonitorEnabled();
+// Enable/disable Active Sensing (0xFE) filtering in MIDI monitor logs.
+void SetMidiMonitorFilterFeEnabled(bool enabled);
+bool IsMidiMonitorFilterFeEnabled();
 // Set the output device name used by the Active Sensing sender; empty = use default "Default App Loopback (A)".
 void SetActiveSensingOutputName(const std::wstring& name);
 // Request the tray icon to enter the "starting Hauptwerk" flashing state.
