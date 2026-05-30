@@ -231,12 +231,14 @@ if (FAILED(hr))
 			SaveLastSeenAppVersion(currentVersion);
 		}
 
-		// First launch: if no MIDI input device is configured yet, open
-		// Settings automatically so the user can pick the correct ports.
-		UINT dummyId = 0;
-		if (!LoadSelectedDeviceId(dummyId))
+		// First launch only: if Settings.xml does not exist yet, open Settings
+		// so the user can pick the correct MIDI ports.
+		std::wstring settingsPath = GetSettingsDirPath() + L"\\Settings.xml";
+		DWORD attrs = GetFileAttributesW(settingsPath.c_str());
+		bool settingsFileExists = (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY));
+		if (!settingsFileExists)
 		{
-			printf("No MIDI device configured in Settings.xml. Opening Settings window.\n");
+			printf("Settings.xml not found (first launch). Opening Settings window.\n");
 			ShowSettingsWindow(hInstance, hWnd);
 		}
 

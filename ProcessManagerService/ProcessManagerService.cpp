@@ -358,8 +358,18 @@ namespace
 			return false;
 		}
 
+		// Send stop and wait up to 10 s for the service to actually stop
 		SERVICE_STATUS status{};
 		ControlService(service, SERVICE_CONTROL_STOP, &status);
+
+		for (int i = 0; i < 100; ++i)
+		{
+			if (!QueryServiceStatus(service, &status))
+				break;
+			if (status.dwCurrentState == SERVICE_STOPPED)
+				break;
+			Sleep(100);
+		}
 
 		bool deleted = DeleteService(service) != FALSE;
 

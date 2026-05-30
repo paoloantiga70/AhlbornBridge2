@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -171,7 +171,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <PostBuildEvent>
-      <Command>powershell -NoProfile -Command "$v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern '#define APP_VERSION \"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\"" &amp; if exist "$(OutDir)Icons" (if not exist "%APPDATA%\AhlbornBridge\Icons" mkdir "%APPDATA%\AhlbornBridge\Icons" &amp; xcopy /E /I /Y "$(OutDir)Icons\*" "%APPDATA%\AhlbornBridge\Icons\")</Command>
+      <Command>powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern '#define APP_VERSION \"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\"; $svcRel = Resolve-Path '$(ProjectDir)..\ProcessManagerService\x64\Release\ProcessManagerService.exe' -ErrorAction Stop; $svcOutPrimary = Join-Path '$(OutDir)' 'ProcessManagerService.exe'; try { Copy-Item $svcRel $svcOutPrimary -Force; Write-Host \"Copied ProcessManagerService.exe to $svcOutPrimary\" } catch { Write-Warning \"Could not copy to $svcOutPrimary (locked): $_\" }; $svcOutRoot = Join-Path '$(ProjectDir)..\x64\Release' 'ProcessManagerService.exe'; New-Item -ItemType Directory -Path (Split-Path $svcOutRoot -Parent) -Force | Out-Null; try { Copy-Item $svcRel $svcOutRoot -Force; Write-Host \"Copied ProcessManagerService.exe to $svcOutRoot\" } catch { Write-Warning \"Could not copy to $svcOutRoot (locked): $_\" };" &amp; if exist "$(OutDir)Icons" (if not exist "%APPDATA%\AhlbornBridge\Icons" mkdir "%APPDATA%\AhlbornBridge\Icons" &amp; xcopy /E /I /Y "$(OutDir)Icons\*" "%APPDATA%\AhlbornBridge\Icons\")</Command>
     </PostBuildEvent>
     <Link>
       <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>

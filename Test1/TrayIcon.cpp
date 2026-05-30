@@ -46,6 +46,8 @@ static HWND g_biduleOscAddressEditHwnd = nullptr;
 static HWND g_biduleOscValueEditHwnd = nullptr;
 static HWND g_biduleOscPortEditHwnd = nullptr;
 static HWND g_sdPipeServerCheckHwnd = nullptr;
+static HWND g_settingsProcessMgrPageHwnd = nullptr;
+static HWND g_processMgrStatusTextHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -73,6 +75,10 @@ constexpr int kBiduleBrowseButtonId = 601;
 constexpr int kBiduleAutoDetectButtonId = 602;
 constexpr int kBiduleCloseOnUnloadCheckId = 603;
 constexpr int kBiduleOscSendButtonId = 604;
+constexpr int kProcessMgrStartButtonId   = 701;
+constexpr int kProcessMgrStopButtonId    = 702;
+constexpr int kProcessMgrUninstallButtonId = 703;
+constexpr int kProcessMgrRefreshButtonId = 704;
 
 namespace
 {
@@ -516,8 +522,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         TabCtrl_InsertItem(g_settingsTabHwnd, 4, &tabItem);
         tabItem.pszText = const_cast<wchar_t*>(L"Stream Deck");
         TabCtrl_InsertItem(g_settingsTabHwnd, 5, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        tabItem.pszText = const_cast<wchar_t*>(L"Process Mgr");
         TabCtrl_InsertItem(g_settingsTabHwnd, 6, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        TabCtrl_InsertItem(g_settingsTabHwnd, 7, &tabItem);
 
         RECT tabRect = {};
         GetClientRect(g_settingsTabHwnd, &tabRect);
@@ -558,6 +566,50 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             tabRect.left, tabRect.top,
             tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
             hWnd, nullptr, nullptr, nullptr);
+
+        g_settingsProcessMgrPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
+            tabRect.left, tabRect.top,
+            tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+            hWnd, nullptr, nullptr, nullptr);
+
+        // --- Process Manager page controls ---
+        {
+            CreateWindowW(L"BUTTON", L"Process Manager Service", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 740, 160, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"AhlbornBridge Process Manager controls Hauptwerk process priority (REALTIME when organ is loaded).",
+                WS_CHILD | WS_VISIBLE,
+                24, 32, 700, 18, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", nullptr,
+                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                24, 58, 700, 2, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Service status:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 74, 140, 20, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            g_processMgrStatusTextHwnd = CreateWindowW(L"STATIC", L"...",
+                WS_CHILD | WS_VISIBLE,
+                174, 74, 400, 20, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Refresh Status",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                174, 104, 120, 24, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrRefreshButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Start Service",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                310, 104, 120, 24, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrStartButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Stop Service",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                446, 104, 120, 24, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrStopButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Uninstall Service",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                582, 104, 140, 24, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrUninstallButtonId, nullptr, nullptr);
+        }
 
         // --- Stream Deck page controls ---
         {
@@ -1217,6 +1269,194 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 MessageBoxW(hWnd, L"Failed to send OSC command.", L"Bidule OSC", MB_OK | MB_ICONWARNING);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kProcessMgrRefreshButtonId)
+        {
+            if (g_processMgrStatusTextHwnd)
+            {
+                bool installed = false;
+                SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+                if (scm)
+                {
+                    SC_HANDLE svc = OpenServiceW(scm, L"AhlbornBridgeProcessManager",
+                        SERVICE_QUERY_STATUS);
+                    if (svc)
+                    {
+                        installed = true;
+                        SERVICE_STATUS ss = {};
+                        QueryServiceStatus(svc, &ss);
+                        const wchar_t* state = L"Unknown";
+                        switch (ss.dwCurrentState)
+                        {
+                        case SERVICE_RUNNING:       state = L"Running"; break;
+                        case SERVICE_STOPPED:       state = L"Stopped"; break;
+                        case SERVICE_START_PENDING: state = L"Starting..."; break;
+                        case SERVICE_STOP_PENDING:  state = L"Stopping..."; break;
+                        case SERVICE_PAUSED:        state = L"Paused"; break;
+                        }
+                        SetWindowTextW(g_processMgrStatusTextHwnd, state);
+                        CloseServiceHandle(svc);
+                    }
+                    else
+                    {
+                        SetWindowTextW(g_processMgrStatusTextHwnd, L"Not installed");
+                    }
+                    CloseServiceHandle(scm);
+                }
+                else
+                {
+                    SetWindowTextW(g_processMgrStatusTextHwnd, L"Cannot open SCM");
+                }
+
+                // Update the install/uninstall button label to reflect current state
+                HWND hBtn = GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrUninstallButtonId);
+                if (hBtn)
+                    SetWindowTextW(hBtn, installed ? L"Uninstall Service" : L"Install Service");
+            }
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kProcessMgrStartButtonId)
+        {
+            // Check if service is already registered (no elevation needed for query)
+            bool alreadyInstalled = false;
+            {
+                SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+                if (scm)
+                {
+                    SC_HANDLE svc = OpenServiceW(scm, L"AhlbornBridgeProcessManager", SERVICE_QUERY_STATUS);
+                    if (svc) { alreadyInstalled = true; CloseServiceHandle(svc); }
+                    CloseServiceHandle(scm);
+                }
+            }
+
+            SHELLEXECUTEINFOW sei = {};
+            sei.cbSize = sizeof(sei);
+            sei.fMask  = SEE_MASK_NOCLOSEPROCESS;
+            sei.lpVerb = L"runas";
+            sei.nShow  = SW_HIDE;
+
+            std::wstring svcExe;
+            if (alreadyInstalled)
+            {
+                // Service registered but stopped – just start it
+                sei.lpFile       = L"sc.exe";
+                sei.lpParameters = L"start AhlbornBridgeProcessManager";
+            }
+            else
+            {
+                // Not installed yet – install (which also starts it)
+                wchar_t exePath[MAX_PATH] = {};
+                GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+                wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+                if (lastSlash) *lastSlash = L'\0';
+                svcExe           = std::wstring(exePath) + L"\\ProcessManagerService.exe";
+                sei.lpFile       = svcExe.c_str();
+                sei.lpParameters = L"--install";
+            }
+
+            if (!ShellExecuteExW(&sei))
+            {
+                DWORD err = GetLastError();
+                if (err != ERROR_CANCELLED)
+                    MessageBoxW(hWnd, L"Could not start the service (elevation required).",
+                        L"Process Manager", MB_OK | MB_ICONERROR);
+            }
+            else
+            {
+                if (sei.hProcess) { WaitForSingleObject(sei.hProcess, 5000); CloseHandle(sei.hProcess); }
+                Sleep(500);
+                SendMessageW(hWnd, WM_COMMAND,
+                    MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
+                    reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
+            }
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kProcessMgrStopButtonId)
+        {
+            // Stopping requires admin; use sc.exe with runas elevation
+            SHELLEXECUTEINFOW sei = {};
+            sei.cbSize    = sizeof(sei);
+            sei.fMask     = SEE_MASK_NOCLOSEPROCESS;
+            sei.lpVerb    = L"runas";
+            sei.lpFile    = L"sc.exe";
+            sei.lpParameters = L"stop AhlbornBridgeProcessManager";
+            sei.nShow     = SW_HIDE;
+            if (!ShellExecuteExW(&sei))
+            {
+                DWORD err = GetLastError();
+                if (err != ERROR_CANCELLED)
+                    MessageBoxW(hWnd, L"Could not stop the service (elevation required).",
+                        L"Process Manager", MB_OK | MB_ICONERROR);
+            }
+            else
+            {
+                if (sei.hProcess) { WaitForSingleObject(sei.hProcess, 15000); CloseHandle(sei.hProcess); }
+                Sleep(1000);
+                SendMessageW(hWnd, WM_COMMAND,
+                    MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
+                    reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
+            }
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kProcessMgrUninstallButtonId)
+        {
+            // Determine current state
+            bool installed = false;
+            {
+                SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+                if (scm)
+                {
+                    SC_HANDLE svc = OpenServiceW(scm, L"AhlbornBridgeProcessManager", SERVICE_QUERY_STATUS);
+                    if (svc) { installed = true; CloseServiceHandle(svc); }
+                    CloseServiceHandle(scm);
+                }
+            }
+
+            wchar_t exePath[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+            wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+            if (lastSlash) *lastSlash = L'\0';
+            std::wstring svcExe = std::wstring(exePath) + L"\\ProcessManagerService.exe";
+
+            SHELLEXECUTEINFOW sei = {};
+            sei.cbSize = sizeof(sei);
+            sei.fMask  = SEE_MASK_NOCLOSEPROCESS;
+            sei.lpVerb = L"runas";
+            sei.lpFile = svcExe.c_str();
+            sei.nShow  = SW_HIDE;
+
+            if (installed)
+            {
+                int answer = MessageBoxW(hWnd,
+                    L"Uninstall the AhlbornBridge Process Manager service?\n\n"
+                    L"Hauptwerk will no longer run at REALTIME priority.",
+                    L"Process Manager", MB_YESNO | MB_ICONQUESTION);
+                if (answer != IDYES) return 0;
+                sei.lpParameters = L"--uninstall";
+            }
+            else
+            {
+                sei.lpParameters = L"--install";
+            }
+
+            if (!ShellExecuteExW(&sei))
+            {
+                DWORD err = GetLastError();
+                if (err != ERROR_CANCELLED)
+                    MessageBoxW(hWnd,
+                        installed ? L"Could not uninstall the service (elevation required)."
+                                  : L"Could not install the service (elevation required).",
+                        L"Process Manager", MB_OK | MB_ICONERROR);
+            }
+            else
+            {
+                if (sei.hProcess) { WaitForSingleObject(sei.hProcess, 15000); CloseHandle(sei.hProcess); }
+                Sleep(1000);
+                SendMessageW(hWnd, WM_COMMAND,
+                    MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
+                    reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
+            }
+            return 0;
+        }
         break;
     }
     case WM_DEVICECHANGE:
@@ -1262,9 +1502,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 if (sel == 5)
                     RefreshStreamDeckSettingsUI();
             }
+            if (g_settingsProcessMgrPageHwnd)
+            {
+                ShowWindow(g_settingsProcessMgrPageHwnd, sel == 6 ? SW_SHOW : SW_HIDE);
+                if (sel == 6)
+                    SendMessageW(hWnd, WM_COMMAND,
+                        MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
+                        reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
+            }
             if (g_settingsAboutPageHwnd)
             {
-                ShowWindow(g_settingsAboutPageHwnd, sel == 6 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_settingsAboutPageHwnd, sel == 7 ? SW_SHOW : SW_HIDE);
             }
             if (sel == 2)
             {

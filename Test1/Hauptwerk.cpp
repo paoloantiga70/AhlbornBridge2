@@ -255,6 +255,56 @@ namespace
         return input.substr(start, end - start);
     }
 
+    bool TryInstallProcessManagerService()
+    {
+        wchar_t modulePath[MAX_PATH] = {};
+        if (!GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(_countof(modulePath))))
+            return false;
+
+        std::wstring serviceExePath(modulePath);
+        size_t lastSlash = serviceExePath.find_last_of(L"\\/");
+        if (lastSlash == std::wstring::npos)
+            return false;
+
+        serviceExePath = serviceExePath.substr(0, lastSlash + 1) + L"ProcessManagerService.exe";
+        DWORD attrs = GetFileAttributesW(serviceExePath.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            printf("[ProcessManager] Service installer executable not found: %S\n", serviceExePath.c_str());
+            return false;
+        }
+
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = serviceExePath.c_str();
+        sei.lpParameters = L"--install";
+        sei.nShow = SW_HIDE;
+
+        if (!ShellExecuteExW(&sei))
+        {
+            printf("[ProcessManager] Service install launch failed (err=%lu).\n", GetLastError());
+            return false;
+        }
+
+        if (sei.hProcess)
+        {
+            WaitForSingleObject(sei.hProcess, 15000);
+            DWORD exitCode = 1;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            if (exitCode != 0)
+            {
+                printf("[ProcessManager] Service install returned exit code %lu.\n", exitCode);
+                return false;
+            }
+        }
+
+        printf("[ProcessManager] Service install completed.\n");
+        return true;
+    }
+
     bool EnsureProcessManagerServiceRunning()
     {
         SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
@@ -267,9 +317,20 @@ namespace
         SC_HANDLE service = OpenServiceW(scm, L"AhlbornBridgeProcessManager", SERVICE_QUERY_STATUS | SERVICE_START);
         if (!service)
         {
-            printf("[ProcessManager] OpenService failed (err=%lu).\n", GetLastError());
-            CloseServiceHandle(scm);
-            return false;
+            DWORD err = GetLastError();
+            if (err == ERROR_SERVICE_DOES_NOT_EXIST)
+            {
+                printf("[ProcessManager] OpenService failed (err=%lu): service not installed. Attempting self-install...\n", err);
+                if (TryInstallProcessManagerService())
+                    service = OpenServiceW(scm, L"AhlbornBridgeProcessManager", SERVICE_QUERY_STATUS | SERVICE_START);
+            }
+
+            if (!service)
+            {
+                printf("[ProcessManager] OpenService failed (err=%lu).\n", GetLastError());
+                CloseServiceHandle(scm);
+                return false;
+            }
         }
 
         SERVICE_STATUS_PROCESS status{};

@@ -131,12 +131,23 @@ if (Get-Process AhlbornBridgeSD -ErrorAction SilentlyContinue) {
     Start-Sleep -Milliseconds 500
 }
 
-Copy-PluginPackage -SourceBase $srcBase -BuiltExe $builtExe -DestinationRoot $dest
-Write-Host "Deployed plugin v$v to $dest"
+$deployed = $false
+try {
+    Copy-PluginPackage -SourceBase $srcBase -BuiltExe $builtExe -DestinationRoot $dest
+    Write-Host "Deployed plugin v$v to $dest"
+    $deployed = $true
+}
+catch {
+    Write-Warning "Local Stream Deck deployment skipped: $($_.Exception.Message)"
+}
 
 if ($wasRunning -and $sdPath -and (Test-Path $sdPath)) {
     Write-Host "Restarting Stream Deck from $sdPath"
     Start-Process $sdPath
+}
+
+if (-not $deployed) {
+    Write-Host 'Build artifacts were created successfully; only local plugin copy was skipped.'
 }
 
 exit 0
