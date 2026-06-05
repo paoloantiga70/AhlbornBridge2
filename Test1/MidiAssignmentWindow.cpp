@@ -26,7 +26,7 @@ constexpr UINT kActivityTimerId   = 1;
 constexpr UINT kRefreshListsMsg = WM_APP + 220;
 constexpr UINT kActivityIntervalMs = 16; // ~60fps refresh
 constexpr DWORD kActivityWindowMs  = 120; // LED stays green for 120 ms after last msg
-constexpr int kInternalBridgeSectionHeight = 84;
+constexpr int kInternalBridgeSectionHeight = 110;
 constexpr int kBridgeToggleHeight = 22;
 
 enum
@@ -248,7 +248,9 @@ static void MoveSelected(HWND hSrc, bool srcHasLed, HWND hDst, bool dstHasLed)
 static bool IsInternalMidiPort(const std::wstring& name)
 {
 	return name == L"AhlbornBridge Virtual Port"
-		|| name == L"AhlbornBridge Virtual Port (B)";
+		|| name == L"AhlbornBridge Virtual Port (B)"
+		|| name == L"Hauptwerk Virtual (A)"
+		|| name == L"Hauptwerk Virtual (B)";
 }
 
 static bool IsFixedAssignedOutputName(const std::wstring& name)
@@ -481,6 +483,10 @@ static void PopulateInternalBridgePortsView(HWND hLv)
 			role = L"AhlbornBridge MIDI Output (BRIDGE)";
 		else if (name == L"AhlbornBridge Virtual Port (B)")
 			role = L"Hauptwerk MIDI Input (BRIDGE)";
+		else if (name == L"Hauptwerk Virtual (A)")
+			role = L"Hauptwerk MIDI Output monitor (A)";
+		else if (name == L"Hauptwerk Virtual (B)")
+			role = L"Hauptwerk MIDI Output monitor (B)";
 		ListView_SetItemText(hLv, idx, 2, const_cast<wchar_t*>(role));
 	}
 }
@@ -507,6 +513,14 @@ static void RefreshInternalBridgePortLeds(HWND hLv)
 			DWORD mirrored = GetMidiOutputLastMsgByDeviceName(L"AhlbornBridge Virtual Port");
 			if (mirrored > last)
 				last = mirrored;
+		}
+		// Hauptwerk Virtual (A) and (B) share the same physical traffic:
+		// Hauptwerk writes to (A) and the bridge reads from (B).
+		// Both LEDs light up together using the (B) receive timestamp.
+		if (name == L"Hauptwerk Virtual (A)" || name == L"Hauptwerk Virtual (B)")
+		{
+			DWORD hwTick = GetHauptwerkVirtualBLastMsgTime();
+			if (hwTick > last) last = hwTick;
 		}
 		int imgIdx = (last != 0 && (now - last) < kActivityWindowMs) ? 1 : 0;
 		LVITEMW lvi = {};

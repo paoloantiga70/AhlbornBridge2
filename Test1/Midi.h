@@ -56,6 +56,10 @@ DWORD GetMidiOutputSlotLastMsg(int slotIndex);
 // that matches the given device name. Returns 0 if not open or never active.
 DWORD GetMidiInputLastMsgByDeviceName(const std::wstring& deviceName);
 DWORD GetMidiOutputLastMsgByDeviceName(const std::wstring& deviceName);
+// Returns the GetTickCount() timestamp of the last channel-voice message
+// received on "Hauptwerk Virtual (B)". Used for the activity LED in the
+// internal bridge ports view.  Returns 0 if no message has arrived yet.
+DWORD GetHauptwerkVirtualBLastMsgTime();
 void RefreshMidiDeviceStatus();
 void CleanupMidiLocks();
 void CALLBACK MidiInProc(

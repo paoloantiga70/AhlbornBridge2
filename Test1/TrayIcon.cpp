@@ -48,6 +48,8 @@ static HWND g_biduleOscPortEditHwnd = nullptr;
 static HWND g_sdPipeServerCheckHwnd = nullptr;
 static HWND g_settingsProcessMgrPageHwnd = nullptr;
 static HWND g_processMgrStatusTextHwnd = nullptr;
+static HWND g_processMgrIdlePriorityComboHwnd   = nullptr;
+static HWND g_processMgrLoadedPriorityComboHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -79,6 +81,8 @@ constexpr int kProcessMgrStartButtonId   = 701;
 constexpr int kProcessMgrStopButtonId    = 702;
 constexpr int kProcessMgrUninstallButtonId = 703;
 constexpr int kProcessMgrRefreshButtonId = 704;
+constexpr int kProcessMgrIdlePriorityComboId   = 705;
+constexpr int kProcessMgrLoadedPriorityComboId = 706;
 
 namespace
 {
@@ -461,6 +465,10 @@ void PopulateMidiInputs(HWND hCombo)
     {
         if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
         {
+            std::wstring n = caps.szPname;
+            if (n == L"AhlbornBridge Virtual Port" || n == L"AhlbornBridge Virtual Port (B)"
+                || n == L"Hauptwerk Virtual (A)" || n == L"Hauptwerk Virtual (B)")
+                continue;
             SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)caps.szPname);
         }
     }
@@ -485,6 +493,10 @@ void PopulateMidiOutputs(HWND hCombo)
     {
         if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
         {
+            std::wstring n = caps.szPname;
+            if (n == L"AhlbornBridge Virtual Port" || n == L"AhlbornBridge Virtual Port (B)"
+                || n == L"Hauptwerk Virtual (A)" || n == L"Hauptwerk Virtual (B)")
+                continue;
             SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)caps.szPname);
         }
     }
@@ -574,11 +586,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
         // --- Process Manager page controls ---
         {
+            // Service controls group
             CreateWindowW(L"BUTTON", L"Process Manager Service", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 10, 8, 740, 160, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
 
             CreateWindowW(L"STATIC",
-                L"AhlbornBridge Process Manager controls Hauptwerk process priority (REALTIME when organ is loaded).",
+                L"AhlbornBridge Process Manager controls Hauptwerk process priority.",
                 WS_CHILD | WS_VISIBLE,
                 24, 32, 700, 18, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
 
@@ -609,6 +622,51 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(L"BUTTON", L"Uninstall Service",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 582, 104, 140, 24, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrUninstallButtonId, nullptr, nullptr);
+
+            // Priority settings group
+            CreateWindowW(L"BUTTON", L"Hauptwerk Priority", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 178, 740, 100, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Idle (no organ):",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 204, 140, 20, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            g_processMgrIdlePriorityComboHwnd = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                174, 200, 160, 120, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrIdlePriorityComboId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Organ loaded:",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                24, 244, 140, 20, g_settingsProcessMgrPageHwnd, nullptr, nullptr, nullptr);
+
+            g_processMgrLoadedPriorityComboHwnd = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                174, 240, 160, 120, g_settingsProcessMgrPageHwnd, (HMENU)kProcessMgrLoadedPriorityComboId, nullptr, nullptr);
+
+            // Populate both combos with the same priority levels
+            const wchar_t* kPriorityLevels[] = { L"NORMAL", L"ABOVE_NORMAL", L"HIGH", L"REALTIME" };
+            for (const wchar_t* lvl : kPriorityLevels)
+            {
+                SendMessageW(g_processMgrIdlePriorityComboHwnd,   CB_ADDSTRING, 0, (LPARAM)lvl);
+                SendMessageW(g_processMgrLoadedPriorityComboHwnd, CB_ADDSTRING, 0, (LPARAM)lvl);
+            }
+
+            // Load persisted values and select them
+            std::wstring idlePri, loadedPri;
+            LoadHauptwerkPrioritySettings(idlePri, loadedPri);
+            auto selectCombo = [](HWND hCombo, const std::wstring& value)
+            {
+                int count = (int)SendMessageW(hCombo, CB_GETCOUNT, 0, 0);
+                for (int i = 0; i < count; ++i)
+                {
+                    wchar_t buf[32] = {};
+                    SendMessageW(hCombo, CB_GETLBTEXT, i, (LPARAM)buf);
+                    if (value == buf) { SendMessageW(hCombo, CB_SETCURSEL, i, 0); return; }
+                }
+                SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
+            };
+            selectCombo(g_processMgrIdlePriorityComboHwnd,   idlePri);
+            selectCombo(g_processMgrLoadedPriorityComboHwnd, loadedPri);
         }
 
         // --- Stream Deck page controls ---
@@ -1457,9 +1515,28 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             }
             return 0;
         }
+        // Priority combo changes — save immediately
+        if (HIWORD(wParam) == CBN_SELCHANGE &&
+            (LOWORD(wParam) == kProcessMgrIdlePriorityComboId ||
+             LOWORD(wParam) == kProcessMgrLoadedPriorityComboId))
+        {
+            auto getComboText = [](HWND hCombo) -> std::wstring
+            {
+                int sel = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
+                if (sel == CB_ERR) return L"HIGH";
+                wchar_t buf[32] = {};
+                SendMessageW(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+                return buf;
+            };
+            std::wstring idlePri   = getComboText(g_processMgrIdlePriorityComboHwnd);
+            std::wstring loadedPri = getComboText(g_processMgrLoadedPriorityComboHwnd);
+            SaveHauptwerkPrioritySettings(idlePri, loadedPri);
+            printf("[ProcessMgr] Priority settings saved: idle=%S loaded=%S\n",
+                idlePri.c_str(), loadedPri.c_str());
+            return 0;
+        }
         break;
     }
-    case WM_DEVICECHANGE:
         if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE || wParam == DBT_DEVNODES_CHANGED)
         {
             HandleMidiDeviceChange(hWnd);
@@ -1889,6 +1966,8 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		running = false;
 		StopOrganFolderWatcher();
 		StopStreamDeckPipeServer();
+		FlushOrganSwitchStatesToDisk();
+		ClosePhysicalOutputForSwitches();
 		if (hMidiIn)
 		{
 			midiInStop(hMidiIn);

@@ -26,7 +26,7 @@ if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
 }
 
 # Read version from APP_VERSION string (the single source of truth).
-$verMatch = [regex]::Match($content, '#define APP_VERSION "(\d+)\.(\d+)\.(\d+)"')
+$verMatch = [regex]::Match($content, 'APP_VERSION\s*=\s*"(\d+)\.(\d+)\.(\d+)"')
 if (-not $verMatch.Success) {
     Write-Warning "Could not parse APP_VERSION from Version.h - skipping bump."
     exit 0
@@ -49,7 +49,7 @@ $new = "$major.$minor.$patch"
 $content = $content -replace '#define APP_VERSION_MAJOR \d+', "#define APP_VERSION_MAJOR $major"
 $content = $content -replace '#define APP_VERSION_MINOR \d+', "#define APP_VERSION_MINOR $minor"
 $content = $content -replace '#define APP_VERSION_PATCH \d+', "#define APP_VERSION_PATCH $patch"
-$content = $content -replace '#define APP_VERSION ".*?"', "#define APP_VERSION ""$new"""
+$content = $content -replace '(APP_VERSION\s*=\s*)".*?"', "`$1`"$new`""
 
 # Atomic write: write to temp file first, then replace the original.
 # This prevents Version.h from being left empty if the process is interrupted.

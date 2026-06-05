@@ -81,6 +81,7 @@ bool SaveCheckForUpdateOnStart(bool enabled);
 bool LoadCheckForUpdateOnStart(bool& enabled);
 bool SaveLastSeenAppVersion(const std::wstring& version);
 bool LoadLastSeenAppVersion(std::wstring& version);
+std::wstring LoadChangelogForVersion(const std::wstring& version);
 bool SaveBidulePath(const std::wstring& path);
 bool LoadBidulePath(std::wstring& path);
 bool SaveBiduleCloseOnUnload(bool enabled);
@@ -149,6 +150,23 @@ bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& 
 bool SaveStreamDeckPipeServerEnabled(bool enabled);
 bool LoadStreamDeckPipeServerEnabled(bool& enabled);
 
+// Hauptwerk process priority settings (idle = no organ, loaded = organ loaded).
+// Priority strings: "NORMAL", "ABOVE_NORMAL", "HIGH", "REALTIME"
+bool SaveHauptwerkPrioritySettings(const std::wstring& idlePriority, const std::wstring& loadedPriority);
+bool LoadHauptwerkPrioritySettings(std::wstring& idlePriority, std::wstring& loadedPriority);
+
 // Returns the path to the AhlbornBridge2 settings directory in the current user's AppData\Roaming.
 // Always use this instead of hardcoded paths so it works correctly on any user account.
 std::wstring GetSettingsDirPath();
+
+// Freezes the in-memory switch cache so that reset CCs arriving from the
+// physical console during organ unload do not overwrite the captured state.
+// Call this immediately before triggering the organ unload sequence.
+void FreezeOrganSwitchStateForFlush();
+// Releases the freeze set by FreezeOrganSwitchStateForFlush().
+void UnfreezeOrganSwitchState();
+// Updates the in-memory switch state for an organ without writing to disk.
+// Call FlushOrganSwitchStatesToDisk() to persist.
+void UpdateInMemorySwitchState(const std::wstring& uniqueOrganId, int switchIndex, bool isOn, const std::wstring& switchName = L"");
+// Writes all in-memory switch states to Settings.xml. Call on organ unload and app shutdown.
+bool FlushOrganSwitchStatesToDisk();

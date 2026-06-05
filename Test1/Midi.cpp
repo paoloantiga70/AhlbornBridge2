@@ -24,6 +24,11 @@ static std::vector<HMIDIOUT> g_midiOuts;
 static std::atomic<bool> g_midiMonitorEnabled{ true };
 static std::atomic<bool> g_midiMonitorFilterFeEnabled{ true };
 
+// Handle for the "Hauptwerk Virtual (B)" input — mirrors Hauptwerk's own output
+// to the physical console without triggering switch-state processing.
+static HMIDIIN  g_hHwVirtualBIn = nullptr;
+static UINT     g_hwVirtualBDevIndex = UINT(-1);
+
 // Per-slot last-message timestamp for activity indicators.
 // Index matches the slot order: 0 = hMidiIn, 1 = hMidiIn2, 2+ = g_midiIns extras.
 static constexpr int kMaxInputSlots  = 16;
@@ -62,8 +67,17 @@ std::atomic<bool> g_streamDeckBiduleSplashActive{ false };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
 std::wstring g_hauptwerkOrganTitle;
 std::atomic<bool> g_autoDetectMidiSettingsActive{ false };
+// Timestamp (GetTickCount) of the last message received on "Hauptwerk Virtual (B)".
+// Updated in MidiInProc; read by RefreshInternalBridgePortLeds for the activity LED.
+static std::atomic<DWORD> g_hwVirtualBLastMsgTick{ 0 };
+
+DWORD GetHauptwerkVirtualBLastMsgTime()
+{
+    return g_hwVirtualBLastMsgTick.load(std::memory_order_relaxed);
+}
 
 void CloseHauptwerkProcess();
+void OpenHauptwerkVirtualBInput();
 
 namespace
 {
@@ -1211,6 +1225,17 @@ namespace
 						SendUnloadOrganMidiMessage();
 					}
 
+					// If the Hauptwerk Virtual (B) monitor input was not opened
+					// during startup (e.g. timing issue), retry now.
+					if (g_hHwVirtualBIn == nullptr)
+					{
+						printf("[HwVirtualB] Hauptwerk detected — retrying open of 'Hauptwerk Virtual (B)'.\n");
+						for (int attempt = 0; attempt < 4 && g_hHwVirtualBIn == nullptr; ++attempt)
+						{
+							if (attempt > 0) Sleep(250);
+							OpenHauptwerkVirtualBInput();
+						}
+					}
 				}
 			}
 			else if (std::wcsncmp(title, L"Hauptwerk -", 11) == 0)
@@ -2580,6 +2605,7 @@ static void DetectMidiInputInteractive()
         std::wstring n = caps.szPname;
         if (n.find(L"AhlbornBridge") != std::wstring::npos) continue;
         if (n.find(L"Loopback") != std::wstring::npos) continue;
+        if (n.find(L"Hauptwerk Virtual") != std::wstring::npos) continue;
         availableDevs.push_back({ i, n });
     }
 
@@ -2912,14 +2938,17 @@ static void DetectMidiInputInteractive()
 
         step(10, L"Saving MIDI assignments...");
         std::vector<std::wstring> inputNames  = { name };
-        std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port", name };
-        std::vector<std::wstring> hwOutputs   = { name };
+        std::vector<std::wstring> outputNames = { L"AhlbornBridge Virtual Port" };
+        // Save the physical device as FixedHauptwerkOutput so the bridge can
+        // mirror Hauptwerk Virtual (B) -> physical console for LED sync.
+        // Do NOT pass it as an hwOutput: WriteHauptwerkMidiConfig always sets
+        // "Hauptwerk Virtual (A)" as Hauptwerk's sole output.
         SaveAssignedMidiInputNames(inputNames);
         SaveAssignedMidiOutputNames(outputNames);
         SaveFixedHauptwerkOutputName(name);
 
         step(35, L"Writing Hauptwerk MIDI configuration...");
-        WriteHauptwerkMidiConfig(inputNames, hwOutputs);
+        WriteHauptwerkMidiConfig(inputNames, {});
 
         step(60, L"Writing Hauptwerk audio configuration...");
         WriteHauptwerkAudioConfig();
@@ -3020,11 +3049,90 @@ static void DetectMidiInputInteractive()
     }
 }
 
+// ---------------------------------------------------------------------------
+// OpenHauptwerkVirtualBInput
+// ---------------------------------------------------------------------------
+// Opens "Hauptwerk Virtual (B)" as an additional WinMM MIDI input so
+// MidiInProc can receive messages that Hauptwerk sends to its virtual output
+// and mirror them to the physical console.  Called once after
+// EnableMidi2Endpoint() has created both virtual port pairs.
+// ---------------------------------------------------------------------------
+void OpenHauptwerkVirtualBInput()
+{
+    std::wstring targetName = GetHauptwerkVirtualBDeviceName();
+    if (targetName.empty())
+        return; // MIDI 2.0 service not available or pair not created
+
+    if (g_hHwVirtualBIn != nullptr)
+        return; // already open
+
+    UINT numIn = midiInGetNumDevs();
+    printf("[HwVirtualB] Scanning %u WinMM input devices for '%S'...\n",
+        numIn, targetName.c_str());
+    for (UINT i = 0; i < numIn; ++i)
+    {
+        MIDIINCAPSW caps{};
+        if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+        {
+            printf("[HwVirtualB]   [%u] '%S'\n", i, caps.szPname);
+            if (targetName == caps.szPname)
+            {
+                HMIDIIN h = nullptr;
+                if (midiInOpen(&h, i, (DWORD_PTR)MidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
+                {
+                    midiInStart(h);
+                    g_hHwVirtualBIn      = h;
+                    g_hwVirtualBDevIndex = i;
+                    printf("[HwVirtualB] Opened '%S' (index %u) for Hauptwerk output monitoring.\n",
+                        targetName.c_str(), i);
+                }
+                else
+                {
+                    printf("[HwVirtualB] Failed to open '%S' for Hauptwerk output monitoring.\n",
+                        targetName.c_str());
+                }
+                break;
+            }
+        }
+    }
+
+    if (g_hHwVirtualBIn == nullptr)
+        printf("[HwVirtualB] Device '%S' not yet visible in WinMM (%u devices scanned).\n",
+            targetName.c_str(), numIn);
+}
+
 bool initMidiState()
 {
     InitializeCriticalSection(&g_midiOutLock);
     InitializeCriticalSection(&g_activeSensingNameLock);
     g_activeSensingNameLockInit = true;
+
+    // Create the virtual loopback endpoints BEFORE enumerating devices so that
+    // "AhlbornBridge Virtual Port" and "(B)" are already visible in the snapshot.
+    // Skip creation if the ports are already present in WinMM (e.g. left over
+    // from a previous session), to avoid a duplicate-endpoint error from the
+    // Windows MIDI Services loopback manager.
+    {
+        bool alreadyVisible = false;
+        UINT n = midiInGetNumDevs();
+        for (UINT i = 0; i < n; ++i)
+        {
+            MIDIINCAPS caps = {};
+            if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+                wcscmp(caps.szPname, L"AhlbornBridge Virtual Port") == 0)
+            { alreadyVisible = true; break; }
+        }
+        if (!alreadyVisible)
+        {
+            bool created = EnableMidi2Endpoint();
+            if (created)
+                Sleep(400); // give WinMM time to register the new virtual ports
+        }
+        else
+        {
+            printf("[Midi2] Virtual ports already visible in WinMM — skipping creation.\n");
+        }
+    }
 
     UINT numInDevs = midiInGetNumDevs();
     UINT numOutDevs = midiOutGetNumDevs();
@@ -3161,7 +3269,20 @@ bool initMidiState()
 
     printf("[initMidiState] : HAUPTWERK bridge enabled: [%s]\n\n", g_midiRouterEnabled.load() ? "true" : "false");
 
-    EnableMidi2Endpoint();
+    // EnableMidi2Endpoint was already called in the startup block above
+    // (with the alreadyVisible guard). Calling it again here would fail
+    // with "already exists" if ports were left from a previous session.
+    // Just ensure the Hauptwerk Virtual (B) monitor input is open.
+    {
+        for (int attempt = 0; attempt < 8 && g_hHwVirtualBIn == nullptr; ++attempt)
+        {
+            if (attempt > 0) Sleep(250);
+            OpenHauptwerkVirtualBInput();
+        }
+        if (g_hHwVirtualBIn == nullptr)
+            printf("[HwVirtualB] Could not open 'Hauptwerk Virtual (B)' after retries — mirror inactive.\n");
+    }
+
     RefreshSettingsFile();
     return true;
 }
@@ -3489,6 +3610,15 @@ DWORD GetMidiOutputLastMsgByDeviceName(const std::wstring& deviceName)
 
 void CleanupMidiLocks()
 {
+    // Close the Hauptwerk Virtual (B) monitor input before tearing down MIDI 2.0.
+    if (g_hHwVirtualBIn != nullptr)
+    {
+        midiInStop(g_hHwVirtualBIn);
+        midiInReset(g_hHwVirtualBIn);
+        midiInClose(g_hHwVirtualBIn);
+        g_hHwVirtualBIn    = nullptr;
+        g_hwVirtualBDevIndex = UINT(-1);
+    }
     DisableMidi2Endpoint();
     DeleteCriticalSection(&g_midiOutLock);
 }
@@ -3571,6 +3701,33 @@ void CALLBACK MidiInProc(
 
 	DWORD msg = (DWORD)dwParam1;
 	LogMidiMonitorEvent(true, GetMidiInDeviceName(hMidiIn), msg);
+
+	// -----------------------------------------------------------------------
+	// If the message comes from "Hauptwerk Virtual (B)", it is Hauptwerk's own
+	// output (e.g. stop changes driven by the virtual organ screen).
+	// Mirror it directly to the physical console output for LED sync and return
+	// — do NOT process it as console input to avoid feedback loops.
+	// -----------------------------------------------------------------------
+	if (hMidiIn == g_hHwVirtualBIn && g_hHwVirtualBIn != nullptr)
+	{
+		// Record activity timestamp for the internal bridge port LED.
+		g_hwVirtualBLastMsgTick.store(GetTickCount(), std::memory_order_relaxed);
+
+		// Filter out Active Sensing (0xFE) and System Real-Time messages —
+		// they are keep-alive signals irrelevant to console LED state.
+		uint8_t statusByte = static_cast<uint8_t>(msg & 0xFF);
+		if (statusByte < 0xF0 || statusByte == 0xF8 /* MIDI Clock */ ||
+			statusByte == 0xFE /* Active Sensing */ ||
+			statusByte == 0xFF /* System Reset */)
+		{
+			if (statusByte < 0xF0)
+				MirrorHauptwerkOutputToConsole(msg); // channel voice message — mirror it
+			// else: discard Real-Time system messages silently
+			return;
+		}
+		MirrorHauptwerkOutputToConsole(msg);
+		return;
+	}
 
 	uint8_t status = msg & 0xFF;
 	uint8_t data1 = (msg >> 8) & 0xFF;
@@ -3697,6 +3854,7 @@ void CALLBACK MidiInProc(
             if (isOrganLoaded)
             {
                 printf("[MidiInProc] : Organo caricato : eseguo Unload organ\n");
+                FreezeOrganSwitchStateForFlush();
                 g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan0);
                 break;
             }
@@ -3790,20 +3948,20 @@ void CALLBACK MidiInProc(
 						if (loadedInstalledIndex > 0)
 						{
 							std::wstring uniqueOrganId = GetInstalledOrganUniqueId(loadedInstalledIndex);
-							if (!uniqueOrganId.empty())
-								SaveOrganSwitchState(uniqueOrganId, switchIndex, true);
-						}
-						break;
-					}
-					if (s.valueOff == static_cast<int>(data2))
-					{
-						NotifyStreamDeckSwitchState(switchIndex, false);
-						int loadedInstalledIndex = g_currentLoadedInstalledOrganIndex.load();
-						if (loadedInstalledIndex > 0)
-						{
-							std::wstring uniqueOrganId = GetInstalledOrganUniqueId(loadedInstalledIndex);
-							if (!uniqueOrganId.empty())
-								SaveOrganSwitchState(uniqueOrganId, switchIndex, false);
+								if (!uniqueOrganId.empty())
+									UpdateInMemorySwitchState(uniqueOrganId, switchIndex, true, s.name);
+								}
+								break;
+							}
+							if (s.valueOff == static_cast<int>(data2))
+							{
+								NotifyStreamDeckSwitchState(switchIndex, false);
+								int loadedInstalledIndex = g_currentLoadedInstalledOrganIndex.load();
+								if (loadedInstalledIndex > 0)
+								{
+									std::wstring uniqueOrganId = GetInstalledOrganUniqueId(loadedInstalledIndex);
+									if (!uniqueOrganId.empty())
+										UpdateInMemorySwitchState(uniqueOrganId, switchIndex, false, s.name);
 						}
 						break;
 					}

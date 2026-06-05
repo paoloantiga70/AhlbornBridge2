@@ -15,3 +15,5 @@ bool EnsureBiduleWindowReady(unsigned int timeoutMs = 10000);
 bool ShowBiduleWindow();
 bool HideBiduleWindow();
 bool ToggleBiduleWindowVisibility();
+// Reads current priority settings and applies them to Hauptwerk immediately.
+void ApplyHauptwerkPriorityNow();

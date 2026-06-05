@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 #define LOAD_FAVORITE_ORGAN_1   1
 #define LOAD_FAVORITE_ORGAN_2   2
 #define LOAD_FAVORITE_ORGAN_3   3
@@ -31,4 +33,13 @@ struct AhlbornSwitchInfo;
 // Called automatically when organ names change.
 void UpdateStreamDeckProfileTitles();
 void SendAhlbornSwitchControlChange(int channel, int controlChange, int value);
-// Ciao, this is a test message to check if the Stream Deck integration is working correctly.
+// Closes the physical MIDI output handle used for console LED sync. Call at app shutdown.
+void ClosePhysicalOutputForSwitches();
+
+// Mirrors a MIDI message received from "Hauptwerk Virtual (B)" to the physical
+// console output for LED register sync.  Called from MidiInProc; best-effort.
+void MirrorHauptwerkOutputToConsole(DWORD midiMsg);
+
+// Refreshes the internal cache of AhlbornSwitchInfo used by MirrorHauptwerkOutputToConsole.
+// Call after organ load so the cache reflects the current switch definitions.
+void RefreshSwitchesCache();

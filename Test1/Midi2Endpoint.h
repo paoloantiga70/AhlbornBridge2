@@ -3,12 +3,17 @@
 // ---------------------------------------------------------------------------
 // Midi2Endpoint
 // ---------------------------------------------------------------------------
-// Creates a Windows MIDI Services (MIDI 2.0) app-to-app loopback endpoint
-// named "AhlbornBridge Virtual Port".
+// Creates two Windows MIDI Services (MIDI 2.0) app-to-app loopback pairs:
+//   Pair A: "AhlbornBridge Virtual Port" / "(B)"
+//           Bridge → Hauptwerk path (Stream Deck switch CCs).
+//   Pair B: "Hauptwerk Virtual" / "Hauptwerk Virtual (B)"
+//           Hauptwerk output → Bridge monitoring path.
+//           Hauptwerk must be configured to output to "Hauptwerk Virtual (A)".
+//           The bridge opens "Hauptwerk Virtual (B)" as an additional input
+//           and mirrors incoming messages to the physical console output.
 //
 // Call EnableMidi2Endpoint() once during startup (after initMidiState).
-// Call ForwardToMidi2Endpoint() from EnqueueMidiOutMessage or MidiInProc to
-// publish every incoming WinMM message as a UMP word on the virtual port.
+// Call ForwardToMidi2Endpoint() for messages the bridge sends to Hauptwerk.
 // Call DisableMidi2Endpoint() on shutdown.
 //
 // Requires Windows 11 with Windows MIDI Services installed.
@@ -18,6 +23,7 @@
 
 #include <windows.h>
 #include <cstdint>
+#include <string>
 
 // Returns true if Windows MIDI Services (midisrv) is installed on this system.
 // Use this for prerequisite checks before attempting to create virtual ports.
@@ -40,3 +46,10 @@ bool IsMidi2EndpointEnabled();
 // Returns the GetTickCount() timestamp of the last message forwarded to the
 // virtual endpoint, or 0 if no message has been forwarded yet.
 DWORD GetMidi2EndpointLastMsgTime();
+
+// Returns the WinMM device name of the "Hauptwerk Virtual (B)" loopback side,
+// which the bridge should open as an additional MIDI input to monitor
+// Hauptwerk's own output.  Returns an empty string if the endpoint has not
+// been created (e.g. Windows MIDI Services not installed).
+std::wstring GetHauptwerkVirtualBDeviceName();
+

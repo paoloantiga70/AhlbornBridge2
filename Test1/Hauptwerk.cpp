@@ -485,13 +485,20 @@ namespace
 
         std::thread([]()
             {
-                printf("[ProcessManager] Priority policy enforcer started (REALTIME only when organ is loaded).\n");
+                printf("[ProcessManager] Priority policy enforcer started (priority from settings).\n");
                 bool realtimeAppliedForLoadedState = false;
+
+                std::wstring idlePriority, loadedPriority;
+                LoadHauptwerkPrioritySettings(idlePriority, loadedPriority);
+                printf("[ProcessManager] Priority settings: idle=%S loaded=%S\n", idlePriority.c_str(), loadedPriority.c_str());
 
                 bool lastOrganLoaded = false;
                 while (IsProcessRunning(L"Hauptwerk.exe"))
                 {
                     Sleep(2000);
+
+                    // Reload settings each cycle so UI changes take effect without restart
+                    LoadHauptwerkPrioritySettings(idlePriority, loadedPriority);
 
                     const bool organLoaded = IsOrganCurrentlyLoadedInHauptwerk();
                     std::wstring check;
@@ -506,12 +513,12 @@ namespace
 
                     if (organLoaded)
                     {
-                        if (!IsPriorityResponse(check, L"REALTIME"))
+                        if (!IsPriorityResponse(check, loadedPriority.c_str()))
                         {
                             std::wstring apply;
-                            if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe REALTIME", apply))
+                            if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe " + loadedPriority, apply))
                             {
-                                printf("[ProcessManager] Organ loaded: enforcing REALTIME -> %S\n", apply.c_str());
+                                printf("[ProcessManager] Organ loaded: enforcing %S -> %S\n", loadedPriority.c_str(), apply.c_str());
                                 realtimeAppliedForLoadedState = true;
                             }
                         }
@@ -522,11 +529,11 @@ namespace
                     }
                     else
                     {
-                        if (!IsPriorityResponse(check, L"HIGH"))
+                        if (!IsPriorityResponse(check, idlePriority.c_str()))
                         {
                             std::wstring restore;
-                            if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe HIGH", restore))
-                                printf("[ProcessManager] Organ not loaded: restoring HIGH -> %S\n", restore.c_str());
+                            if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe " + idlePriority, restore))
+                                printf("[ProcessManager] Organ not loaded: setting %S -> %S\n", idlePriority.c_str(), restore.c_str());
                         }
 
                         realtimeAppliedForLoadedState = false;
@@ -537,6 +544,25 @@ namespace
                 printf("[ProcessManager] Priority policy enforcer stopped.\n");
             }).detach();
     }
+}
+
+void ApplyHauptwerkPriorityNow()
+{
+    if (!IsProcessRunning(L"Hauptwerk.exe"))
+        return;
+
+    std::wstring idlePriority, loadedPriority;
+    LoadHauptwerkPrioritySettings(idlePriority, loadedPriority);
+
+    const bool organLoaded = IsOrganCurrentlyLoadedInHauptwerk();
+    const std::wstring& target = organLoaded ? loadedPriority : idlePriority;
+
+    std::wstring response;
+    if (SendProcessManagerCommand(L"SET_PRIORITY Hauptwerk.exe " + target, response))
+        printf("[ProcessManager] ApplyHauptwerkPriorityNow: organLoaded=%d -> %S (%S)\n",
+            (int)organLoaded, target.c_str(), response.c_str());
+    else
+        printf("[ProcessManager] ApplyHauptwerkPriorityNow: SET_PRIORITY failed\n");
 }
 
 

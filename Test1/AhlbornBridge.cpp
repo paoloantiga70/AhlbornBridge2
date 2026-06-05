@@ -221,13 +221,11 @@ if (FAILED(hr))
 		LoadLastSeenAppVersion(lastSeenVersion);
 		if (lastSeenVersion != currentVersion)
 		{
-			std::wstring whatsNew =
-				L"What's new in " + currentVersion + L":\n\n"
-				L"- Process Manager service now auto-starts when needed.\n"
-				L"- Hauptwerk priority policy: REALTIME only when an organ is loaded; HIGH in standby.\n"
-				L"- Improved Process Manager diagnostics in startup logs.\n"
-				L"- More robust bridge-to-service pipe connectivity and retries.";
-			MessageBoxW(hWnd, whatsNew.c_str(), L"AhlbornBridge - What's New", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+			std::wstring whatsNew = LoadChangelogForVersion(currentVersion);
+				if (whatsNew.empty())
+					whatsNew = L"See CHANGELOG.md in the installation folder for details.";
+				std::wstring title = L"What's new in " + currentVersion;
+				MessageBoxW(hWnd, whatsNew.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
 			SaveLastSeenAppVersion(currentVersion);
 		}
 

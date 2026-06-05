@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <string>
 #include <windows.h>
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,10 @@ namespace loopback = winrt::Microsoft::Windows::Devices::Midi2::Endpoints::Loopb
 
 static std::atomic<DWORD> g_lastForwardedTick{ 0 };
 
+// Known constant name for the Hauptwerk monitoring port — used both inside
+// the anonymous namespace and in GetHauptwerkVirtualBDeviceName() below.
+static constexpr wchar_t kHwVirtualBNameConst[] = L"Hauptwerk Virtual (B)";
+
 // ---------------------------------------------------------------------------
 // Module-private state
 // ---------------------------------------------------------------------------
@@ -42,13 +47,29 @@ namespace
 {
 	std::atomic<bool>             g_enabled{ false };
 	midi2::MidiSession            g_session{ nullptr };
+
+	// --- Pair A: AhlbornBridge Virtual Port (Bridge → Hauptwerk) ---
 	midi2::MidiEndpointConnection g_conn{ nullptr };
 	winrt::guid                   g_associationId{};
 	winrt::hstring                g_endpointDeviceId{};
 
+	// --- Pair B: Hauptwerk Virtual (Hauptwerk → Bridge monitoring) ---
+	winrt::guid                   g_hwAssociationId{};
+	// We do NOT open a connection on pair B from this side; Hauptwerk
+	// writes to "Hauptwerk Virtual (A)" and the bridge reads from
+	// "Hauptwerk Virtual (B)" via a standard WinMM midiInOpen.
+	// We only need to store the B-side WinMM device name so Midi.cpp
+	// can open it as an additional input.
+	std::wstring                  g_hwVirtualBName;
+
 	constexpr wchar_t kEndpointName[]    = L"AhlbornBridge Virtual Port";
 	constexpr wchar_t kEndpointUniqueId[] = L"ahlbornbridge-virtual";
 	constexpr wchar_t kSessionName[]     = L"AhlbornBridge";
+
+	constexpr wchar_t kHwVirtualAName[]    = L"Hauptwerk Virtual (A)";
+	constexpr wchar_t kHwVirtualAUniqueId[]= L"hauptwerk-virtual-a";
+	constexpr wchar_t kHwVirtualBName[]    = L"Hauptwerk Virtual (B)";
+	constexpr wchar_t kHwVirtualBUniqueId[]= L"hauptwerk-virtual-b";
 
 	bool IsMidi2EndpointOptInEnabled()
 	{
@@ -161,8 +182,7 @@ bool EnableMidi2Endpoint()
 			return false;
 		}
 
-		// --- 4. Define the loopback endpoint pair ---
-		// MidiLoopbackEndpointDefinition is a plain struct: { Name, UniqueId, Description }
+		// --- 4. Define Pair A: AhlbornBridge Virtual Port (Bridge → Hauptwerk) ---
 		loopback::MidiLoopbackEndpointDefinition defA{};
 		defA.Name        = kEndpointName;
 		defA.UniqueId    = kEndpointUniqueId;
@@ -182,7 +202,7 @@ bool EnableMidi2Endpoint()
 
 		if (!result.Success())
 		{
-			printf("[Midi2] Failed to create loopback endpoint: %ls\n",
+			printf("[Midi2] Failed to create AhlbornBridge loopback endpoint: %ls\n",
 				result.ErrorInformation().c_str());
 			g_session.Close();
 			g_session = nullptr;
@@ -192,11 +212,11 @@ bool EnableMidi2Endpoint()
 		g_associationId    = result.AssociationId();
 		g_endpointDeviceId = result.EndpointDeviceIdA();
 
-		// --- 5. Connect to the loopback endpoint ---
+		// --- 5. Connect to Pair A endpoint (bridge writes here) ---
 		g_conn = g_session.CreateEndpointConnection(g_endpointDeviceId);
 		if (g_conn == nullptr)
 		{
-			printf("[Midi2] Failed to connect to loopback endpoint.\n");
+			printf("[Midi2] Failed to connect to AhlbornBridge loopback endpoint.\n");
 			loopback::MidiLoopbackEndpointRemovalConfig removal{ g_associationId };
 			loopback::MidiLoopbackEndpointManager::RemoveTransientLoopbackEndpoints(removal);
 			g_session.Close();
@@ -205,9 +225,43 @@ bool EnableMidi2Endpoint()
 		}
 
 		g_conn.Open();
+		printf("[Midi2] AhlbornBridge Virtual Port created: %ls\n", g_endpointDeviceId.c_str());
+
+		// --- 6. Define Pair B: Hauptwerk Virtual (Hauptwerk → Bridge) ---
+		loopback::MidiLoopbackEndpointDefinition defHwA{};
+		defHwA.Name        = kHwVirtualAName;
+		defHwA.UniqueId    = kHwVirtualAUniqueId;
+		defHwA.Description = L"Hauptwerk MIDI 2.0 loopback output (A) — configure Hauptwerk to output here";
+
+		loopback::MidiLoopbackEndpointDefinition defHwB{};
+		defHwB.Name        = kHwVirtualBName;
+		defHwB.UniqueId    = kHwVirtualBUniqueId;
+		defHwB.Description = L"Hauptwerk MIDI 2.0 loopback output (B) — bridge monitors this side";
+
+		winrt::guid hwAssocId = winrt::Windows::Foundation::GuidHelper::CreateNewGuid();
+		loopback::MidiLoopbackEndpointCreationConfig hwConfig{ hwAssocId, defHwA, defHwB };
+
+		auto hwResult = loopback::MidiLoopbackEndpointManager::CreateTransientLoopbackEndpoints(
+			hwConfig);
+
+		if (!hwResult.Success())
+		{
+			printf("[Midi2] Failed to create Hauptwerk Virtual loopback endpoint: %ls\n",
+				hwResult.ErrorInformation().c_str());
+			// Pair A is still valid; continue with just pair A
+		}
+		else
+		{
+			g_hwAssociationId = hwResult.AssociationId();
+			// We do not open a MIDI 2.0 connection on this pair from the bridge side.
+			// The bridge will open "Hauptwerk Virtual (B)" via standard WinMM midiInOpen.
+			// Store the WinMM-visible name so Midi.cpp can find the device.
+			g_hwVirtualBName = kHwVirtualBName;
+			printf("[Midi2] Hauptwerk Virtual endpoints created (HW outputs to '%ls', bridge reads '%ls').\n",
+				kHwVirtualAName, kHwVirtualBNameConst);
+		}
 
 		g_enabled = true;
-		printf("[Midi2] Virtual endpoint created: %ls\n", g_endpointDeviceId.c_str());
 		return true;
 	}
 	catch (winrt::hresult_error const& ex)
@@ -290,10 +344,17 @@ void DisableMidi2Endpoint()
 				loopback::MidiLoopbackEndpointManager::RemoveTransientLoopbackEndpoints(removal);
 				g_associationId = winrt::guid{};
 			}
+			if (g_hwAssociationId != winrt::guid{})
+			{
+				loopback::MidiLoopbackEndpointRemovalConfig hwRemoval{ g_hwAssociationId };
+				loopback::MidiLoopbackEndpointManager::RemoveTransientLoopbackEndpoints(hwRemoval);
+				g_hwAssociationId = winrt::guid{};
+				g_hwVirtualBName.clear();
+			}
 			g_session.Close();
 			g_session = nullptr;
 		}
-		printf("[Midi2] Virtual endpoint closed.\n");
+		printf("[Midi2] Virtual endpoints closed.\n");
 	}
 	catch (winrt::hresult_error const& ex)
 	{
@@ -313,3 +374,32 @@ bool IsMidi2EndpointEnabled()
 {
 	return g_enabled.load();
 }
+
+// ---------------------------------------------------------------------------
+// GetHauptwerkVirtualBDeviceName
+// ---------------------------------------------------------------------------
+// Returns the WinMM name for the Hauptwerk Virtual (B) monitoring input.
+// If the endpoints were already visible in WinMM at startup (g_hwVirtualBName
+// is empty because EnableMidi2Endpoint skipped creation), fall back to the
+// known constant name so OpenHauptwerkVirtualBInput can still find the device.
+// ---------------------------------------------------------------------------
+std::wstring GetHauptwerkVirtualBDeviceName()
+{
+	if (!g_hwVirtualBName.empty())
+		return g_hwVirtualBName;
+
+	// The device may have been created in a previous session and is still
+	// registered in WinMM.  Check directly rather than requiring a fresh create.
+	UINT n = midiInGetNumDevs();
+	for (UINT i = 0; i < n; ++i)
+	{
+		MIDIINCAPS caps{};
+		if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+			std::wstring(caps.szPname) == kHwVirtualBNameConst)
+		{
+			return kHwVirtualBNameConst;
+		}
+	}
+	return {};
+}
+

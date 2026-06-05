@@ -5,6 +5,7 @@
 #include "StreamDeck_profiler.h"
 #include <algorithm>
 #include <windows.h>
+#include <mmsystem.h>
 #include <shlobj.h>
 #include <shellapi.h>
 #include <knownfolders.h>
@@ -15,6 +16,119 @@
 #include <fstream>
 #include <thread>
 #include <map>
+
+// Physical MIDI output handle used to echo switch CC to the console LEDs.
+// Opened on demand from the Hauptwerk output device name stored in Settings.
+// Never added to g_midiOuts so MidiInProc never writes back to it.
+static HMIDIOUT g_hPhysicalOut = nullptr;
+static std::wstring g_physicalOutOpenedName;
+
+// ---------------------------------------------------------------------------
+// Cached AhlbornSwitchInfo list — populated once per organ load so that
+// MirrorHauptwerkOutputToConsole() can match incoming CCs without hitting
+// the XML file on every MIDI callback.
+// ---------------------------------------------------------------------------
+static std::vector<AhlbornSwitchInfo> g_cachedSwitches;
+static std::wstring                   g_cachedOrganUniqueId; // organ context for state updates
+static CRITICAL_SECTION g_switchesCacheLock;
+static bool g_switchesCacheLockInit = false;
+
+static void EnsureSwitchesCacheLock()
+{
+    if (!g_switchesCacheLockInit)
+    {
+        InitializeCriticalSection(&g_switchesCacheLock);
+        g_switchesCacheLockInit = true;
+    }
+}
+
+void RefreshSwitchesCache()
+{
+    EnsureSwitchesCacheLock();
+
+    // Load switch definitions
+    std::vector<AhlbornSwitchInfo> fresh = LoadAhlbornSwitches();
+
+    // Resolve the uniqueOrganId for the currently loaded organ so that
+    // MirrorHauptwerkOutputToConsole() can call UpdateInMemorySwitchState().
+    std::wstring uniqueId;
+    int idx = g_currentLoadedInstalledOrganIndex.load(std::memory_order_relaxed);
+    if (idx > 0)
+    {
+        std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+        if (idx <= static_cast<int>(organs.size()))
+            uniqueId = organs[idx - 1].uniqueOrganId;
+    }
+
+    EnterCriticalSection(&g_switchesCacheLock);
+    g_cachedSwitches      = std::move(fresh);
+    g_cachedOrganUniqueId = uniqueId;
+    LeaveCriticalSection(&g_switchesCacheLock);
+
+    printf("[SwitchesCache] Refreshed: %zu switch(es), organId='%S'.\n",
+           g_cachedSwitches.size(), uniqueId.c_str());
+    for (int i = 0; i < static_cast<int>(g_cachedSwitches.size()); ++i)
+    {
+        printf("[SwitchesCache]   [%d] name='%S' h=%d c=%d d=%d e=%d\n",
+            i + 1,
+            g_cachedSwitches[i].name.c_str(),
+            g_cachedSwitches[i].channel,
+            g_cachedSwitches[i].controlChange,
+            g_cachedSwitches[i].valueOn,
+            g_cachedSwitches[i].valueOff);
+    }
+}
+
+static void EnsurePhysicalOutOpen()
+{
+    std::wstring target = LoadFixedHauptwerkOutputName();
+    if (target.empty() || target.find(L"AhlbornBridge") != std::wstring::npos)
+        return; // no physical device configured or it is the virtual port
+
+    if (g_hPhysicalOut != nullptr && target == g_physicalOutOpenedName)
+        return; // already open with the right device
+
+    // Close previous handle if device name changed
+    if (g_hPhysicalOut != nullptr)
+    {
+        midiOutClose(g_hPhysicalOut);
+        g_hPhysicalOut = nullptr;
+        g_physicalOutOpenedName.clear();
+    }
+
+    UINT numOut = midiOutGetNumDevs();
+    for (UINT i = 0; i < numOut; ++i)
+    {
+        MIDIOUTCAPS caps = {};
+        if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+            target == caps.szPname)
+        {
+            if (midiOutOpen(&g_hPhysicalOut, i, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR)
+            {
+                g_physicalOutOpenedName = target;
+                printf("[SwitchCC] Opened physical output '%S' for console LED sync.\n", target.c_str());
+            }
+            else
+            {
+                printf("[SwitchCC] Failed to open physical output '%S'.\n", target.c_str());
+            }
+            return;
+        }
+    }
+    printf("[PhysicalOut] EnsureOpen — '%S' not found among %u WinMM output devices.\n",
+        target.c_str(), numOut);
+}
+
+void ClosePhysicalOutputForSwitches()
+{
+    if (g_hPhysicalOut != nullptr)
+    {
+        midiOutClose(g_hPhysicalOut);
+        g_hPhysicalOut = nullptr;
+        g_physicalOutOpenedName.clear();
+        printf("[SwitchCC] Physical output closed.\n");
+    }
+}
 
 void SendUnloadOrganMidiMessage(bool resetSwitches)
 {
@@ -265,6 +379,7 @@ static void HandlePipeMessage(const std::string& msg)
     else if (msg.find("\"unload\"") != std::string::npos)
     {
         printf("[PipeServer] Unload organ requested\n");
+        FreezeOrganSwitchStateForFlush();
         EnqueueUnloadOrgan();
         PipeSend("{\"type\":\"ack\",\"command\":\"unload\"}");
     }
@@ -345,7 +460,7 @@ static void HandlePipeMessage(const std::string& msg)
                     bool isOn = (value == s.valueOn);
                     printf("[PipeServer] switchCc matched switch #%d (valueOn=%d valueOff=%d) -> isOn=%d\n",
                         switchIndex, s.valueOn, s.valueOff, (int)isOn);
-                    SaveOrganSwitchState(uniqueOrganId, switchIndex, isOn);
+                    UpdateInMemorySwitchState(uniqueOrganId, switchIndex, isOn, s.name);
                     matched = true;
                     break;
                 }
@@ -765,6 +880,9 @@ void NotifyStreamDeckOrganState(int loadedIndex)
 
 void NotifyStreamDeckOrganUnloaded(bool resetSwitches)
 {
+    // Persist all in-memory switch states before the organ is unloaded
+    FlushOrganSwitchStatesToDisk();
+
     if (!g_pipeConnected)
         return;
 
@@ -799,6 +917,14 @@ void NotifyStreamDeckSwitchState(int switchIndex, bool isOn)
 
 void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
 {
+    // Ensure any freeze left over from a previous unload/restore cycle is cleared
+    // before we start, so user toggle actions are not silently dropped.
+    UnfreezeOrganSwitchState();
+
+    // Refresh the CC→switch cache so MirrorHauptwerkOutputToConsole can update
+    // Stream Deck in real time when Hauptwerk sends CC changes on its virtual output.
+    RefreshSwitchesCache();
+
     if (loadedIndex <= 0)
         return;
 
@@ -851,15 +977,36 @@ void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
             NotifyStreamDeckSwitchState(i, false);
     }
 
+    // Update Stream Deck UI immediately with saved states
     for (const auto& [switchIndex, isOn] : states)
     {
-        // Update Stream Deck UI
         printf("[NotifyStreamDeckSwitchesForOrgan] Sending switchState #%d isOn=%d pipeConnected=%d\n",
             switchIndex, (int)isOn, (int)g_pipeConnected.load());
         if (g_pipeConnected)
             NotifyStreamDeckSwitchState(switchIndex, isOn);
+    }
 
-        // Send the actual CC to Hauptwerk to restore the physical stop state
+    // Wait for Hauptwerk to complete its internal stop reset after organ load
+    // before sending the CC restore messages, otherwise Hauptwerk resets them
+    // immediately after we send them.
+    printf("[NotifyStreamDeckSwitchesForOrgan] Waiting 2s for Hauptwerk post-load reset to complete...\n");
+    Sleep(2000);
+
+    // Write all restored states into memory first, then freeze so that any
+    // late reset CCs still arriving via MidiInProc cannot overwrite them.
+    for (const auto& [switchIndex, isOn] : states)
+    {
+        if (switchIndex >= 1 && switchIndex <= static_cast<int>(switches.size()))
+        {
+            const AhlbornSwitchInfo& s = switches[switchIndex - 1];
+            UpdateInMemorySwitchState(uniqueId, switchIndex, isOn, s.name);
+        }
+    }
+    FreezeOrganSwitchStateForFlush();
+
+    // Send the actual CCs to Hauptwerk to restore the physical stop states.
+    for (const auto& [switchIndex, isOn] : states)
+    {
         if (switchIndex >= 1 && switchIndex <= static_cast<int>(switches.size()))
         {
             const AhlbornSwitchInfo& s = switches[switchIndex - 1];
@@ -869,6 +1016,10 @@ void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
             SendAhlbornSwitchControlChange(s.channel, s.controlChange, value);
         }
     }
+
+    // Unfreeze: user can now toggle stops normally. Any CC from Hauptwerk
+    // that arrives after this point is a genuine user action.
+    UnfreezeOrganSwitchState();
 }
 
 void NotifyStreamDeckActiveSensingState(bool enabled)
@@ -887,9 +1038,105 @@ void SendAhlbornSwitchControlChange(int channel, int controlChange, int value)
         return;
     }
 
-    DWORD status = static_cast<DWORD>(0xB0 | ((channel - 1) & 0x0F));
+    DWORD status  = static_cast<DWORD>(0xB0 | ((channel - 1) & 0x0F));
     DWORD midiMsg = status | (static_cast<DWORD>(controlChange) << 8) | (static_cast<DWORD>(value) << 16);
+
+    // 1. Send to Hauptwerk via virtual Port (A)
     bool enqueued = EnqueueMidiOutMessage(midiMsg);
     printf("[StreamDeck] Send switch CC ch=%d cc=%d value=%d: %s\n",
         channel, controlChange, value, enqueued ? "enqueued OK" : "FAILED");
+
+    // 2. Mirror to physical console output so LED registers stay in sync
+    EnsurePhysicalOutOpen();
+    if (g_hPhysicalOut != nullptr)
+    {
+        MMRESULT res = midiOutShortMsg(g_hPhysicalOut, midiMsg);
+        printf("[SwitchCC] Mirrored to console '%S': %s\n",
+            g_physicalOutOpenedName.c_str(), res == MMSYSERR_NOERROR ? "OK" : "FAILED");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MirrorHauptwerkOutputToConsole
+// ---------------------------------------------------------------------------
+// Called from MidiInProc when a message arrives on "Hauptwerk Virtual (B)".
+// Sends the message to the physical console output so LED registers reflect
+// what Hauptwerk's own virtual organ screen is doing.
+// ---------------------------------------------------------------------------
+void MirrorHauptwerkOutputToConsole(DWORD midiMsg)
+{
+    // 1. Mirror to physical console (LED sync)
+    EnsurePhysicalOutOpen();
+    if (g_hPhysicalOut != nullptr)
+    {
+        midiOutShortMsg(g_hPhysicalOut, midiMsg);
+        // Log only non-trivial channel voice messages (skip 0xFE Active Sensing etc.)
+        uint8_t status = static_cast<uint8_t>(midiMsg & 0xFF);
+        if (status < 0xF0)
+        {
+            printf("[HwMirror] ch=%d CC%d=%d -> '%S'\n",
+                (status & 0x0F) + 1,
+                (midiMsg >> 8) & 0xFF, (midiMsg >> 16) & 0xFF,
+                g_physicalOutOpenedName.c_str());
+        }
+    }
+    else
+    {
+        std::wstring target = LoadFixedHauptwerkOutputName();
+        printf("[HwMirror] SKIPPED — g_hPhysicalOut=null, FixedHauptwerkOutput='%S'\n",
+            target.c_str());
+    }
+
+    // 2. Update Stream Deck switch state if the CC matches a configured switch.
+    //    Guard: skip if no organ is loaded — these are Hauptwerk's unload-reset
+    //    CCs and Stream Deck is already being reset by NotifyStreamDeckOrganUnloaded().
+    //    Use TryEnterCriticalSection — we are in a MIDI callback, must not block.
+    if (g_currentLoadedInstalledOrganIndex.load(std::memory_order_relaxed) <= 0)
+        return;
+
+    const uint8_t status = static_cast<uint8_t>(midiMsg & 0xFF);
+    if ((status & 0xF0) == 0xB0) // Control Change only
+    {
+        const int ch  = (status & 0x0F) + 1;
+        const int cc  = static_cast<int>((midiMsg >> 8)  & 0xFF);
+        const int val = static_cast<int>((midiMsg >> 16) & 0xFF);
+
+        EnsureSwitchesCacheLock();
+        if (TryEnterCriticalSection(&g_switchesCacheLock))
+        {
+            for (int i = 0; i < static_cast<int>(g_cachedSwitches.size()); ++i)
+            {
+                const AhlbornSwitchInfo& sw = g_cachedSwitches[i];
+                if (sw.channel == ch && sw.controlChange == cc)
+                {
+                    // Full three-way match: channel + cc + data value.
+                    // val >= 64 → ON,  must match <d> (sw.valueOn)
+                    // val <  64 → OFF, must match <e> (sw.valueOff)
+                    bool isOn;
+                    if (val >= 64)
+                    {
+                        if (sw.valueOn != val) continue; // not this switch
+                        isOn = true;
+                    }
+                    else
+                    {
+                        if (sw.valueOff != val) continue; // not this switch
+                        isOn = false;
+                    }
+                    std::wstring organId = g_cachedOrganUniqueId;
+                    std::wstring swName  = sw.name;
+                    LeaveCriticalSection(&g_switchesCacheLock);
+                    printf("[HwMirror] Matched switch index=%d name='%S' ch=%d cc=%d val=%d isOn=%d\n",
+                        i + 1, swName.c_str(), ch, cc, val, (int)isOn);
+                    // Update Stream Deck UI
+                    NotifyStreamDeckSwitchState(i + 1, isOn);
+                    // Persist in-memory state so FlushOrganSwitchStatesToDisk()
+                    // saves the correct value on organ unload.
+                    UpdateInMemorySwitchState(organId, i + 1, isOn, swName);
+                    return;
+                }
+            }
+            LeaveCriticalSection(&g_switchesCacheLock);
+        }
+    }
 }

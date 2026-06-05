@@ -2,6 +2,7 @@
 #include "Midi.h"
 #include "TrayIcon.h"
 #include "StreamDeck.h"
+#include "Hauptwerk.h"
 
 #include <string>
 #include <map>
@@ -82,12 +83,20 @@ namespace
     std::wstring s_cachedStreamDeckMidiIn;
     std::wstring s_cachedFixedHauptwerkOutput;
     std::wstring s_cachedOrganSwitchStates;
+    // True once s_cachedOrganSwitchStates has been explicitly set (even to "").
+    // Prevents WriteSettingsXml from reloading a stale on-disk value after
+    // FlushOrganSwitchStatesToDisk has intentionally cleared the cache.
+    bool s_organSwitchStatesCacheValid = false;
     bool s_cachedStreamDeckPipeServerEnabled = true;
     bool s_streamDeckSettingsLoaded = false;
 
     std::wstring s_cachedBidulePath;
     bool s_cachedBiduleCloseOnUnload = true;
     std::wstring s_cachedLastSeenAppVersion;
+
+    std::wstring s_cachedHauptwerkIdlePriority   = L"HIGH";
+    std::wstring s_cachedHauptwerkLoadedPriority = L"REALTIME";
+    bool s_hauptwerkPriorityLoaded = false;
 
     // Cached audio output devices (all entries from AudioOutputDevice in Hauptwerk config,
     // persisted to <Audio><Devices> in Settings.xml).
@@ -307,6 +316,21 @@ namespace
 		}
 
 		return true;
+	}
+
+	void EnsureHauptwerkPriorityLoaded()
+	{
+		if (s_hauptwerkPriorityLoaded) return;
+		s_hauptwerkPriorityLoaded = true;
+		std::wstring xml;
+		if (!TryReadSettingsXml(xml)) return;
+		std::wstring optionsSection;
+		if (!TryGetSection(xml, L"Options", optionsSection)) return;
+		std::wstring tmp;
+		if (TryGetTagStringValue(optionsSection, L"<HauptwerkIdlePriority>", L"</HauptwerkIdlePriority>", tmp) && !tmp.empty())
+			s_cachedHauptwerkIdlePriority = tmp;
+		if (TryGetTagStringValue(optionsSection, L"<HauptwerkLoadedPriority>", L"</HauptwerkLoadedPriority>", tmp) && !tmp.empty())
+			s_cachedHauptwerkLoadedPriority = tmp;
 	}
 
 	// Extract the numeric value of an id="X" attribute from a tag.
@@ -1099,11 +1123,15 @@ namespace
 			// Trim leading/trailing whitespace so we don't accumulate blank lines on each save.
 			size_t first = switchStatesSection.find_first_not_of(L" \t\r\n");
 			if (first == std::wstring::npos)
+			{
 				s_cachedOrganSwitchStates.clear();
+				s_organSwitchStatesCacheValid = true;
+			}
 			else
 			{
 				size_t last = switchStatesSection.find_last_not_of(L" \t\r\n");
 				s_cachedOrganSwitchStates = switchStatesSection.substr(first, last - first + 1) + L"\r\n";
+				s_organSwitchStatesCacheValid = true;
 			}
 		}
 	}
@@ -1276,8 +1304,11 @@ namespace
 			if (TryReadSettingsXml(existingXml))
 			{
 				std::wstring optionsSection;
-				if (TryGetSection(existingXml, L"Options", optionsSection))
-					TryGetTagStringValue(optionsSection, L"<LastSeenAppVersion>", L"</LastSeenAppVersion>", s_cachedLastSeenAppVersion);
+					if (TryGetSection(existingXml, L"Options", optionsSection))
+					{
+						TryGetTagStringValue(optionsSection, L"<LastSeenAppVersion>", L"</LastSeenAppVersion>", s_cachedLastSeenAppVersion);
+							// Priority is managed by EnsureHauptwerkPriorityLoaded / SaveHauptwerkPrioritySettings.
+					}
 
 				// Preserve the existing AhlbornSwitches table if it is already present in Settings.xml.
 				std::wstring streamDeckSection;
@@ -1291,11 +1322,11 @@ namespace
 							ahlbornSwitches = normalizedSwitches;
 					}
 					std::wstring savedSwitchStates;
-					if (TryGetSection(streamDeckSection, L"OrganSwitchStates", savedSwitchStates) && s_cachedOrganSwitchStates.empty())
+					if (TryGetSection(streamDeckSection, L"OrganSwitchStates", savedSwitchStates) && !s_organSwitchStatesCacheValid)
 					{
-						// Only load from file if we don't already have a value in memory.
-						// This prevents WriteSettingsXml from overwriting an in-memory update
-						// with the stale on-disk value (which is still empty on first save).
+						// Only load from file if the cache has never been explicitly set.
+						// An empty cache after a flush is intentional (all stops OFF) and
+						// must NOT be overwritten with the stale on-disk value.
 						size_t first = savedSwitchStates.find_first_not_of(L" \t\r\n");
 						if (first == std::wstring::npos)
 							savedSwitchStates.clear();
@@ -1305,6 +1336,7 @@ namespace
 							savedSwitchStates = savedSwitchStates.substr(first, last - first + 1) + L"\r\n";
 						}
 						s_cachedOrganSwitchStates = savedSwitchStates;
+						s_organSwitchStatesCacheValid = true;
 					}
 				}
 			}
@@ -1342,6 +1374,8 @@ namespace
 			L"    <ShowDebugConsole>" + std::to_wstring(showDebugConsole ? 1 : 0) + L"</ShowDebugConsole>\r\n"
 			L"    <CheckForUpdateOnStart>" + std::to_wstring(checkForUpdateOnStart ? 1 : 0) + L"</CheckForUpdateOnStart>\r\n"
 			L"    <LastSeenAppVersion>" + s_cachedLastSeenAppVersion + L"</LastSeenAppVersion>\r\n"
+			L"    <HauptwerkIdlePriority>" + s_cachedHauptwerkIdlePriority + L"</HauptwerkIdlePriority>\r\n"
+			L"    <HauptwerkLoadedPriority>" + s_cachedHauptwerkLoadedPriority + L"</HauptwerkLoadedPriority>\r\n"
 			L"    <BidulePath>" + s_cachedBidulePath + L"</BidulePath>\r\n"
             L"    <BiduleCloseOnUnload>" + std::to_wstring(s_cachedBiduleCloseOnUnload ? 1 : 0) + L"</BiduleCloseOnUnload>\r\n"
 			L"    <ActiveSensingEnabled>" + std::to_wstring(g_activeSensingEnabled.load() ? 1 : 0) + L"</ActiveSensingEnabled>\r\n"
@@ -1991,13 +2025,20 @@ bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
             return std::to_wstring(id);
         };
 
-        // Virtual port names: (A) is input+output, (B) is input+output.
+        // Virtual port names: both pairs must be injected so Hauptwerk does not
+        // prompt the user about "new devices" on first startup.
+        // Pair 1: AhlbornBridge Virtual Port / (B)  — bridge ↔ Hauptwerk input
+        // Pair 2: Hauptwerk Virtual (A) / (B)        — Hauptwerk output monitor
         struct VirtualPort { std::wstring name; std::wstring typ; std::vector<SeenDevice>* list; };
         std::vector<VirtualPort> toCheck = {
             { L"AhlbornBridge Virtual Port",     L"2", &seenInputs  },
             { L"AhlbornBridge Virtual Port",     L"3", &seenOutputs },
             { L"AhlbornBridge Virtual Port (B)", L"2", &seenInputs  },
             { L"AhlbornBridge Virtual Port (B)", L"3", &seenOutputs },
+            { L"Hauptwerk Virtual (A)",           L"2", &seenInputs  },
+            { L"Hauptwerk Virtual (A)",           L"3", &seenOutputs },
+            { L"Hauptwerk Virtual (B)",           L"2", &seenInputs  },
+            { L"Hauptwerk Virtual (B)",           L"3", &seenOutputs },
         };
 
         const std::wstring kPSD = L"<ObjectList ObjectType=\"PreviouslySeenDevice\">";
@@ -2096,6 +2137,11 @@ bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
     const std::wstring kHWInput = L"AhlbornBridge Virtual Port (B)";
     std::wstring newInputNodes = buildNode(kHWInput, seenInputs);
 
+    // Fixed output port for Hauptwerk: "Hauptwerk Virtual (A)" (A-side of the new loopback).
+    // The bridge monitors the B-side ("Hauptwerk Virtual (B)") and mirrors messages
+    // to the physical console output.  Any AhlbornBridge virtual ports are excluded.
+    const std::wstring kHWOutput = L"Hauptwerk Virtual (A)";
+
     auto currentEnabledOutputs = extractSectionPortNames(L"EnabledMIDIOutputPort");
     std::vector<std::wstring> mergedOutputs;
 
@@ -2103,34 +2149,30 @@ bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
     {
         if (name.empty())
             return;
-        if (name == L"AhlbornBridge Virtual Port" || name == L"AhlbornBridge Virtual Port (B)")
+        // Exclude the bridge's own virtual ports from Hauptwerk's output list.
+        if (name.find(L"AhlbornBridge") != std::wstring::npos)
+            return;
+        // Exclude the physical console device — Hauptwerk must NOT output there
+        // directly; the bridge mirrors Hauptwerk Virtual (B) to it instead.
+        if (!s_cachedFixedHauptwerkOutput.empty() && name == s_cachedFixedHauptwerkOutput)
+            return;
+        // Exclude the Hauptwerk Virtual ports themselves from the appended user outputs.
+        if (name == L"Hauptwerk Virtual (A)" || name == L"Hauptwerk Virtual (B)")
             return;
         if (std::find(mergedOutputs.begin(), mergedOutputs.end(), name) != mergedOutputs.end())
             return;
         mergedOutputs.push_back(name);
     };
 
-    std::wstring fixedOutput = LoadFixedHauptwerkOutputName();
-    if (fixedOutput.empty())
-    {
-        for (const auto& name : currentEnabledOutputs)
-        {
-            if (name != L"AhlbornBridge Virtual Port" && name != L"AhlbornBridge Virtual Port (B)")
-            {
-                fixedOutput = name;
-                break;
-            }
-        }
-    }
+    // Always include the Hauptwerk Virtual (A) port as the primary output.
+    // Push directly — appendUniqueOutput filters out Hauptwerk Virtual names
+    // to prevent duplicates from user-assigned lists, so we bypass it here.
+    mergedOutputs.push_back(kHWOutput);
+    printf("[WriteHauptwerkMidiConfig] Hauptwerk output set to virtual port: '%S'\n",
+           kHWOutput.c_str());
 
-    if (!fixedOutput.empty())
-    {
-        appendUniqueOutput(fixedOutput);
-        printf("[WriteHauptwerkMidiConfig] Preserving fixed Hauptwerk output: '%S'\n",
-               fixedOutput.c_str());
-    }
-
-    // Append currently assigned outputs without replacing the preserved one.
+    // Also preserve any additional user-assigned outputs (from the UI config),
+    // but do NOT add back the old physical device automatically.
     for (const auto& name : outputNames)
         appendUniqueOutput(name);
 
@@ -2947,6 +2989,58 @@ bool SaveLastSeenAppVersion(const std::wstring& version)
     CloseHandle(fileHandle);
 
     return ok != FALSE && bytesWritten == static_cast<DWORD>(utf8.size());
+}
+
+// Reads CHANGELOG.md from the app directory and extracts the bullet points
+// for the given version (e.g. "1.0.109"). Returns an empty string if not found.
+std::wstring LoadChangelogForVersion(const std::wstring& version)
+{
+    // Build path: <exeDir>\CHANGELOG.md
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+    if (!lastSlash) return {};
+    *lastSlash = L'\0';
+    std::wstring changelogPath = std::wstring(exePath) + L"\\CHANGELOG.md";
+
+    HANDLE hFile = CreateFileW(changelogPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return {};
+
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == 0 || fileSize == INVALID_FILE_SIZE) { CloseHandle(hFile); return {}; }
+
+    std::string utf8(fileSize, '\0');
+    DWORD bytesRead = 0;
+    ReadFile(hFile, utf8.data(), fileSize, &bytesRead, nullptr);
+    CloseHandle(hFile);
+
+    // Convert UTF-8 to wide
+    int wLen = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(bytesRead), nullptr, 0);
+    if (wLen <= 0) return {};
+    std::wstring content(wLen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(bytesRead), content.data(), wLen);
+
+    // Find the section header "## <version>"
+    std::wstring header = L"## " + version;
+    size_t start = content.find(header);
+    if (start == std::wstring::npos) return {};
+    start = content.find(L'\n', start);
+    if (start == std::wstring::npos) return {};
+    ++start;
+
+    // Read until next "## " section or end of file
+    size_t end = content.find(L"\n## ", start);
+    std::wstring section = (end == std::wstring::npos)
+        ? content.substr(start)
+        : content.substr(start, end - start);
+
+    // Strip leading/trailing whitespace
+    size_t first = section.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) return {};
+    size_t last = section.find_last_not_of(L" \t\r\n");
+    return section.substr(first, last - first + 1);
 }
 
 bool LoadActiveSensingEnabled(bool& enabled)
@@ -3798,6 +3892,219 @@ std::vector<AhlbornSwitchInfo> LoadAhlbornSwitches()
     return result;
 }
 
+// ---------- In-memory switch state cache (written to disk only on unload/shutdown) ----------
+static std::map<std::wstring, std::map<int, bool>> g_inMemorySwitchStates;
+static CRITICAL_SECTION g_switchStateMemLock;
+static bool g_switchStateMemLockInit = false;
+// When true, UpdateInMemorySwitchState is a no-op so that reset CCs sent
+// by the physical console during organ unload do not overwrite the state
+// we captured just before the unload was triggered.
+static bool g_switchStateFrozen = false;
+
+// Maps switch index -> stop name (populated during UpdateInMemorySwitchState calls).
+static std::map<int, std::wstring> g_switchNames;
+
+static void EnsureSwitchStateMemLock()
+{
+    if (!g_switchStateMemLockInit)
+    {
+        InitializeCriticalSection(&g_switchStateMemLock);
+        g_switchStateMemLockInit = true;
+    }
+}
+
+void FreezeOrganSwitchStateForFlush()
+{
+    EnsureSwitchStateMemLock();
+    EnterCriticalSection(&g_switchStateMemLock);
+    g_switchStateFrozen = true;
+    LeaveCriticalSection(&g_switchStateMemLock);
+}
+
+void UnfreezeOrganSwitchState()
+{
+    EnsureSwitchStateMemLock();
+    EnterCriticalSection(&g_switchStateMemLock);
+    g_switchStateFrozen = false;
+    LeaveCriticalSection(&g_switchStateMemLock);
+}
+
+void UpdateInMemorySwitchState(const std::wstring& uniqueOrganId, int switchIndex, bool isOn, const std::wstring& switchName)
+{
+    if (uniqueOrganId.empty() || switchIndex <= 0)
+        return;
+    EnsureSwitchStateMemLock();
+    EnterCriticalSection(&g_switchStateMemLock);
+    if (!g_switchStateFrozen)
+    {
+        g_inMemorySwitchStates[uniqueOrganId][switchIndex] = isOn;
+        if (!switchName.empty())
+            g_switchNames[switchIndex] = switchName;
+    }
+    LeaveCriticalSection(&g_switchStateMemLock);
+}
+
+bool FlushOrganSwitchStatesToDisk()
+{
+    // Pre-populate g_switchNames from the configured switch list so that
+    // nodes already on disk (written in previous sessions without nam="")
+    // also get the name attribute on the next flush.
+    {
+        std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
+        EnsureSwitchStateMemLock();
+        EnterCriticalSection(&g_switchStateMemLock);
+        for (size_t i = 0; i < switches.size(); ++i)
+        {
+            int idx = static_cast<int>(i) + 1;
+            if (g_switchNames.find(idx) == g_switchNames.end() && !switches[i].name.empty())
+                g_switchNames[idx] = switches[i].name;
+        }
+        LeaveCriticalSection(&g_switchStateMemLock);
+    }
+
+    EnsureSwitchStateMemLock();
+    EnterCriticalSection(&g_switchStateMemLock);
+    std::map<std::wstring, std::map<int, bool>> snapshot = g_inMemorySwitchStates;
+    LeaveCriticalSection(&g_switchStateMemLock);
+
+    if (snapshot.empty() && g_switchNames.empty())
+    {
+        // Even with an empty snapshot, we must still write the file if the
+        // disk has persisted ON-states (e.g. user turned off all stops while
+        // the freeze was active).  Check whether the disk has any Organ nodes.
+        std::wstring probeXml;
+        bool diskHasOrganNodes = false;
+        if (TryReadSettingsXml(probeXml))
+        {
+            std::wstring sd, sw;
+            if (TryGetSection(probeXml, L"StreamDeck", sd) &&
+                TryGetSection(sd, L"OrganSwitchStates", sw))
+                diskHasOrganNodes = (sw.find(L"<Organ") != std::wstring::npos);
+        }
+        if (!diskHasOrganNodes)
+        {
+            printf("[SwitchFlush] Nothing to flush.\n");
+            return true;
+        }
+        printf("[SwitchFlush] Snapshot empty but disk has Organ nodes — clearing them.\n");
+        // Fall through with empty snapshot so the merge produces no Organ nodes.
+    }
+
+    EnsureStreamDeckSettingsLoaded();
+
+    // Merge snapshot into the existing persisted states.
+    // Read directly from disk (not from cache) so that manual edits to
+    // Settings.xml (e.g. deleting an <Organ> node) are respected.
+    std::map<std::wstring, std::map<int, bool>> allStates;
+    std::wstring section;
+    {
+        std::wstring freshXml;
+        if (TryReadSettingsXml(freshXml))
+        {
+            std::wstring streamDeckSection, switchStatesSection;
+            if (TryGetSection(freshXml, L"StreamDeck", streamDeckSection) &&
+                TryGetSection(streamDeckSection, L"OrganSwitchStates", switchStatesSection))
+            {
+                size_t first = switchStatesSection.find(L'<');
+                if (first != std::wstring::npos)
+                    section = switchStatesSection.substr(first);
+            }
+        }
+    }
+    size_t pos = 0;
+    while (true)
+    {
+        size_t start = section.find(L"<Organ", pos);
+        if (start == std::wstring::npos) break;
+        size_t openEnd = section.find(L'>', start);
+        size_t close   = section.find(L"</Organ>", openEnd);
+        if (openEnd == std::wstring::npos || close == std::wstring::npos) break;
+
+        std::wstring organNode = section.substr(start, close - start + 8);
+        size_t idPos = organNode.find(L"id=\"");
+        if (idPos != std::wstring::npos)
+        {
+            idPos += 4;
+            size_t idEnd = organNode.find(L'\"', idPos);
+            if (idEnd != std::wstring::npos)
+            {
+                std::wstring oid = organNode.substr(idPos, idEnd - idPos);
+                std::map<int, bool> organStates;
+                size_t spos = 0;
+                while (true)
+                {
+                    size_t sstart = organNode.find(L"<s", spos);
+                    if (sstart == std::wstring::npos) break;
+                    size_t send = organNode.find(L"/>", sstart);
+                    if (send == std::wstring::npos) break;
+                    std::wstring switchNode = organNode.substr(sstart, send - sstart + 2);
+                    size_t idxPos2 = switchNode.find(L"idx=\"");
+                    size_t onPos  = switchNode.find(L"on=\"");
+                    if (idxPos2 != std::wstring::npos && onPos != std::wstring::npos)
+                    {
+                        idxPos2 += 5; onPos += 4;
+                        size_t idxEnd = switchNode.find(L'\"', idxPos2);
+                        size_t onEnd  = switchNode.find(L'\"', onPos);
+                        if (idxEnd != std::wstring::npos && onEnd != std::wstring::npos)
+                        {
+                            int idx = _wtoi(switchNode.substr(idxPos2, idxEnd - idxPos2).c_str());
+                            int on  = _wtoi(switchNode.substr(onPos, onEnd - onPos).c_str());
+                            if (idx > 0) organStates[idx] = (on != 0);
+                        }
+                    }
+                    spos = send + 2;
+                }
+                allStates[oid] = organStates;
+            }
+        }
+        pos = close + 8;
+    }
+
+    // Apply in-memory snapshot on top of persisted data
+    for (const auto& [oid, states] : snapshot)
+        for (const auto& [idx, on] : states)
+            allStates[oid][idx] = on;
+
+    std::wstring serialized;
+    for (const auto& [oid, organStates] : allStates)
+    {
+        std::wstring organBody;
+        for (const auto& [idx, on] : organStates)
+        {
+            if (!on) continue;
+            auto nameIt = g_switchNames.find(idx);
+            std::wstring namAttr = (nameIt != g_switchNames.end() && !nameIt->second.empty())
+                ? L" nam=\"" + nameIt->second + L"\""
+                : L"";
+            organBody += L"        <s idx=\"" + std::to_wstring(idx) + L"\"" + namAttr + L" on=\"1\"/>\r\n";
+        }
+        if (!organBody.empty())
+            serialized += L"      <Organ id=\"" + oid + L"\">\r\n" + organBody + L"      </Organ>\r\n";
+    }
+
+    s_cachedOrganSwitchStates = serialized;
+    s_organSwitchStatesCacheValid = true;
+
+    bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+    bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+    bool showConsole = true; LoadShowDebugConsole(showConsole);
+    bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+
+    EnsureAssignedDevicesLoaded();
+    std::wstring in1, in2, out1, out2;
+    if (!s_assignedInputNames.empty())  in1  = s_assignedInputNames[0];
+    if (s_assignedInputNames.size() > 1) in2 = s_assignedInputNames[1];
+    if (!s_assignedOutputNames.empty()) out1 = s_assignedOutputNames[0];
+    if (s_assignedOutputNames.size() > 1) out2 = s_assignedOutputNames[1];
+
+    DeviceEnabledStates devEnabled;
+    bool ok = WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+    printf("[SwitchFlush] Flushed %zu organ(s) switch states to disk: %s\n", snapshot.size(), ok ? "OK" : "FAILED");
+    // Unfreeze so normal state updates resume after the flush
+    g_switchStateFrozen = false;
+    return ok;
+}
+
 bool SaveOrganSwitchState(const std::wstring& uniqueOrganId, int switchIndex, bool isOn)
 {
     if (uniqueOrganId.empty() || switchIndex <= 0)
@@ -3872,13 +4179,22 @@ bool SaveOrganSwitchState(const std::wstring& uniqueOrganId, int switchIndex, bo
     std::wstring serialized;
     for (const auto& [oid, organStates] : allStates)
     {
-        serialized += L"      <Organ id=\"" + oid + L"\">\r\n";
+        std::wstring organBody;
         for (const auto& [idx, on] : organStates)
-            serialized += L"        <s idx=\"" + std::to_wstring(idx) + L"\" on=\"" + (on ? L"1" : L"0") + L"\"/>\r\n";
-        serialized += L"      </Organ>\r\n";
+        {
+            if (!on) continue;
+            auto nameIt = g_switchNames.find(idx);
+            std::wstring namAttr = (nameIt != g_switchNames.end() && !nameIt->second.empty())
+                ? L" nam=\"" + nameIt->second + L"\""
+                : L"";
+            organBody += L"        <s idx=\"" + std::to_wstring(idx) + L"\"" + namAttr + L" on=\"1\"/>\r\n";
+        }
+        if (!organBody.empty())
+            serialized += L"      <Organ id=\"" + oid + L"\">\r\n" + organBody + L"      </Organ>\r\n";
     }
 
     s_cachedOrganSwitchStates = serialized;
+    s_organSwitchStatesCacheValid = true;
 
     bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
     bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
@@ -3923,9 +4239,25 @@ std::map<int, bool> LoadOrganSwitchStates(const std::wstring& uniqueOrganId)
     if (uniqueOrganId.empty())
         return result;
 
-    EnsureStreamDeckSettingsLoaded();
-
-    std::wstring section = s_cachedOrganSwitchStates;
+    // Always read from disk so the restore uses the last flushed values,
+    // not a potentially stale in-memory cache.
+    std::wstring section;
+    {
+        std::wstring freshXml;
+        if (TryReadSettingsXml(freshXml))
+        {
+            std::wstring streamDeckSection, switchStatesSection;
+            if (TryGetSection(freshXml, L"StreamDeck", streamDeckSection) &&
+                TryGetSection(streamDeckSection, L"OrganSwitchStates", switchStatesSection))
+            {
+                size_t first = switchStatesSection.find(L'<');
+                if (first != std::wstring::npos)
+                    section = switchStatesSection.substr(first);
+            }
+        }
+    }
+    if (section.empty())
+        return result;
     size_t pos = 0;
     while (true)
     {
@@ -4061,7 +4393,11 @@ std::wstring LoadPrimaryHauptwerkOutputName()
         std::wstring node = section.substr(oStart + 3, oEnd - oStart - 3);
         std::wstring name;
         TryGetTagStringValue(node, L"<nam>", L"</nam>", name);
-        if (!name.empty() && name != L"AhlbornBridge Virtual Port" && name != L"AhlbornBridge Virtual Port (B)")
+        if (!name.empty()
+            && name != L"AhlbornBridge Virtual Port"
+            && name != L"AhlbornBridge Virtual Port (B)"
+            && name != L"Hauptwerk Virtual (A)"
+            && name != L"Hauptwerk Virtual (B)")
             return name;
 
         pos = oEnd + 4;
@@ -4465,5 +4801,37 @@ bool LoadStreamDeckPipeServerEnabled(bool& enabled)
 {
     EnsureStreamDeckSettingsLoaded();
     enabled = s_cachedStreamDeckPipeServerEnabled;
+    return true;
+}
+
+bool SaveHauptwerkPrioritySettings(const std::wstring& idlePriority, const std::wstring& loadedPriority)
+{
+    s_cachedHauptwerkIdlePriority   = idlePriority;
+    s_cachedHauptwerkLoadedPriority = loadedPriority;
+
+    // Persist immediately via the normal settings write path so the values
+    // survive even if the app exits before the next full WriteSettingsXml call.
+    bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+    bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+    bool showConsole = true; LoadShowDebugConsole(showConsole);
+    bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+    EnsureAssignedDevicesLoaded();
+    std::wstring in1, in2, out1, out2;
+    if (!s_assignedInputNames.empty())   in1  = s_assignedInputNames[0];
+    if (s_assignedInputNames.size() > 1) in2  = s_assignedInputNames[1];
+    if (!s_assignedOutputNames.empty())  out1 = s_assignedOutputNames[0];
+    if (s_assignedOutputNames.size() > 1) out2 = s_assignedOutputNames[1];
+    DeviceEnabledStates devEnabled;
+    bool ok = WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+    // Apply the new priority to Hauptwerk immediately without waiting for the enforcer cycle
+    ApplyHauptwerkPriorityNow();
+    return ok;
+}
+
+bool LoadHauptwerkPrioritySettings(std::wstring& idlePriority, std::wstring& loadedPriority)
+{
+    EnsureHauptwerkPriorityLoaded();
+    idlePriority   = s_cachedHauptwerkIdlePriority;
+    loadedPriority = s_cachedHauptwerkLoadedPriority;
     return true;
 }

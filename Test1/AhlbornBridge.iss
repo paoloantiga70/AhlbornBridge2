@@ -36,6 +36,8 @@ WizardStyle=modern
 Source: "*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Include ProcessManagerService.exe from a validated compile-time source.
 Source: "{#ServiceExeSource}"; DestDir: "{app}"; DestName: "ProcessManagerService.exe"; Flags: ignoreversion
+; Changelog — read at runtime to show What's New on first launch after update.
+Source: "CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Installa la cartella Icons nella posizione Roaming dell'utente corrente usata dal runtime e dal collegamento
 Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge2\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -50,13 +52,11 @@ Source: "Settings.xml"; DestDir: "{userappdata}\AhlbornBridge2"; Flags: onlyifdo
 Name: "{group}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; IconFilename: "{userappdata}\AhlbornBridge2\Icons\AhlbornBridge.ico"
 Name: "{group}\Uninstall AhlbornBridge2"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; Tasks: desktopicon
+Name: "{userstartup}\AhlbornBridge2"; Filename: "{app}\AhlbornBridge.exe"; Tasks: autostart
 
 [Tasks]
 Name: "desktopicon"; Description: "Crea icona sul Desktop"; GroupDescription: "Opzioni installazione"
 Name: "autostart"; Description: "Avvia AhlbornBridge2 con Windows"; GroupDescription: "Opzioni installazione"
-
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "AhlbornBridge2"; ValueData: """{app}\AhlbornBridge.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Code]
 // Stop any running AhlbornBridge before install so the new files can be copied.
