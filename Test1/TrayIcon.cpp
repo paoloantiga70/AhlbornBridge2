@@ -26,6 +26,7 @@ static HICON g_trayIcon = nullptr;
 static const wchar_t kSettingsClassName[] = L"AhlbornBridgeSettingsWindow";
 static const wchar_t kLedStripClassName[] = L"AhlbornBridgeMidiLedStrip";
 static const wchar_t kSettingsPageClassName[] = L"AhlbornBridgeSettingsPage";
+static const wchar_t kOrganMappingsClassName[] = L"AhlbornBridgeOrganMappingsWindow";
 static HWND g_settingsHwnd = nullptr;
 static HWND g_settingsTabHwnd = nullptr;
 static HWND g_settingsMidiPageHwnd = nullptr;
@@ -88,6 +89,135 @@ namespace
 {
     std::vector<InstalledOrganInfo> g_hauptwerkOrgans;
     std::vector<AudioDeviceInfo> g_hauptwerkAudioDevices;
+
+    struct OrganMappingsWindowState
+    {
+        InstalledOrganInfo organ;
+        std::vector<OrganStopMapping> mappings;
+        HWND listHwnd = nullptr;
+    };
+
+    LRESULT CALLBACK OrganMappingsWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        auto* state = reinterpret_cast<OrganMappingsWindowState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+
+        switch (message)
+        {
+        case WM_CREATE:
+        {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            auto* createState = reinterpret_cast<OrganMappingsWindowState*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(createState));
+            state = createState;
+
+            RECT rc = {};
+            GetClientRect(hWnd, &rc);
+
+            std::wstring titleText = L"Stop assignments for: " + state->organ.name;
+            CreateWindowW(L"STATIC", titleText.c_str(),
+                WS_CHILD | WS_VISIBLE,
+                12, 12, rc.right - 24, 20,
+                hWnd, nullptr, nullptr, nullptr);
+
+            state->listHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                12, 40, rc.right - 24, rc.bottom - 52,
+                hWnd, nullptr, nullptr, nullptr);
+
+            ListView_SetExtendedListViewStyle(state->listHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+            LVCOLUMNW col = {};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(L"Ahlborn Stop");  col.cx = 180; ListView_InsertColumn(state->listHwnd, 0, &col);
+            col.pszText = const_cast<LPWSTR>(L"Hauptwerk Stop"); col.cx = 320; ListView_InsertColumn(state->listHwnd, 1, &col);
+            col.pszText = const_cast<LPWSTR>(L"Ch");            col.cx = 45;  ListView_InsertColumn(state->listHwnd, 2, &col);
+            col.pszText = const_cast<LPWSTR>(L"CC");            col.cx = 45;  ListView_InsertColumn(state->listHwnd, 3, &col);
+            col.pszText = const_cast<LPWSTR>(L"ON");            col.cx = 55;  ListView_InsertColumn(state->listHwnd, 4, &col);
+            col.pszText = const_cast<LPWSTR>(L"OFF");           col.cx = 55;  ListView_InsertColumn(state->listHwnd, 5, &col);
+
+            for (int i = 0; i < static_cast<int>(state->mappings.size()); ++i)
+            {
+                const auto& m = state->mappings[i];
+                LVITEMW item = {};
+                item.mask = LVIF_TEXT;
+                item.iItem = i;
+                item.pszText = const_cast<LPWSTR>(m.ahlbornName.c_str());
+                ListView_InsertItem(state->listHwnd, &item);
+                ListView_SetItemText(state->listHwnd, i, 1, const_cast<LPWSTR>(m.hwStopName.c_str()));
+
+                std::wstring ch  = std::to_wstring(m.channel);
+                std::wstring cc  = std::to_wstring(m.cc);
+                std::wstring on  = std::to_wstring(m.dataOn);
+                std::wstring off = std::to_wstring(m.dataOff);
+                ListView_SetItemText(state->listHwnd, i, 2, const_cast<LPWSTR>(ch.c_str()));
+                ListView_SetItemText(state->listHwnd, i, 3, const_cast<LPWSTR>(cc.c_str()));
+                ListView_SetItemText(state->listHwnd, i, 4, const_cast<LPWSTR>(on.c_str()));
+                ListView_SetItemText(state->listHwnd, i, 5, const_cast<LPWSTR>(off.c_str()));
+            }
+            return 0;
+        }
+        case WM_SIZE:
+            if (state && state->listHwnd)
+            {
+                RECT rc = {};
+                GetClientRect(hWnd, &rc);
+                MoveWindow(state->listHwnd, 12, 40, rc.right - 24, rc.bottom - 52, TRUE);
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(hWnd);
+            return 0;
+        case WM_DESTROY:
+            delete state;
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+            return 0;
+        default:
+            break;
+        }
+
+        return DefWindowProcW(hWnd, message, wParam, lParam);
+    }
+
+    void ShowOrganStopMappingsWindow(HWND hOwner, const InstalledOrganInfo& organ)
+    {
+        std::vector<OrganStopMapping> mappings = LoadOrganStopMappings(organ.uniqueOrganId);
+
+        WNDCLASSW wc = {};
+        if (!GetClassInfoW(GetModuleHandleW(nullptr), kOrganMappingsClassName, &wc))
+        {
+            wc.lpfnWndProc = OrganMappingsWindowProc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = kOrganMappingsClassName;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            RegisterClassW(&wc);
+        }
+
+        auto* state = new OrganMappingsWindowState();
+        state->organ = organ;
+        state->mappings = std::move(mappings);
+
+        std::wstring wndTitle = L"Organ stop assignments - " + organ.name;
+        HWND hWnd = CreateWindowW(
+            kOrganMappingsClassName,
+            wndTitle.c_str(),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT, CW_USEDEFAULT, 760, 420,
+            hOwner,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            state);
+
+        if (!hWnd)
+        {
+            delete state;
+            MessageBoxW(hOwner, L"Unable to open the stop assignments window.", L"Hauptwerk", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        ShowWindow(hWnd, SW_SHOW);
+        UpdateWindow(hWnd);
+    }
 
     void HandleMidiDeviceChange(HWND hWnd)
     {
@@ -1547,6 +1677,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             && reinterpret_cast<LPNMHDR>(lParam)->code == LVN_ITEMCHANGED)
         {
             SyncHauptwerkAudioComboToSelection();
+            return 0;
+        }
+        if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hauptwerkOrganListHwnd
+            && reinterpret_cast<LPNMHDR>(lParam)->code == NM_DBLCLK)
+        {
+            auto* activate = reinterpret_cast<LPNMITEMACTIVATE>(lParam);
+            int itemIndex = activate ? activate->iItem : -1;
+            if (itemIndex < 0)
+                itemIndex = ListView_GetNextItem(g_hauptwerkOrganListHwnd, -1, LVNI_SELECTED);
+
+            if (itemIndex >= 0 && itemIndex < static_cast<int>(g_hauptwerkOrgans.size()))
+                ShowOrganStopMappingsWindow(hWnd, g_hauptwerkOrgans[itemIndex]);
             return 0;
         }
         if (reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE

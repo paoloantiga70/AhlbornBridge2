@@ -79,6 +79,10 @@ DWORD GetHauptwerkVirtualBLastMsgTime()
 void CloseHauptwerkProcess();
 void OpenHauptwerkVirtualBInput();
 
+// Set to true before calling CloseHauptwerkProcess() from the FE-disconnect path
+// to prevent the internal SendUnloadOrganMidiMessage() call (flush already done).
+static std::atomic<bool> g_suppressNextUnloadMsg{ false };
+
 namespace
 {
     std::atomic<bool> g_hauptwerkWorkerActive{ false };
@@ -1342,6 +1346,25 @@ namespace
 					printf("[Bidule] Console reconnect detected while organ already online; keeping current Bidule profile/session.\n");
 				}
 
+				// If the organ was already loaded when the app started (not via our
+				// loading flow), build the stop mappings here.  When an organ is loaded
+				// through OrganLoadingWatchThread that path already calls
+				// BuildOrganStopMappings, so we skip it here to avoid a duplicate write.
+				if (enteringOnlineState && !g_isLoadingOrgan.load())
+				{
+					int idxNow = g_currentLoadedInstalledOrganIndex.load();
+					if (idxNow > 0)
+					{
+						std::wstring uid = GetInstalledOrganUniqueId(idxNow);
+						if (!uid.empty())
+						{
+							int nMapped = BuildOrganStopMappings(uid);
+							printf("[TitleMonitor] BuildOrganStopMappings (startup): %d stop(s) mapped.\n", nMapped);
+							StartOrganConfigWatcher(uid);
+						}
+					}
+				}
+
 				std::wstring cleanOrganTitle = ExtractOrganTitle(title);
 				std::wstring outputDeviceName = GetInstalledOrganOutputDeviceName(g_currentLoadedInstalledOrganIndex.load());
 				if (!cleanOrganTitle.empty() && !outputDeviceName.empty())
@@ -1699,6 +1722,19 @@ namespace
                                 printf("[OrganLoadingWatch] Organ load complete, restoring switch states for index=%d\n", loadedIdx);
                                 Sleep(1500);
                                 NotifyStreamDeckSwitchesForOrgan(loadedIdx);
+                                // Build and persist the Ahlborn↔Hauptwerk stop mappings
+                                // for this organ so they are available for diagnostics and
+                                // future use (e.g. auto-configuration of new switches).
+                                std::wstring uid = GetInstalledOrganUniqueId(loadedIdx);
+                                if (!uid.empty())
+                                {
+                                    int nMapped = BuildOrganStopMappings(uid);
+                                    printf("[OrganLoadingWatch] BuildOrganStopMappings: %d stop(s) mapped.\n", nMapped);
+                                    // Start the config-file watcher so that any stop assignment
+                                    // made in Hauptwerk while this organ is loaded triggers a
+                                    // rebuild of OrganStopMappings without requiring a reload.
+                                    StartOrganConfigWatcher(uid);
+                                }
                             }
                         }
                         else
@@ -2348,14 +2384,14 @@ void CloseHauptwerkProcess()
 				{
 					printf("Hauptwerk did not exit after WM_CLOSE, forcing termination.\n");
 					CloseProcessByName(L"Hauptwerk.exe");
-
-                    printf("From Midi.cpp, line %d: Sending MIDI message to reset Stream Deck buttons...\n", __LINE__);
-                    SendUnloadOrganMidiMessage();
+					if (!g_suppressNextUnloadMsg.exchange(false))
+						SendUnloadOrganMidiMessage();
 				}
 				else
 				{
 					printf("Hauptwerk.exe process closed gracefully via WM_CLOSE. (line %d)\n", __LINE__);
-                    SendUnloadOrganMidiMessage();
+					if (!g_suppressNextUnloadMsg.exchange(false))
+						SendUnloadOrganMidiMessage();
 				}
 			}
 			else
@@ -2384,6 +2420,10 @@ void CloseHauptwerkProcess()
 
 DWORD WINAPI WatchdogThread(LPVOID)
 {
+    // Tracks whether we have already issued an early freeze for the current
+    // FE-loss event so we only freeze once per disconnect episode.
+    bool feDisconnectFreezeIssued = false;
+
     while (running)
     {
         auto now = Clock::now();
@@ -2398,6 +2438,29 @@ DWORD WINAPI WatchdogThread(LPVOID)
         bool notesAlive = anyNoteActive();
 
         bool disconnected = !(feAlive || notesAlive);
+
+        // Early freeze: on the very first watchdog cycle where FE is lost while the
+        // console is still considered connected and an organ is loaded, immediately
+        // freeze the in-memory switch states.  This ensures that when Hauptwerk
+        // reacts to the FE loss on its own and sends reset CCs on Hauptwerk Virtual (B),
+        // UpdateInMemorySwitchState() sees g_switchStateFrozen==true and ignores them,
+        // so the correct stop states survive until FlushOrganSwitchStatesToDisk() runs.
+        if (disconnected
+            && deviceState.load() == DeviceState::Connected
+            && g_currentLoadedInstalledOrganIndex.load() > 0
+            && !feDisconnectFreezeIssued)
+        {
+            printf("[FE-Disconnect] FE lost — freezing switch states early.\n");
+            FreezeOrganSwitchStateForFlush();
+            feDisconnectFreezeIssued = true;
+        }
+        // If the console reconnects before the disconnect is confirmed, release the freeze.
+        if (!disconnected && feDisconnectFreezeIssued)
+        {
+            feDisconnectFreezeIssued = false;
+            UnfreezeOrganSwitchState();
+        }
+
         if (disconnected && g_ignoreKeyReleaseOnDisconnect.load())
         {
             Sleep(50);
@@ -2464,10 +2527,34 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 if (!g_hauptwerkKeyHeld.load() )
                 {
                     printf("Closing Hauptwerk (no key held).\n");
+
+                    // Flush switch states to disk exactly as the explicit unload path does:
+                    // freeze first (so reset CCs from the console don't overwrite the state),
+                    // then call SendUnloadOrganMidiMessage which invokes
+                    // NotifyStreamDeckOrganUnloaded → FlushOrganSwitchStatesToDisk.
+                    if (g_currentLoadedInstalledOrganIndex.load() > 0)
+                    {
+                        printf("[FE-Disconnect] Flushing switch states to disk.\n");
+                        // The watchdog already froze switch states on FE-loss detection,
+                        // so Hauptwerk's reset CCs have already been ignored.
+                        // Suppress the SendUnloadOrganMidiMessage() call inside
+                        // CloseHauptwerkProcess() so it doesn't trigger a second flush
+                        // after the state has been corrupted by WM_CLOSE reset CCs.
+                        g_suppressNextUnloadMsg.store(true);
+                        // Flush and reset Stream Deck UI now, while state is still frozen.
+                        NotifyStreamDeckOrganUnloaded(true);
+                        // NotifyStreamDeckOrganUnloaded → FlushOrganSwitchStatesToDisk
+                        // releases the freeze internally; re-freeze to block the reset
+                        // CCs that WM_CLOSE will cause Hauptwerk to emit.
+                        FreezeOrganSwitchStateForFlush();
+                    }
+
                     CloseBiduleIfConfigured();
 
                     printf("g_midi_reset set to false.\n");
                     CloseHauptwerkProcess();
+                    // Release freeze now that Hauptwerk is fully terminated.
+                    UnfreezeOrganSwitchState();
 
                     if (g_hauptwerkMainWindow == nullptr)
                     {
@@ -2494,6 +2581,7 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 g_streamDeckBiduleSplashActive.store(false);
                 g_hauptwerkOrganTitle.clear();
                 NotifyOrganInfoTitleChanged();
+                feDisconnectFreezeIssued = false; // ready for next disconnect episode
             }
             else
             {

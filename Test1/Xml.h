@@ -135,6 +135,14 @@ void ReadActualHauptwerkMidiPorts(std::vector<std::wstring>& inputNames, std::ve
 void StartOrganFolderWatcher();
 void StopOrganFolderWatcher();
 
+// Start/stop a background thread that monitors Config0-OrganSettings for
+// writes to the currently loaded organ's config file and automatically
+// calls BuildOrganStopMappings() when Hauptwerk saves new stop assignments.
+// Call StartOrganConfigWatcher with the uniqueOrganId on organ load,
+// and StopOrganConfigWatcher on organ unload.
+void StartOrganConfigWatcher(const std::wstring& uniqueOrganId);
+void StopOrganConfigWatcher();
+
 // Load/save the enabled (open) state of each MIDI device LED toggle.
 bool LoadMidiInput1DeviceEnabled(bool& enabled);
 bool LoadMidiInput2DeviceEnabled(bool& enabled);
@@ -170,3 +178,25 @@ void UnfreezeOrganSwitchState();
 void UpdateInMemorySwitchState(const std::wstring& uniqueOrganId, int switchIndex, bool isOn, const std::wstring& switchName = L"");
 // Writes all in-memory switch states to Settings.xml. Call on organ unload and app shutdown.
 bool FlushOrganSwitchStatesToDisk();
+
+// Represents a matched mapping between an Ahlborn console stop and a Hauptwerk organ stop.
+struct OrganStopMapping
+{
+    std::wstring hwStopName;     // from <b> in ObjectList ObjectType="Switch" of the organ Definition
+    std::wstring ahlbornName;    // from <nam> in AhlbornSwitches of Settings.xml
+    int channel  = 0;            // MIDI channel
+    int cc       = 70;           // always 70 (from <c>19 → cc 70)
+    int dataOn   = 0;            // dataOff + 64
+    int dataOff  = 0;            // <s> - 1
+};
+
+// Scans the OrganConfig file for the currently loaded organ, matches every
+// SwitchInputOutput entry (c==19) against AhlbornSwitches in Settings.xml,
+// resolves the Hauptwerk stop name from the organ Definition file, and
+// writes the resulting <OrganStopMappings> section to Settings.xml.
+// Returns the number of matched stop mappings written (0 on failure).
+int BuildOrganStopMappings(const std::wstring& uniqueOrganId);
+
+// Loads the persisted stop mappings for a specific organ from
+// <StreamDeck><OrganStopMappings> in Settings.xml.
+std::vector<OrganStopMapping> LoadOrganStopMappings(const std::wstring& uniqueOrganId);

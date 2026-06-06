@@ -880,6 +880,9 @@ void NotifyStreamDeckOrganState(int loadedIndex)
 
 void NotifyStreamDeckOrganUnloaded(bool resetSwitches)
 {
+    // Stop watching the organ config file — the organ is being unloaded.
+    StopOrganConfigWatcher();
+
     // Persist all in-memory switch states before the organ is unloaded
     FlushOrganSwitchStatesToDisk();
 

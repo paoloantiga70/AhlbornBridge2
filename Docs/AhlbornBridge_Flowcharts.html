@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AhlbornBridge - Architectural & Flow Diagrams</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", sans-serif;
+            background-color: #f3f4f6;
+            color: #1f2937;
+            margin: 0;
+            padding: 40px 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05), 0 10px 15px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #1e3a8a;
+            font-size: 2.5rem;
+            margin-top: 0;
+            border-bottom: 3px solid #3b82f6;
+            padding-bottom: 15px;
+            text-align: center;
+        }
+        h2 {
+            color: #1e40af;
+            font-size: 1.6rem;
+            margin-top: 40px;
+            border-bottom: 1px solid #e5e7eb;
+            padding-bottom: 8px;
+        }
+        p {
+            font-size: 1rem;
+            color: #4b5563;
+        }
+        .instructions {
+            background-color: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 15px 20px;
+            margin: 20px 0 30px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #1d4ed8;
+        }
+        .diagram-box {
+            background: #fafafa;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            overflow-x: auto;
+            display: flex;
+            justify-content: center;
+        }
+        svg {
+            display: block;
+            margin: 0 auto;
+            max-width: 100%;
+            height: auto;
+        }
+        .footer {
+            margin-top: 50px;
+            text-align: center;
+            font-size: 0.85rem;
+            color: #9ca3af;
+            border-top: 1px solid #e5e7eb;
+            padding-top: 20px;
+        }
+        @media print {
+            body {
+                background-color: #ffffff;
+                padding: 0;
+            }
+            .container {
+                box-shadow: none;
+                padding: 0;
+                max-width: 100%;
+            }
+            .instructions {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AhlbornBridge — Diagrams Guidelines & Flowcharts</h1>
+
+        <div class="instructions">
+            <h3>Come salvare questo documento in PDF:</h3>
+            <ol>
+                <li>Apri questo file HTML con un browser web (Doppio click su <code>Docs\AhlbornBridge_Flowcharts.html</code> in Esplora Risorse, oppure aprilo via Microsoft Edge / Chrome).</li>
+                <li>Premi <strong>CTRL + P</strong> (oppure tasto destro sulla pagina e seleziona <strong>"Stampa..."</strong>).</li>
+                <li>Seleziona come stampante <strong>"Salva come PDF"</strong> (oppure <em>Microsoft Print to PDF</em>).</li>
+                <li>Nelle opzioni di stampa, seleziona <strong>"Layout: Orizzontale (Landscape)"</strong> per una visualizzazione ottimale dei diagrammi e attiva <strong>"Grafica di sfondo"</strong> per vedere i colori dei box.</li>
+                <li>Clicca su <strong>Salva</strong> e seleziona il percorso dove salvare il tuo file PDF.</li>
+            </ol>
+        </div>
+
+        <p>I diagrammi sottostanti illustrano l'architettura tecnica e i flussi di esecuzione principali dell'applicazione, inclusi la prima installazione, l'interazione MIDI tra consolle e Hauptwerk, e la sincronizzazione di Stream Deck e Bidule.</p>
+
+        <!-- DIAGRAM 1: GENERAL SYSTEM ARCHITECTURE AND DATA FLOW -->
+        <h2>1. Architettura di Sistema e Flussi Dati (Midi & Controllo VST)</h2>
+        <p>La consolle fisica si interfaccia al bridge via WinMM; la comunicazione tra il bridge e Hauptwerk avviene tramite i canali di loopback virtuali privati gestiti da Windows MIDI Services (MIDI 2.0). Stream Deck comunica via Named Pipe; Bidule &egrave; pilotato tramite comandi UDP/OSC diretti.</p>
+
+        <div class="diagram-box">
+            <svg width="1050" height="650" viewBox="0 0 1050 650" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <!-- Outer border background -->
+                <rect width="1050" height="650" rx="10" fill="#fcfcfc" stroke="#e0e0e0" stroke-width="2"/>
+
+                <!-- Title inside SVG -->
+                <text x="525" y="35" font-family="'Segoe UI', sans-serif" font-size="20" font-weight="bold" fill="#1e3a8a" text-anchor="middle">AHLBORNBRIDGE — ARCHITETTURA DI SISTEMA</text>
+
+                <!-- CONSOLE FISICA SECTION -->
+                <rect x="40" y="80" width="180" height="150" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+                <text x="130" y="110" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="14" fill="#1d4ed8" text-anchor="middle">CONSOLLE FISICA</text>
+                <text x="130" y="130" font-family="'Segoe UI', sans-serif" font-size="12" fill="#1e3a8a" text-anchor="middle">Ahlborn 250 SL</text>
+                <!-- Inputs & Outputs inside console box -->
+                <rect x="55" y="150" width="150" height="30" rx="4" fill="#ffffff" stroke="#93c5fd" stroke-width="1"/>
+                <text x="130" y="170" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#1e40af" text-anchor="middle">Focusrite / Oxygen 49</text>
+                <text x="130" y="210" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">(MIDI In / LED Out)</text>
+
+                <!-- BRIDGE HOST SECTION -->
+                <rect x="340" y="80" width="370" height="530" rx="8" fill="#f0fdf4" stroke="#10b981" stroke-width="2"/>
+                <text x="525" y="105" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="15" fill="#047857" text-anchor="middle">AHLBORNBRIDGE.EXE (Host principale in Tray)</text>
+
+                <!-- Bridge Sub-components -->
+                <!-- UI Routing & Locks -->
+                <rect x="360" y="130" width="330" height="90" rx="6" fill="#ffffff" stroke="#a7f3d0" stroke-width="1"/>
+                <text x="525" y="155" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#065f46" text-anchor="middle">Internal MIDI Dispatcher &amp; Locks</text>
+                <text x="525" y="175" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Filtro Active Sensing (0xFE) &amp; Fissatore (CC 16)</text>
+                <text x="525" y="193" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Lock-free SPSC Ring Buffer &amp; g_midiOutLock</text>
+
+                <!-- Stream Deck Server & Cache -->
+                <rect x="360" y="240" width="330" height="90" rx="6" fill="#ffffff" stroke="#a7f3d0" stroke-width="1"/>
+                <text x="525" y="265" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#065f46" text-anchor="middle">Stream Deck Pipe Server</text>
+                <text x="525" y="285" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Named pipe: \\.\pipe\AhlbornBridge</text>
+                <text x="525" y="303" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Cache switch in-memory per feedback real-time</text>
+
+                <!-- MIDI 2.0 Loopback endpoints creator -->
+                <rect x="360" y="350" width="330" height="85" rx="6" fill="#ffffff" stroke="#a7f3d0" stroke-width="1"/>
+                <text x="525" y="375" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#065f46" text-anchor="middle">Windows MIDI Services Bootstrapper</text>
+                <text x="525" y="395" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Coppia A: AhlbornBridge Virtual Port / (B)</text>
+                <text x="525" y="412" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Coppia B: Hauptwerk Virtual (A) / (B)</text>
+
+                <!-- UI Automation / Bidule & Priority Dispatch -->
+                <rect x="360" y="455" width="330" height="135" rx="6" fill="#ffffff" stroke="#a7f3d0" stroke-width="1"/>
+                <text x="525" y="478" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#065f46" text-anchor="middle">Process &amp; Profile Orchestrator</text>
+                <text x="525" y="500" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- UDP/OSC invio comandi profilo a Bidule (porta 3210)</text>
+                <text x="525" y="518" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Client Pipe priorit&agrave; per ProcessManagerService</text>
+                <text x="525" y="536" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- UI Automation IAccessible (Load/Unload organ screen)</text>
+                <text x="525" y="554" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">- Gestione file di configurazione Settings.xml (in-memory lock)</text>
+
+                <!-- STREAM DECK BOX -->
+                <rect x="40" y="270" width="180" height="150" rx="8" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+                <text x="130" y="300" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="14" fill="#c2410c" text-anchor="middle">STREAM DECK</text>
+                <text x="130" y="320" font-family="'Segoe UI', sans-serif" font-size="11" fill="#ea580c" text-anchor="middle">Dispositivo Hardware &amp;</text>
+                <text x="130" y="335" font-family="'Segoe UI', sans-serif" font-size="11" fill="#ea580c" text-anchor="middle">Plugin SD (executable)</text>
+                <rect x="55" y="355" width="150" height="45" rx="4" fill="#ffffff" stroke="#ffedd5" stroke-width="1"/>
+                <text x="130" y="373" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#ea580c" text-anchor="middle">Stato Switch</text>
+                <text x="130" y="388" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">Toggle / Feedback Fisico</text>
+
+                <!-- HAUPTWERK APP BOX -->
+                <rect x="830" y="240" width="180" height="230" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="2"/>
+                <text x="920" y="270" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="14" fill="#be185d" text-anchor="middle">HAUPTWERK.EXE</text>
+                <text x="920" y="290" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">Applicazione Organo</text>
+
+                <rect x="845" y="310" width="150" height="40" rx="4" fill="#ffffff" stroke="#fbcfe8" stroke-width="1"/>
+                <text x="920" y="326" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#be185d" text-anchor="middle">Midi Input Port (B)</text>
+                <text x="920" y="340" font-family="'Segoe UI', sans-serif" font-size="9" fill="#1e293b" text-anchor="middle">AhlbornBridge Virtual Prot (B)</text>
+
+                <rect x="845" y="365" width="150" height="40" rx="4" fill="#ffffff" stroke="#fbcfe8" stroke-width="1"/>
+                <text x="920" y="381" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#be185d" text-anchor="middle">Midi Output Port (A)</text>
+                <text x="920" y="395" font-family="'Segoe UI', sans-serif" font-size="9" fill="#1e293b" text-anchor="middle">Hauptwerk Virtual (A)</text>
+
+                <rect x="845" y="420" width="150" height="35" rx="4" fill="#ffffff" stroke="#fbcfe8" stroke-width="1"/>
+                <text x="920" y="435" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#be185d" text-anchor="middle">ASIO Audio Output</text>
+                <text x="920" y="448" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">(ASIO Link / Focusrite)</text>
+
+                <!-- BIDULE SECTION -->
+                <rect x="830" y="80" width="180" height="130" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="2"/>
+                <text x="920" y="110" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="14" fill="#6d28d9" text-anchor="middle">PLOGUE BIDULE</text>
+                <text x="920" y="130" font-family="'Segoe UI', sans-serif" font-size="11" fill="#4b5563" text-anchor="middle">Gestione ASIO / VST</text>
+                <rect x="845" y="150" width="150" height="45" rx="4" fill="#ffffff" stroke="#ddd6fe" stroke-width="1"/>
+                <text x="920" y="168" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#6d28d9" text-anchor="middle">OSC Engine 3210</text>
+                <text x="920" y="183" font-family="'Segoe UI', sans-serif" font-size="9" fill="#4b5563" text-anchor="middle">Riceve /open e /file_saveas</text>
+
+                <!-- PROCESS PRIORITY SERVICE BOX -->
+                <rect x="40" y="460" width="180" height="150" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+                <text x="130" y="490" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#334155" text-anchor="middle">PROCESS SERVICE</text>
+                <text x="130" y="508" font-family="'Segoe UI', sans-serif" font-size="11" fill="#64748b" text-anchor="middle">ProcessManagerService</text>
+                <text x="130" y="523" font-family="'Segoe UI', sans-serif" font-size="11" fill="#64748b" text-anchor="middle">(Running as SYSTEM)</text>
+                <rect x="55" y="545" width="150" height="45" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+                <text x="130" y="563" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#334155" text-anchor="middle">Pipe Server Control</text>
+                <text x="130" y="578" font-family="'Segoe UI', sans-serif" font-size="9" fill="#4b5563" text-anchor="middle">Cmd: SET_PRIORITY</text>
+
+
+                <!-- FLOW ARROWS / CONNECTIONS -->
+                <!-- Console MIDI In to Bridge Dispatcher -->
+                <path d="M 220 155 L 360 155" stroke="#ef4444" stroke-width="2.5" marker-end="url(#arrow-red)"/>
+                <text x="290" y="145" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#ef4444" text-anchor="middle">MidiIn (Tasto)</text>
+
+                <!-- Dispatcher to loopback endpoint A, then to Hauptwerk -->
+                <path d="M 690 150 L 760 150 L 760 330 L 845 330" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+                <text x="760" y="235" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#047857" text-anchor="middle">Virtual A Out</text>
+
+                <!-- Stream Deck Named Pipe Connection to Bridge Server -->
+                <path d="M 220 330 L 360 330" stroke="#f97316" stroke-width="2" stroke-dasharray="4,2" marker-end="url(#arrow-orange)" fill="none"/>
+                <path d="M 360 310 L 220 310" stroke="#f97316" stroke-width="2" stroke-dasharray="4,2" marker-end="url(#arrow-orange)" fill="none"/>
+                <text x="290" y="295" font-family="'Segoe UI', sans-serif" font-size="9" font-weight="bold" fill="#c2410c" text-anchor="middle">Pipe JSON (Bi-di)</text>
+
+                <!-- Hauptwerk Virtual A Out (Actually Virtual Pair B) to Bridge -->
+                <path d="M 845 385 L 790 385 L 790 410 L 690 410" stroke="#ec4899" stroke-width="2" fill="none" marker-end="url(#arrow-pink)"/>
+                <text x="750" y="425" font-family="'Segoe UI', sans-serif" font-size="9" font-weight="bold" fill="#be185d" text-anchor="middle">Read Virtual (B)</text>
+
+                <!-- Bridge Dispatcher back to Console LED Out (Direct) -->
+                <path d="M 360 180 L 260 180 L 260 210 L 220 210" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+                <text x="295" y="198" font-family="'Segoe UI', sans-serif" font-size="9" font-weight="bold" fill="#1d4ed8" text-anchor="middle">Mirror LED Out</text>
+
+                <!-- Bridge to Bidule OSC -->
+                <path d="M 690 480 L 780 480 L 780 170 L 830 170" stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+                <text x="770" y="205" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#6d28d9" text-anchor="middle">UDP OSC</text>
+
+                <!-- Bridge Main to Process Manager Service Pipe -->
+                <path d="M 360 550 L 220 550" stroke="#64748b" stroke-width="2" stroke-dasharray="4,2" marker-end="url(#arrow-gray)"/>
+                <path d="M 220 575 L 360 575" stroke="#64748b" stroke-width="2" stroke-dasharray="4,2" marker-end="url(#arrow-gray)"/>
+                <text x="290" y="540" font-family="'Segoe UI', sans-serif" font-size="9" font-weight="bold" fill="#334155" text-anchor="middle">Named Pipe SYSTEM</text>
+
+                <!-- Service to Hauptwerk priority change -->
+                <path d="M 130 460 L 130 445 L 830 445" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6,3" fill="none" marker-end="url(#arrow-red)"/>
+                <text x="240" y="438" font-family="'Segoe UI', sans-serif" font-size="9" font-weight="bold" fill="#ef4444" text-anchor="middle">SetPriorityClass (Hauptwerk)</text>
+
+                <!-- MARKERS DEFINITIONS -->
+                <defs>
+                    <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#ef4444"/>
+                    </marker>
+                    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6"/>
+                    </marker>
+                    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#10b981"/>
+                    </marker>
+                    <marker id="arrow-pink" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#ec4899"/>
+                    </marker>
+                    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#f97316"/>
+                    </marker>
+                    <marker id="arrow-purple" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#8b5cf6"/>
+                    </marker>
+                    <marker id="arrow-gray" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+                        <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+                    </marker>
+                </defs>
+            </svg>
+        </div>
+
+        <!-- DIAGRAM 2: STARTUP, LEARNING & FIRST INSTALL FLOW -->
+        <h2 style="page-break-before: always;">2. Diagramma di Flusso: Setup e Prima Installazione</h2>
+        <p>Questo diagramma mostra come l'applicazione gestisce la prima esecuzione: rileva se vi &egrave; un dispositivo configurato in <code>Settings.xml</code>; in caso contrario, attiva la procedura di auto-apprendimento interattiva, sniffo dei pacchetti MIDI della consolle, iniezione guidata dei dispositivi virtuali in Hauptwerk e configurazione dell'ASIO audio engine.</p>
+
+        <div class="diagram-box">
+            <svg width="1000" height="700" viewBox="0 0 1000 700" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect width="1000" height="700" rx="10" fill="#fcfcfc" stroke="#e0e0e0" stroke-width="2"/>
+                <text x="500" y="35" font-family="'Segoe UI', sans-serif" font-size="18" font-weight="bold" fill="#1e3a8a" text-anchor="middle">FLOWCHART: INIZIALIZZAZIONE &amp; PRIMA INSTALLAZIONE (SETUP)</text>
+
+                <!-- START -->
+                <rect x="425" y="70" width="150" height="40" rx="20" fill="#1e40af" stroke="#1d4ed8" stroke-width="2"/>
+                <text x="500" y="95" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#ffffff" text-anchor="middle">START APP</text>
+
+                <!-- CHECK CONFIGURED -->
+                <polygon points="500,140 650,175 500,210 350,175" fill="#fef08a" stroke="#eab308" stroke-width="2"/>
+                <text x="500" y="171" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">Dispositivo In</text>
+                <text x="500" y="185" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">in Settings XML?</text>
+
+                <!-- YES PATH: BOOT NORMAL -->
+                <rect x="730" y="150" width="220" height="50" rx="6" fill="#f0fdf4" stroke="#10b981" stroke-width="2"/>
+                <text x="840" y="174" font-family="'Segoe UI', sans-serif" font-size="12" font-weight="bold" fill="#15803d" text-anchor="middle">Carica porte assegnate</text>
+                <text x="840" y="190" font-family="'Segoe UI', sans-serif" font-size="11" fill="#166534" text-anchor="middle">e avvia in System Tray</text>
+
+                <path d="M 650 175 L 730 175" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-green)"/>
+                <text x="685" y="165" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#15803d" text-anchor="middle">SI</text>
+
+                <!-- NO PATH: INTERACTIVE DETECTION -->
+                <path d="M 500 210 L 500 240" stroke="#f97316" stroke-width="2" marker-end="url(#arrow-orange)"/>
+                <text x="515" y="225" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#ea580c" text-anchor="middle">NO</text>
+
+                <!-- PHASE 1: LISTENING -->
+                <rect x="350" y="240" width="300" height="70" rx="6" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+                <text x="500" y="260" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#c2410c" text-anchor="middle">FASE 1: Rilevamento automatico</text>
+                <text x="500" y="280" font-family="'Segoe UI', sans-serif" font-size="11" fill="#ea580c" text-anchor="middle">Apre in sniff tutti i MIDI In fisici eccetto virtuali.</text>
+                <text x="500" y="295" font-family="'Segoe UI', sans-serif" font-size="11" fill="#ea580c" text-anchor="middle">Mostra finestra: "Premi un tasto o registro..."</text>
+
+                <!-- MIDI HIT RECEIVED? -->
+                <path d="M 500 310 L 500 335" stroke="#f97316" stroke-width="2" marker-end="url(#arrow-orange)"/>
+                <polygon points="500,335 630,365 500,395 370,365" fill="#fef08a" stroke="#eab308" stroke-width="2"/>
+                <text x="500" y="364" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">Evento MIDI In</text>
+                <text x="500" y="376" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">ricevuto?</text>
+
+                <!-- TIMEOUT / SKIP -->
+                <path d="M 370 365 L 180 365 L 180 175 L 350 175" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,2" fill="none" marker-end="url(#arrow-red)"/>
+                <text x="235" y="355" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#ef4444" text-anchor="middle">Skip/Annulla setup</text>
+
+                <!-- PHASE 2: CONFIRMATION -->
+                <path d="M 500 395 L 500 420" stroke="#f97316" stroke-width="2" marker-end="url(#arrow-orange)"/>
+                <rect x="350" y="420" width="300" height="60" rx="6" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+                <text x="500" y="440" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#c2410c" text-anchor="middle">FASE 2: Conferma dispositivo</text>
+                <text x="500" y="458" font-family="'Segoe UI', sans-serif" font-size="11" fill="#ea580c" text-anchor="middle">Mostra porta rilevata (es: Focusrite) con fallback listbox</text>
+
+                <!-- PHASE 3: CONFIGURATION -->
+                <path d="M 500 480 L 500 505" stroke="#f97316" stroke-width="2" marker-end="url(#arrow-orange)"/>
+                <rect x="250" y="505" width="500" height="110" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+                <text x="500" y="525" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#1e40af" text-anchor="middle">FASE 3: Scrittura configurazione Hauptwerk e Bridge</text>
+                <!-- list of actions inside box -->
+                <text x="500" y="545" font-family="'Segoe UI', sans-serif" font-size="11" fill="#1e3a8a" text-anchor="middle">1. Salva consolle come "FixedHauptwerkOutput" in Settings.xml</text>
+                <text x="500" y="562" font-family="'Segoe UI', sans-serif" font-size="11" fill="#1e3a8a" text-anchor="middle">2. Genera 8 nodi in PreviouslySeenDevice in Config.Config_Hauptwerk_xml</text>
+                <text x="500" y="579" font-family="'Segoe UI', sans-serif" font-size="11" fill="#1e3a8a" text-anchor="middle">3. Imposta Hauptwerk Out = "Hauptwerk Virtual (A)" e In = "AhlbornBridge Virtual Port (B)"</text>
+                <text x="500" y="596" font-family="'Segoe UI', sans-serif" font-size="11" fill="#1e3a8a" text-anchor="middle">4. Configura ASIO output di default specchiato e canali diffusori di default</text>
+
+                <!-- PHASE 4: FINISHED -->
+                <path d="M 500 615 L 500 640" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-green)"/>
+                <rect x="350" y="640" width="300" height="45" rx="22" fill="#10b981" stroke="#047857" stroke-width="2"/>
+                <text x="500" y="667" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="13" fill="#ffffff" text-anchor="middle">SETUP COMPLETATO (Ready Tray Icon)</text>
+
+            </svg>
+        </div>
+
+        <!-- DIAGRAM 3: MIDI INPUT AND LED MIRRORING FLOW -->
+        <h2 style="page-break-before: always;">3. Diagramma di Flusso: Loop di Routing MIDI &amp; Sincronizzazione LED</h2>
+        <p>Questo diagramma illustra come viene instradata l'attivit&agrave; MIDI durante la normale esecuzione. Vengono distinte e isolate le sorgenti per evitare loop infiniti di feedback e garantire che sia lo Stream Deck fisici che i LED fisici della consolle si aggiornino sempre istantaneamente sia se l'utente agisce da consolle, sia se clicca sullo schermo di Hauptwerk.</p>
+
+        <div class="diagram-box">
+            <svg width="1000" height="720" viewBox="0 0 1000 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect width="1000" height="720" rx="10" fill="#fcfcfc" stroke="#e0e0e0" stroke-width="2"/>
+                <text x="500" y="32" font-family="'Segoe UI', sans-serif" font-size="18" font-weight="bold" fill="#1e3a8a" text-anchor="middle">FLOWCHART: LOOP DI INFRASTRUTTURA MIDI &amp; SYNC</text>
+
+                <!-- MIDI MESSAGE INCOMING -->
+                <rect x="390" y="60" width="220" height="40" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+                <text x="500" y="85" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="12" fill="#1d4ed8" text-anchor="middle">Ricevuto messaggio MIDI in MidiInProc</text>
+
+                <!-- CHECK SOURCE: IS HAUPTWERK B MONITOR? -->
+                <polygon points="500,120 660,165 500,210 340,165" fill="#fbcfe8" stroke="#ec4899" stroke-width="2"/>
+                <text x="500" y="159" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#9d174d" text-anchor="middle">Sorgente In arrivo =</text>
+                <text x="500" y="174" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#9d174d" text-anchor="middle">"Hauptwerk Virtual (B)"?</text>
+
+                <!-- YES PATH: IS HW MONITOR OUTPUT (STOP CHANGES FROM SCREEN) -->
+                <path d="M 660 165 L 720 165" stroke="#ec4899" stroke-width="2" marker-end="url(#arrow-pink)"/>
+                <text x="690" y="155" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#9d174d" text-anchor="middle">SI</text>
+
+                <!-- HW MONITOR ACTIONS -->
+                <rect x="720" y="125" width="240" height="235" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="2"/>
+                <text x="840" y="148" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="12" fill="#9d174d" text-anchor="middle">Gestione Output Hauptwerk</text>
+                <text x="840" y="170" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">1. Aggiorna g_hwVirtualBLastMsgTick</text>
+                <text x="840" y="185" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   (Illumina LED virtuale A/B in UI)</text>
+                <text x="840" y="210" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">2. Specchia messaggio MIDI su porta fisica</text>
+                <text x="840" y="225" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   FixedHauptwerkOutput (Oxygen/Focusrite)</text>
+                <text x="840" y="240" font-family="'Segoe UI', sans-serif" font-size="10" font-style="italic" fill="#be185d" text-anchor="middle">&rarr; LED dei registri fisici sincronizzati</text>
+
+                <text x="840" y="270" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">3. Se CC ed &egrave; caricato un Organo:</text>
+                <text x="840" y="285" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   Cerca in Cache Switch (Match tre vie data)</text>
+                <text x="840" y="300" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   Invia stato ON/OFF a Stream Deck</text>
+                <text x="840" y="315" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   e salva in-memory per salvataggio futuro</text>
+                <text x="840" y="340" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#be185d" text-anchor="middle">RETURN (Ignora routing standard)</text>
+
+                <!-- NO PATH: STANDARD CONSOLE INPUT -->
+                <path d="M 500 210 L 500 240" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)"/>
+                <text x="515" y="225" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#1d4ed8" text-anchor="middle">NO</text>
+
+                <!-- ACTION: UPDATE IN TICK activity indicators -->
+                <rect x="360" y="240" width="280" height="40" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+                <text x="500" y="264" font-family="'Segoe UI', sans-serif" font-size="11" fill="#334155" text-anchor="middle">Aggiorna g_inputSlotLastMsg per LED UI</text>
+
+                <!-- CHECK SENSE FILTER -->
+                <path d="M 500 280 L 500 305" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)"/>
+                <polygon points="500,305 650,345 500,385 350,345" fill="#fef08a" stroke="#eab308" stroke-width="2"/>
+                <text x="500" y="341" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">Messaggio MIDI In =</text>
+                <text x="500" y="355" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">ActiveSensing (0xFE)?</text>
+
+                <!-- YES SENSE: FILTER AND DISCARD -->
+                <path d="M 650 345 L 705 345" stroke="#15803d" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+                <text x="675" y="335" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#15803d" text-anchor="middle">SI</text>
+
+                <rect x="705" y="325" width="135" height="40" rx="4" fill="#f0vdf4" stroke="#10b981" stroke-width="1"/>
+                <text x="772" y="348" font-family="'Segoe UI', sans-serif" font-size="10" fill="#15803d" text-anchor="middle">Aggiorna watchdog, scarta</text>
+
+                <!-- NO SENSE: NORMAL ROUTING -->
+                <path d="M 500 385 L 500 410" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)"/>
+                <text x="515" y="394" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#1d4ed8" text-anchor="middle">NO</text>
+
+                <!-- CHECK FISSATORE -->
+                <polygon points="500,410 650,450 500,490 350,450" fill="#fef08a" stroke="#eab308" stroke-width="2"/>
+                <text x="500" y="446" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">Tasto [Fissatore]</text>
+                <text x="500" y="460" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">ch=16 CC#81?</text>
+
+                <!-- YES FISSATORE: HW KEYPRESS AUTOMATION PATH -->
+                <path d="M 650 450 L 710 450" stroke="#15803d" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+                <text x="680" y="440" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#15803d" text-anchor="middle">SI</text>
+
+                <rect x="710" y="420" width="250" height="150" rx="6" fill="#f0fdf4" stroke="#10b981" stroke-width="1"/>
+                <text x="835" y="442" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#15803d" text-anchor="middle">Gestione Fissatore (SHORT PRESS)</text>
+                <text x="835" y="464" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">1. Misura millisecondi di hold pressione.</text>
+                <text x="835" y="480" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">2. Se &lt;= 400ms (Tap rapido):</text>
+                <text x="835" y="495" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   - Rintraccia HW MainWindow</text>
+                <text x="835" y="510" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   - Invia tasto virtuale SET/pressione</text>
+                <text x="835" y="525" font-family="'Segoe UI', sans-serif" font-size="10" fill="#4b5563" text-anchor="middle">   - Aggiorna stato e scarta messaggio</text>
+                <text x="835" y="550" font-family="'Segoe UI', sans-serif" font-weight="bold" fill="#15803d" text-anchor="middle">RETURN (Ignorato MIDI Out)</text>
+
+                <!-- NO FISSATORE: STANDARD KEY ROUTING -->
+                <path d="M 500 490 L 500 515" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)"/>
+                <text x="515" y="500" font-family="'Segoe UI', sans-serif" font-size="11" font-weight="bold" fill="#1d4ed8" text-anchor="middle">NO</text>
+
+                <!-- CHECK BRIDGE ENABLED -->
+                <polygon points="500,515 650,555 500,595 350,555" fill="#fef08a" stroke="#eab308" stroke-width="2"/>
+                <text x="500" y="551" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">Bridge Abilitato</text>
+                <text x="500" y="565" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="11" fill="#713f12" text-anchor="middle">(g_midiRouterEnabled)?</text>
+
+                <!-- YES BRIDGE: ROUTE TO QUEUES -->
+                <path d="M 500 595 L 500 620" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-green)"/>
+                <text x="515" y="605" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#15803d" text-anchor="middle">SI</text>
+
+                <rect x="250" y="620" width="500" height="80" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/>
+                <text x="500" y="640" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="12" fill="#047857" text-anchor="middle">Incolonnamento &amp; Invio Standard</text>
+                <text x="500" y="660" font-family="'Segoe UI', sans-serif" font-size="10" fill="#065f46" text-anchor="middle">1. Messaggio accodato in g_bridgeFwdQueue (Ring Buffer SPSC)</text>
+                <text x="500" y="675" font-family="'Segoe UI', sans-serif" font-size="10" fill="#065f46" text-anchor="middle">2. MidiOutWorkerThread estrae e inoltra a tutti i MIDI out eccetto canali riservati</text>
+                <text x="500" y="688" font-family="'Segoe UI', sans-serif" font-size="10" fill="#065f46" text-anchor="middle">3. Invia a Hauptwerk via "AhlbornBridge Virtual Port (B)"</text>
+
+                <!-- NO BRIDGE: SILENT DISCARD -->
+                <path d="M 350 555 L 180 555 L 180 660 L 250 660" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,2" fill="none" marker-end="url(#arrow-gray)"/>
+                <text x="215" y="545" font-family="'Segoe UI', sans-serif" font-size="10" font-weight="bold" fill="#64748b" text-anchor="middle">NO (Ignora)</text>
+
+            </svg>
+        </div>
+
+        <div class="footer">
+            Generato automaticamente da <strong>AhlbornBridge Technical Diagrams Tool</strong>.<br>
+            AhlbornBridge2 Core Repository - Master Branch. Copyright &copy; Paolo Antiga.
+        </div>
+    </div>
+</body>
+</html>

@@ -68,6 +68,8 @@ namespace
     std::wstring ReadHauptwerkStandbyOrgans();
     std::wstring ReadHauptwerkInstalledOrgans();
     void EnsureAudioSettingsLoaded();
+    std::wstring NormalizeAhlbornSwitchesSection(const std::wstring& section);
+    std::wstring NormalizeOrganStopMappingsSection(const std::wstring& section);
 
     // Cached standby-organ XML fragment (read once from the Hauptwerk config).
     std::wstring s_cachedStandbyOrgans;
@@ -89,6 +91,9 @@ namespace
     bool s_organSwitchStatesCacheValid = false;
     bool s_cachedStreamDeckPipeServerEnabled = true;
     bool s_streamDeckSettingsLoaded = false;
+
+    // Cached <OrganStopMappings> XML fragment (built on organ load, persisted to Settings.xml).
+    std::wstring s_cachedOrganStopMappings;
 
     std::wstring s_cachedBidulePath;
     bool s_cachedBiduleCloseOnUnload = true;
@@ -1134,6 +1139,16 @@ namespace
 				s_organSwitchStatesCacheValid = true;
 			}
 		}
+		// Preserve OrganStopMappings from the file so they survive across
+		// unrelated WriteSettingsXml calls that happen before BuildOrganStopMappings runs.
+		if (s_cachedOrganStopMappings.empty())
+		{
+			std::wstring stopMappingsSection;
+			if (TryGetSection(section, L"OrganStopMappings", stopMappingsSection))
+			{
+                s_cachedOrganStopMappings = NormalizeOrganStopMappingsSection(stopMappingsSection);
+			}
+		}
 	}
 
 	void EnsureAudioSettingsLoaded()
@@ -1181,6 +1196,46 @@ namespace
 		}
 		return normalized;
 	}
+
+    std::wstring NormalizeOrganStopMappingsSection(const std::wstring& section)
+    {
+        std::wstring normalized;
+        size_t pos = 0;
+        while (true)
+        {
+            size_t organStart = section.find(L"<Organ", pos);
+            if (organStart == std::wstring::npos)
+                break;
+
+            size_t openEnd = section.find(L'>', organStart);
+            size_t closeStart = section.find(L"</Organ>", openEnd);
+            if (openEnd == std::wstring::npos || closeStart == std::wstring::npos)
+                break;
+
+            std::wstring openTag = section.substr(organStart, openEnd - organStart + 1);
+            std::wstring organBody = section.substr(openEnd + 1, closeStart - openEnd - 1);
+
+            normalized += L"      " + openTag + L"\r\n";
+
+            size_t mpos = 0;
+            while (true)
+            {
+                size_t mstart = organBody.find(L"<o", mpos);
+                if (mstart == std::wstring::npos)
+                    break;
+                size_t mend = organBody.find(L"/>", mstart);
+                if (mend == std::wstring::npos)
+                    break;
+
+                normalized += L"        " + organBody.substr(mstart, mend - mstart + 2) + L"\r\n";
+                mpos = mend + 2;
+            }
+
+            normalized += L"      </Organ>\r\n";
+            pos = closeStart + 8;
+        }
+        return normalized;
+    }
 
 	// Parse a <AssignedMidi*s> section: each <Device>name</Device> child.
 	std::vector<std::wstring> ParseDeviceListSection(const std::wstring& section)
@@ -1338,6 +1393,16 @@ namespace
 						s_cachedOrganSwitchStates = savedSwitchStates;
 						s_organSwitchStatesCacheValid = true;
 					}
+					// Preserve OrganStopMappings from file when the in-memory cache is empty
+					// (e.g. on writes that happen before BuildOrganStopMappings has run).
+					if (s_cachedOrganStopMappings.empty())
+					{
+						std::wstring savedMappings;
+						if (TryGetSection(streamDeckSection, L"OrganStopMappings", savedMappings))
+						{
+                        s_cachedOrganStopMappings = NormalizeOrganStopMappingsSection(savedMappings);
+						}
+					}
 				}
 			}
 		}
@@ -1401,6 +1466,8 @@ namespace
 			L"    </AhlbornSwitches>\r\n"
 			L"    <OrganSwitchStates>\r\n" + s_cachedOrganSwitchStates +
 			L"    </OrganSwitchStates>\r\n"
+			L"    <OrganStopMappings>\r\n" + s_cachedOrganStopMappings +
+			L"    </OrganStopMappings>\r\n"
 			L"  </StreamDeck>\r\n"
 			L"  <Audio>\r\n"
 			L"    <AsioDevId>" + s_cachedAsioDevId + L"</AsioDevId>\r\n"
@@ -3777,6 +3844,215 @@ void StopOrganFolderWatcher()
     g_organWatcherStopEvent = nullptr;
 }
 
+// ---------------------------------------------------------------
+// OrganConfig file watcher — monitors Config0-OrganSettings for
+// changes to the currently loaded organ's config file so that
+// BuildOrganStopMappings is re-run whenever Hauptwerk saves new
+// stop assignments without waiting for the next organ load.
+// ---------------------------------------------------------------
+namespace
+{
+    HANDLE g_organConfigWatcherThread  = nullptr;
+    HANDLE g_organConfigWatcherStop    = nullptr;
+    // The uniqueOrganId of the organ whose config file is being watched.
+    // Protected by g_organConfigWatcherLock.
+    CRITICAL_SECTION g_organConfigWatcherLock;
+    bool             g_organConfigWatcherLockInit = false;
+    std::wstring     g_watchedOrganUniqueId;
+    // When true the watcher is in "drain" mode: it will do one final rebuild
+    // after the next file-change notification (or after a timeout) and then
+    // stop itself.  Set by StopOrganConfigWatcher() instead of signalling
+    // the stop event immediately.
+    std::atomic<bool> g_organConfigDraining{ false };
+
+    void EnsureOrganConfigWatcherLock()
+    {
+        if (!g_organConfigWatcherLockInit)
+        {
+            InitializeCriticalSection(&g_organConfigWatcherLock);
+            g_organConfigWatcherLockInit = true;
+        }
+    }
+
+    DWORD WINAPI OrganConfigWatcherThread(LPVOID)
+    {
+        // Build the watch directory path.
+        std::wstring watchDir = s_rootHauptwerkUserData;
+        if (watchDir.empty())
+        {
+            std::wstring xml;
+            if (TryReadSettingsXml(xml))
+            {
+                std::wstring opts;
+                if (TryGetSection(xml, L"Options", opts))
+                    TryGetTagStringValue(opts,
+                        L"<RootFolder_HauptwerkUserData>",
+                        L"</RootFolder_HauptwerkUserData>", watchDir);
+            }
+        }
+        if (watchDir.empty())
+        {
+            printf("[OrganConfigWatcher] HauptwerkUserData not configured, watcher exiting.\n");
+            return 0;
+        }
+        if (watchDir.back() == L'\\' || watchDir.back() == L'/')
+            watchDir.pop_back();
+        watchDir += L"\\Config0-OrganSettings";
+
+        DWORD attrs = GetFileAttributesW(watchDir.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            printf("[OrganConfigWatcher] Config0-OrganSettings folder not found: %S\n", watchDir.c_str());
+            return 0;
+        }
+
+        printf("[OrganConfigWatcher] Watching: %S\n", watchDir.c_str());
+
+        while (true)
+        {
+            HANDLE hChange = FindFirstChangeNotificationW(
+                watchDir.c_str(), FALSE,
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME);
+
+            if (hChange == INVALID_HANDLE_VALUE)
+            {
+                printf("[OrganConfigWatcher] FindFirstChangeNotification failed (error %lu), retrying...\n", GetLastError());
+                if (WaitForSingleObject(g_organConfigWatcherStop, 3000) == WAIT_OBJECT_0)
+                    break;
+                continue;
+            }
+
+            HANDLE handles[2] = { g_organConfigWatcherStop, hChange };
+            DWORD result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+            FindCloseChangeNotification(hChange);
+
+            if (result == WAIT_OBJECT_0)
+                break; // stop event
+
+            if (result == WAIT_OBJECT_0 + 1)
+            {
+                // Debounce: wait for Hauptwerk to finish writing.
+                Sleep(1500);
+
+                // Skip if an organ is currently loading (Hauptwerk touches
+                // config files during load — we handle that via the load path).
+                if (g_isLoadingOrgan.load())
+                {
+                    printf("[OrganConfigWatcher] Change detected but organ loading, skipping.\n");
+                    continue;
+                }
+
+                EnsureOrganConfigWatcherLock();
+                EnterCriticalSection(&g_organConfigWatcherLock);
+                std::wstring uid = g_watchedOrganUniqueId;
+                LeaveCriticalSection(&g_organConfigWatcherLock);
+
+                if (uid.empty())
+                {
+                    printf("[OrganConfigWatcher] Change detected but no organ watched, skipping.\n");
+                    // In drain mode with no uid: nothing to do, stop now.
+                    if (g_organConfigDraining.load())
+                        break;
+                    continue;
+                }
+
+                printf("[OrganConfigWatcher] Change detected — rebuilding stop mappings for organId=%S\n", uid.c_str());
+                int nMapped = BuildOrganStopMappings(uid);
+                printf("[OrganConfigWatcher] Rebuilt: %d stop(s) mapped.\n", nMapped);
+
+                // If we were draining (unload path), one rebuild is enough — stop.
+                if (g_organConfigDraining.load())
+                {
+                    printf("[OrganConfigWatcher] Drain rebuild done, stopping.\n");
+                    break;
+                }
+            }
+            else
+            {
+                printf("[OrganConfigWatcher] WaitForMultipleObjects returned %lu\n", result);
+                break;
+            }
+        }
+
+        printf("[OrganConfigWatcher] Watcher stopped.\n");
+        return 0;
+    }
+}
+
+void StartOrganConfigWatcher(const std::wstring& uniqueOrganId)
+{
+    EnsureOrganConfigWatcherLock();
+
+    // Update the watched organ id even if the thread is already running
+    // (handles the case where a different organ is loaded).
+    EnterCriticalSection(&g_organConfigWatcherLock);
+    g_watchedOrganUniqueId = uniqueOrganId;
+    LeaveCriticalSection(&g_organConfigWatcherLock);
+
+    if (g_organConfigWatcherThread)
+        return; // thread already running, uid updated above is enough
+
+    g_organConfigWatcherStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_organConfigWatcherStop)
+        return;
+
+    g_organConfigWatcherThread = CreateThread(nullptr, 0, OrganConfigWatcherThread, nullptr, 0, nullptr);
+    if (!g_organConfigWatcherThread)
+    {
+        CloseHandle(g_organConfigWatcherStop);
+        g_organConfigWatcherStop = nullptr;
+    }
+    else
+    {
+        printf("[OrganConfigWatcher] Started watching Config0-OrganSettings for organId=%S\n",
+            uniqueOrganId.c_str());
+    }
+}
+
+void StopOrganConfigWatcher()
+{
+    if (!g_organConfigWatcherThread)
+        return;
+
+    // Enter drain mode: the watcher will do one final rebuild after Hauptwerk
+    // writes the OrganConfig file on unload, then stop itself.
+    // We give it up to 8 seconds; after that we force-stop it.
+    g_organConfigDraining.store(true);
+    printf("[OrganConfigWatcher] Drain mode set — waiting for final write (up to 8s).\n");
+
+    // Kick off a background thread that force-stops after the timeout.
+    struct DrainCtx { HANDLE hThread; HANDLE hStop; };
+    DrainCtx* ctx = new DrainCtx{ g_organConfigWatcherThread, g_organConfigWatcherStop };
+    CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+        DrainCtx* dc = static_cast<DrainCtx*>(p);
+        // Wait for the watcher to finish on its own (drain rebuild done).
+        if (WaitForSingleObject(dc->hThread, 8000) != WAIT_OBJECT_0)
+        {
+            // Timeout: force-stop.
+            printf("[OrganConfigWatcher] Drain timeout, force-stopping.\n");
+            SetEvent(dc->hStop);
+            WaitForSingleObject(dc->hThread, 2000);
+        }
+
+        EnsureOrganConfigWatcherLock();
+        EnterCriticalSection(&g_organConfigWatcherLock);
+        g_watchedOrganUniqueId.clear();
+        LeaveCriticalSection(&g_organConfigWatcherLock);
+        g_organConfigDraining.store(false);
+
+        CloseHandle(dc->hThread);
+        CloseHandle(dc->hStop);
+        delete dc;
+        printf("[OrganConfigWatcher] Drain complete.\n");
+        return 0;
+    }, ctx, 0, nullptr);
+
+    // Reset our own handles so StartOrganConfigWatcher can create a new thread
+    // for the next organ load without waiting for the drain to finish.
+    g_organConfigWatcherThread = nullptr;
+    g_organConfigWatcherStop   = nullptr;
+}
+
 std::vector<std::wstring> LoadStandbyOrganNames()
 {
     std::vector<std::wstring> names(32);
@@ -4834,4 +5110,450 @@ bool LoadHauptwerkPrioritySettings(std::wstring& idlePriority, std::wstring& loa
     idlePriority   = s_cachedHauptwerkIdlePriority;
     loadedPriority = s_cachedHauptwerkLoadedPriority;
     return true;
+}
+
+std::vector<OrganStopMapping> LoadOrganStopMappings(const std::wstring& uniqueOrganId)
+{
+    std::vector<OrganStopMapping> result;
+    if (uniqueOrganId.empty())
+        return result;
+
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return result;
+
+    std::wstring streamDeckSection;
+    if (!TryGetSection(xml, L"StreamDeck", streamDeckSection))
+        return result;
+
+    std::wstring mappingsSection;
+    if (!TryGetSection(streamDeckSection, L"OrganStopMappings", mappingsSection))
+        return result;
+
+    size_t pos = 0;
+    while (true)
+    {
+        size_t organStart = mappingsSection.find(L"<Organ", pos);
+        if (organStart == std::wstring::npos)
+            break;
+
+        size_t openEnd = mappingsSection.find(L'>', organStart);
+        size_t closeStart = mappingsSection.find(L"</Organ>", openEnd);
+        if (openEnd == std::wstring::npos || closeStart == std::wstring::npos)
+            break;
+
+        std::wstring openTag = mappingsSection.substr(organStart, openEnd - organStart + 1);
+        std::wstring organBody = mappingsSection.substr(openEnd + 1, closeStart - openEnd - 1);
+
+        if (openTag.find(L"uniqueOrganId=\"" + uniqueOrganId + L"\"") != std::wstring::npos)
+        {
+            size_t mpos = 0;
+            while (true)
+            {
+                size_t mstart = organBody.find(L"<o", mpos);
+                if (mstart == std::wstring::npos)
+                    break;
+                size_t mend = organBody.find(L"/>", mstart);
+                if (mend == std::wstring::npos)
+                    break;
+
+                std::wstring node = organBody.substr(mstart, mend - mstart + 2);
+                OrganStopMapping m;
+
+                auto readAttrInt = [&](const wchar_t* attr, int& out) {
+                    std::wstring key = std::wstring(attr) + L"=\"";
+                    size_t p = node.find(key);
+                    if (p == std::wstring::npos) return false;
+                    p += key.size();
+                    size_t e = node.find(L'\"', p);
+                    if (e == std::wstring::npos) return false;
+                    out = _wtoi(node.substr(p, e - p).c_str());
+                    return true;
+                };
+                auto readAttrString = [&](const wchar_t* attr, std::wstring& out) {
+                    std::wstring key = std::wstring(attr) + L"=\"";
+                    size_t p = node.find(key);
+                    if (p == std::wstring::npos) return false;
+                    p += key.size();
+                    size_t e = node.find(L'\"', p);
+                    if (e == std::wstring::npos) return false;
+                    out = node.substr(p, e - p);
+                    return true;
+                };
+
+                readAttrInt(L"ch", m.channel);
+                readAttrInt(L"cc", m.cc);
+                readAttrInt(L"on", m.dataOn);
+                readAttrInt(L"off", m.dataOff);
+                readAttrString(L"ahlborn", m.ahlbornName);
+                readAttrString(L"hw", m.hwStopName);
+
+                result.push_back(m);
+                mpos = mend + 2;
+            }
+            break;
+        }
+
+        pos = closeStart + 8;
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// OrganStopMappings — scan OrganConfig + cross-reference AhlbornSwitches
+// ---------------------------------------------------------------------------
+
+static std::wstring ReadFileAsWideString(const std::wstring& path)
+{
+    HANDLE fh = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE)
+        return {};
+    DWORD fileSize = GetFileSize(fh, nullptr);
+    if (fileSize == INVALID_FILE_SIZE || fileSize == 0) { CloseHandle(fh); return {}; }
+    std::string raw(fileSize, '\0');
+    DWORD bytesRead = 0;
+    bool ok = ReadFile(fh, raw.data(), fileSize, &bytesRead, nullptr) != FALSE;
+    CloseHandle(fh);
+    if (!ok || bytesRead == 0) return {};
+    int wideSize = MultiByteToWideChar(CP_UTF8, 0, raw.data(), static_cast<int>(bytesRead), nullptr, 0);
+    if (wideSize <= 0) return {};
+    std::wstring result(wideSize, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, raw.data(), static_cast<int>(bytesRead), result.data(), wideSize);
+    return result;
+}
+
+// Extract a named ObjectList section: <ObjectList ObjectType="typeName"> ... </ObjectList>
+static bool ExtractObjectListSection(const std::wstring& xml, const std::wstring& typeName, std::wstring& out)
+{
+    const std::wstring openTag = L"<ObjectList ObjectType=\"" + typeName + L"\">";
+    size_t start = xml.find(openTag);
+    if (start == std::wstring::npos) return false;
+    start += openTag.size();
+    size_t end = xml.find(L"</ObjectList>", start);
+    if (end == std::wstring::npos) return false;
+    out = xml.substr(start, end - start);
+    return true;
+}
+
+// Parse every <o>…</o> node in an ObjectList section into a map keyed by <a>.
+// Each value is the raw content string of that <o> node.
+static std::map<int, std::wstring> ParseObjectListNodes(const std::wstring& section)
+{
+    std::map<int, std::wstring> result;
+    size_t pos = 0;
+    while (true)
+    {
+        size_t start = section.find(L"<o>", pos);
+        if (start == std::wstring::npos) break;
+        size_t end = section.find(L"</o>", start);
+        if (end == std::wstring::npos) break;
+        std::wstring node = section.substr(start + 3, end - start - 3); // content between <o> and </o>
+        // Extract <a> field
+        UINT aVal = 0;
+        if (TryGetTagValue(node, L"<a>", L"</a>", aVal))
+            result[static_cast<int>(aVal)] = node;
+        pos = end + 4;
+    }
+    return result;
+}
+
+// Replace only the <Organ uniqueOrganId="...">...</Organ> block for the
+// specified organ inside the cached <OrganStopMappings> section, preserving
+// mappings of all other organs.
+static std::wstring MergeOrganStopMappingsSection(const std::wstring& existing,
+                                                  const std::wstring& uniqueOrganId,
+                                                  const std::wstring& replacementOrganBlock)
+{
+    std::wstring merged;
+    size_t pos = 0;
+    bool replaced = false;
+
+    while (true)
+    {
+        size_t organStart = existing.find(L"<Organ", pos);
+        if (organStart == std::wstring::npos)
+            break;
+
+        size_t openEnd = existing.find(L'>', organStart);
+        if (openEnd == std::wstring::npos)
+            break;
+
+        size_t closeStart = existing.find(L"</Organ>", openEnd);
+        if (closeStart == std::wstring::npos)
+            break;
+
+        std::wstring openTag = existing.substr(organStart, openEnd - organStart + 1);
+        std::wstring block = existing.substr(organStart, closeStart - organStart + 8);
+
+        bool isCurrentOrgan = (openTag.find(L"uniqueOrganId=\"" + uniqueOrganId + L"\"") != std::wstring::npos);
+        if (isCurrentOrgan)
+        {
+            if (!replacementOrganBlock.empty())
+            {
+                merged += replacementOrganBlock;
+                if (replacementOrganBlock.size() < 2 || replacementOrganBlock.substr(replacementOrganBlock.size() - 2) != L"\n")
+                    merged += L"\r\n";
+            }
+            replaced = true;
+        }
+        else
+        {
+            merged += block;
+            if (block.size() < 2 || block.substr(block.size() - 2) != L"\n")
+                merged += L"\r\n";
+        }
+
+        pos = closeStart + 8;
+    }
+
+    if (!replaced && !replacementOrganBlock.empty())
+    {
+        merged += replacementOrganBlock;
+        if (replacementOrganBlock.size() < 2 || replacementOrganBlock.substr(replacementOrganBlock.size() - 2) != L"\n")
+            merged += L"\r\n";
+    }
+
+    return merged;
+}
+
+int BuildOrganStopMappings(const std::wstring& uniqueOrganId)
+{
+    // ── Resolve paths ────────────────────────────────────────────────────
+    std::wstring userDataRoot = s_rootHauptwerkUserData;
+    std::wstring sampleSetsRoot = s_rootHauptwerkSampleSets;
+
+    // Fallback: load from Settings.xml if caches are empty
+    if (userDataRoot.empty() || sampleSetsRoot.empty())
+    {
+        std::wstring xml;
+        if (TryReadSettingsXml(xml))
+        {
+            std::wstring opts;
+            if (TryGetSection(xml, L"Options", opts))
+            {
+                if (userDataRoot.empty())
+                    TryGetTagStringValue(opts, L"<RootFolder_HauptwerkUserData>",
+                        L"</RootFolder_HauptwerkUserData>", userDataRoot);
+                if (sampleSetsRoot.empty())
+                    TryGetTagStringValue(opts, L"<RootFolder_HauptwerkSampleSetsAndComponents>",
+                        L"</RootFolder_HauptwerkSampleSetsAndComponents>", sampleSetsRoot);
+            }
+        }
+    }
+    if (userDataRoot.empty() || sampleSetsRoot.empty())
+    {
+        printf("[StopMappings] HauptwerkUserData or SampleSets path not configured.\n");
+        return 0;
+    }
+    // Normalise trailing slashes
+    auto stripSlash = [](std::wstring& s) {
+        if (!s.empty() && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    };
+    stripSlash(userDataRoot);
+    stripSlash(sampleSetsRoot);
+
+    // ── Load OrganConfig file ─────────────────────────────────────────────
+    // Pattern: {UserData}\Config0-OrganSettings\OrganID{N}Config.OrganConfig_Hauptwerk_xml
+    // The numeric ID is the decimal value of uniqueOrganId (zero-padded to 6 digits).
+    if (uniqueOrganId.empty())
+    {
+        printf("[StopMappings] uniqueOrganId is empty.\n");
+        return 0;
+    }
+    int organIdNum = _wtoi(uniqueOrganId.c_str());
+    wchar_t organIdStr[16];
+    swprintf_s(organIdStr, L"%06d", organIdNum);
+    std::wstring configPath = userDataRoot
+        + L"\\Config0-OrganSettings\\OrganID" + organIdStr
+        + L"Config.OrganConfig_Hauptwerk_xml";
+    printf("[StopMappings] OrganConfig path: %S\n", configPath.c_str());
+
+    std::wstring configXml = ReadFileAsWideString(configPath);
+    if (configXml.empty())
+    {
+        printf("[StopMappings] Cannot read OrganConfig file.\n");
+        return 0;
+    }
+
+    // ── Extract SwitchInputOutput section ────────────────────────────────
+    std::wstring switchInOutSection;
+    if (!ExtractObjectListSection(configXml, L"SwitchInputOutput", switchInOutSection))
+    {
+        printf("[StopMappings] SwitchInputOutput section not found in OrganConfig.\n");
+        return 0;
+    }
+    auto switchInOutNodes = ParseObjectListNodes(switchInOutSection);
+
+    // ── Load AhlbornSwitches from Settings.xml ────────────────────────────
+    std::vector<AhlbornSwitchInfo> ahlbornSwitches = LoadAhlbornSwitches();
+    if (ahlbornSwitches.empty())
+    {
+        printf("[StopMappings] AhlbornSwitches list is empty.\n");
+        return 0;
+    }
+
+    // ── Find Definition file for this organ ──────────────────────────────
+    // Scan OrganDefinitions for a .Organ_Hauptwerk_xml whose UniqueOrganID matches.
+    std::wstring definitionXml;
+    {
+        std::wstring searchPath = sampleSetsRoot + L"\\OrganDefinitions\\*";
+        WIN32_FIND_DATAW fd = {};
+        HANDLE hFind = FindFirstFileW(searchPath.c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            constexpr wchar_t kSuffix[] = L".Organ_Hauptwerk_xml";
+            constexpr size_t kSuffixLen = (sizeof(kSuffix) / sizeof(wchar_t)) - 1;
+            do
+            {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                std::wstring fname(fd.cFileName);
+                if (fname.size() <= kSuffixLen) continue;
+                if (fname.compare(fname.size() - kSuffixLen, kSuffixLen, kSuffix) != 0) continue;
+
+                std::wstring fullPath = sampleSetsRoot + L"\\OrganDefinitions\\" + fname;
+                std::wstring content = ReadFileAsWideString(fullPath);
+                if (content.empty()) continue;
+
+                std::wstring uid;
+                TryGetTagStringValue(content,
+                    L"<Identification_UniqueOrganID>",
+                    L"</Identification_UniqueOrganID>", uid);
+                if (uid == uniqueOrganId)
+                {
+                    printf("[StopMappings] Definition file: %S\n", fname.c_str());
+                    definitionXml = std::move(content);
+                    break;
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+    }
+    if (definitionXml.empty())
+    {
+        printf("[StopMappings] Definition file not found for uniqueOrganId=%S.\n", uniqueOrganId.c_str());
+        return 0;
+    }
+
+    // ── Build Switch name lookup from Definition ──────────────────────────
+    // ObjectList ObjectType="Switch": map <a> → <b> (stop name)
+    std::map<int, std::wstring> hwSwitchNames; // key=<a>, value=<b>
+    {
+        std::wstring switchSection;
+        if (ExtractObjectListSection(definitionXml, L"Switch", switchSection))
+        {
+            auto nodes = ParseObjectListNodes(switchSection);
+            for (auto& kv : nodes)
+            {
+                std::wstring bVal;
+                if (TryGetTagStringValue(kv.second, L"<b>", L"</b>", bVal) && !bVal.empty())
+                    hwSwitchNames[kv.first] = bVal;
+            }
+        }
+    }
+    printf("[StopMappings] Definition Switch entries: %zu\n", hwSwitchNames.size());
+
+    // ── Match SwitchInputOutput (c==19) against AhlbornSwitches ──────────
+    // c==19 in Hauptwerk config means the input is a MIDI CC, and the CC
+    // number is always 70 (0x46) for Ahlborn.
+    constexpr int kHauptwerkCcType = 19;
+    constexpr int kAhlbornCC       = 70;
+
+    std::vector<OrganStopMapping> mappings;
+
+    for (auto& kv : switchInOutNodes)
+    {
+        const std::wstring& nodeContent = kv.second;
+
+        // Filter: only nodes with <c>19</c>
+        UINT cVal = 0;
+        if (!TryGetTagValue(nodeContent, L"<c>", L"</c>", cVal)) continue;
+        if (static_cast<int>(cVal) != kHauptwerkCcType) continue;
+
+        UINT switchId = static_cast<UINT>(kv.first); // <a>
+        UINT hVal = 0, sVal = 0;
+        TryGetTagValue(nodeContent, L"<h>", L"</h>", hVal);
+        TryGetTagValue(nodeContent, L"<s>", L"</s>", sVal);
+
+        int channel = static_cast<int>(hVal);
+        int dataOff = static_cast<int>(sVal) - 1;  // <s> - 1
+        int dataOn  = dataOff + 64;
+
+        // Match against AhlbornSwitches: cc==70, h==channel, e==dataOff
+        std::wstring ahlbornName;
+        for (const auto& sw : ahlbornSwitches)
+        {
+            if (sw.controlChange == kAhlbornCC
+                && sw.channel    == channel
+                && sw.valueOff   == dataOff)
+            {
+                ahlbornName = sw.name;
+                break;
+            }
+        }
+        if (ahlbornName.empty()) continue; // no Ahlborn match → skip
+
+        // Resolve Hauptwerk stop name from Definition
+        std::wstring hwName;
+        auto it = hwSwitchNames.find(static_cast<int>(switchId));
+        if (it != hwSwitchNames.end())
+            hwName = it->second;
+
+        OrganStopMapping m;
+        m.hwStopName   = hwName;
+        m.ahlbornName  = ahlbornName;
+        m.channel      = channel;
+        m.cc           = kAhlbornCC;
+        m.dataOn       = dataOn;
+        m.dataOff      = dataOff;
+        mappings.push_back(m);
+
+        printf("[StopMappings]  ch=%d cc=%d ON=%d OFF=%d  Ahlborn='%S'  HW='%S'\n",
+            channel, kAhlbornCC, dataOn, dataOff,
+            ahlbornName.c_str(), hwName.c_str());
+    }
+
+    printf("[StopMappings] Total matched: %zu\n", mappings.size());
+
+    // ── Build per-organ XML block and persist ────────────────────────────
+    std::wstring organBlock;
+    if (!mappings.empty())
+    {
+        organBlock = L"      <Organ uniqueOrganId=\"" + uniqueOrganId + L"\">\r\n";
+        for (const auto& m : mappings)
+        {
+            organBlock += L"        <o"
+                          L" ch=\""      + std::to_wstring(m.channel)  + L"\""
+                          L" cc=\""      + std::to_wstring(m.cc)       + L"\""
+                          L" on=\""      + std::to_wstring(m.dataOn)   + L"\""
+                          L" off=\""     + std::to_wstring(m.dataOff)  + L"\""
+                          L" ahlborn=\"" + m.ahlbornName               + L"\""
+                          L" hw=\""      + m.hwStopName                 + L"\""
+                          L"/>\r\n";
+        }
+        organBlock += L"      </Organ>\r\n";
+    }
+
+    s_cachedOrganStopMappings = NormalizeOrganStopMappingsSection(MergeOrganStopMappingsSection(
+        s_cachedOrganStopMappings,
+        uniqueOrganId,
+        organBlock));
+
+    // Persist to Settings.xml by re-triggering a write with current settings
+    bool routerEnabled = false; LoadMidiRouterEnabled(routerEnabled);
+    bool closeOnDisconnect = false; LoadCloseSettingsOnDisconnect(closeOnDisconnect);
+    bool showConsole = true; LoadShowDebugConsole(showConsole);
+    bool checkUpdate = true; LoadCheckForUpdateOnStart(checkUpdate);
+    EnsureAssignedDevicesLoaded();
+    std::wstring in1, in2, out1, out2;
+    if (!s_assignedInputNames.empty())   in1  = s_assignedInputNames[0];
+    if (s_assignedInputNames.size() > 1) in2  = s_assignedInputNames[1];
+    if (!s_assignedOutputNames.empty())  out1 = s_assignedOutputNames[0];
+    if (s_assignedOutputNames.size() > 1) out2 = s_assignedOutputNames[1];
+    DeviceEnabledStates devEnabled;
+    bool ok = WriteSettingsXml(in1, in2, out1, out2, routerEnabled, closeOnDisconnect, showConsole, checkUpdate, devEnabled);
+    printf("[StopMappings] WriteSettingsXml: %s\n", ok ? "OK" : "FAILED");
+
+    return static_cast<int>(mappings.size());
 }
