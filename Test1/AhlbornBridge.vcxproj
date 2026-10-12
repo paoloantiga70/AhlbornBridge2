@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.props" Condition="Exists('..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.props')" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
       <Configuration>Debug</Configuration>
@@ -168,10 +169,11 @@
   <ItemGroup>
     <None Include="AhlbornBridge.iss" />
     <None Include="AhlbornBridge.vcxproj.filters" />
+    <None Include="packages.config" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <PostBuildEvent>
-      <Command>powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern 'APP_VERSION\s*=\s*\"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\"; $svcRel = Resolve-Path '$(ProjectDir)..\ProcessManagerService\x64\Release\ProcessManagerService.exe' -ErrorAction Stop; $svcOutPrimary = Join-Path '$(OutDir)' 'ProcessManagerService.exe'; try { Copy-Item $svcRel $svcOutPrimary -Force; Write-Host \"Copied ProcessManagerService.exe to $svcOutPrimary\" } catch { Write-Warning \"Could not copy to $svcOutPrimary (locked): $_\" }; $svcOutRoot = Join-Path '$(ProjectDir)..\x64\Release' 'ProcessManagerService.exe'; New-Item -ItemType Directory -Path (Split-Path $svcOutRoot -Parent) -Force | Out-Null; try { Copy-Item $svcRel $svcOutRoot -Force; Write-Host \"Copied ProcessManagerService.exe to $svcOutRoot\" } catch { Write-Warning \"Could not copy to $svcOutRoot (locked): $_\" }; $changelogSrc = Join-Path '$(ProjectDir)..\' 'CHANGELOG.md'; if (Test-Path $changelogSrc) { $changelogDst = Join-Path '$(OutDir)' 'CHANGELOG.md'; Copy-Item $changelogSrc $changelogDst -Force; Write-Host ('Copied CHANGELOG.md to ' + $changelogDst) };" &amp; if exist "$(OutDir)Icons" (if not exist "%APPDATA%\AhlbornBridge\Icons" mkdir "%APPDATA%\AhlbornBridge\Icons" &amp; xcopy /E /I /Y "$(OutDir)Icons\*" "%APPDATA%\AhlbornBridge\Icons\")</Command>
+      <Command>powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern 'APP_VERSION\s*=\s*\"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\"; $svcRel = if (Test-Path '$(ProjectDir)..\ProcessManagerService\x64\Release\ProcessManagerService.exe') { Resolve-Path '$(ProjectDir)..\ProcessManagerService\x64\Release\ProcessManagerService.exe' }; if ($svcRel) { $svcOutPrimary = Join-Path '$(OutDir)' 'ProcessManagerService.exe'; try { Copy-Item $svcRel $svcOutPrimary -Force; Write-Host \"Copied ProcessManagerService.exe to $svcOutPrimary\" } catch { Write-Warning \"Could not copy to $svcOutPrimary (locked): $_\" }; $svcOutRoot = Join-Path '$(ProjectDir)..\x64\Release' 'ProcessManagerService.exe'; New-Item -ItemType Directory -Path (Split-Path $svcOutRoot -Parent) -Force | Out-Null; try { Copy-Item $svcRel $svcOutRoot -Force; Write-Host \"Copied ProcessManagerService.exe to $svcOutRoot\" } catch { Write-Warning \"Could not copy to $svcOutRoot (locked): $_\" } } else { Write-Warning \"ProcessManagerService.exe not found, skipping copy.\" }; $changelogSrc = Join-Path '$(ProjectDir)..\' 'CHANGELOG.md'; if (Test-Path $changelogSrc) { $changelogDst = Join-Path '$(OutDir)' 'CHANGELOG.md'; Copy-Item $changelogSrc $changelogDst -Force; Write-Host ('Copied CHANGELOG.md to ' + $changelogDst) };" &amp; if exist "$(OutDir)Icons" (if not exist "%APPDATA%\AhlbornBridge\Icons" mkdir "%APPDATA%\AhlbornBridge\Icons" &amp; xcopy /E /I /Y "$(OutDir)Icons\*" "%APPDATA%\AhlbornBridge\Icons\")</Command>
     </PostBuildEvent>
     <Link>
       <AdditionalDependencies>runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -180,5 +182,13 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="..\packages\Microsoft.Windows.Devices.Midi2.1.0.17-rc.4.25\build\native\Microsoft.Windows.Devices.Midi2.targets" Condition="'$(Platform)'=='x64' and exists('..\packages\Microsoft.Windows.Devices.Midi2.1.0.17-rc.4.25\build\native\Microsoft.Windows.Devices.Midi2.targets')" />
+    <Import Project="..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.targets" Condition="Exists('..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.targets')" />
   </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.props'))" />
+    <Error Condition="!Exists('..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Windows.Devices.Midi2.0.99.92-preview.11\build\native\Windows.Devices.Midi2.targets'))" />
+  </Target>
 </Project>

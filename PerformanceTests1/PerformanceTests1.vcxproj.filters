@@ -24,9 +24,6 @@
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\Test1\MidiAssignmentWindow.cpp">
-      <Filter>External</Filter>
-    </ClCompile>
     <ClCompile Include="PerfTest_LedRefresh.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -35,5 +32,8 @@
     <ClInclude Include="pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>

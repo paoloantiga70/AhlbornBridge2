@@ -33,7 +33,7 @@ WizardStyle=modern
 ; Includi i file di build dalla cartella contenente questo .iss. Metti qui l'eseguibile, le DLL e le risorse.
 [Files]
 ; Includi tutto il contenuto della cartella di build (se metti lo .iss in quella cartella)
-Source: "*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "*"; DestDir: "{app}"; Excludes: "*.pdb,*.iss,Output\*,Output"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Include ProcessManagerService.exe from a validated compile-time source.
 Source: "{#ServiceExeSource}"; DestDir: "{app}"; DestName: "ProcessManagerService.exe"; Flags: ignoreversion
 ; Changelog — read at runtime to show What's New on first launch after update.

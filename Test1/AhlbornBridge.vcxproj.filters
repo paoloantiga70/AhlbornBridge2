@@ -96,5 +96,6 @@
   <ItemGroup>
     <None Include="AhlbornBridge.vcxproj.filters" />
     <None Include="AhlbornBridge.iss" />
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>
