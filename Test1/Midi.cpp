@@ -2671,14 +2671,15 @@ bool startsWithFe()
 // Phase 1: wait indefinitely for a MIDI message (no countdown).
 // Phase 2: confirm or choose a different device from a list.
 // Phase 3: show a progress splash while configuring Hauptwerk MIDI/audio.
+// Returns false if aborted/cancelled by user, true if setup completed.
 // ---------------------------------------------------------------------------
-static void DetectMidiInputInteractive()
+static bool DetectMidiInputInteractive()
 {
     UINT numInDevs = midiInGetNumDevs();
     if (numInDevs == 0)
     {
         printf("[DetectMidi] No MIDI input devices available.\n");
-        return;
+        return false;
     }
 
     // -----------------------------------------------------------------------
@@ -2756,7 +2757,7 @@ static void DetectMidiInputInteractive()
                 20, 112, 360, 24, hDlg, (HMENU)201, nullptr, nullptr);
             SendMessageW(h, WM_SETFONT, (WPARAM)hF, TRUE);
 
-            h = CreateWindowW(L"BUTTON", L"Skip",
+            h = CreateWindowW(L"BUTTON", L"ABORT",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 160, 150, 80, 28, hDlg, (HMENU)IDCANCEL, nullptr, nullptr);
             SendMessageW(h, WM_SETFONT, (WPARAM)hF, TRUE);
@@ -2775,8 +2776,16 @@ static void DetectMidiInputInteractive()
         case WM_COMMAND:
             if (LOWORD(wp) == IDCANCEL)
             {
-                KillTimer(hDlg, 1);
-                EndDialog(hDlg, IDCANCEL);
+                int answer = MessageBoxW(hDlg,
+                    L"Do you want to abort the initial MIDI configuration and exit AhlbornBridge?",
+                    L"AhlbornBridge \u2014 Abort Setup",
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+                if (answer == IDYES)
+                {
+                    KillTimer(hDlg, 1);
+                    EndDialog(hDlg, IDCANCEL);
+                    return TRUE;
+                }
                 return TRUE;
             }
             break;
@@ -2803,11 +2812,11 @@ static void DetectMidiInputInteractive()
 
     if (phase1Result != IDOK)
     {
-        printf("[DetectMidi] User skipped detection.\n");
+        printf("[DetectMidi] User aborted detection.\n");
         g_detectHitIndex.store(-1);
         DeleteObject(hFontNormal);
         DeleteObject(hFontBig);
-        return;
+        return false;
     }
 
     // Resolve detected device name
@@ -2882,7 +2891,7 @@ static void DetectMidiInputInteractive()
                 70, 214, 130, 28, hDlg, (HMENU)IDOK, nullptr, nullptr);
             SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
 
-            h = CreateWindowW(L"BUTTON", L"Skip",
+            h = CreateWindowW(L"BUTTON", L"ABORT",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 220, 214, 80, 28, hDlg, (HMENU)IDCANCEL, nullptr, nullptr);
             SendMessageW(h, WM_SETFONT, (WPARAM)d->hF, TRUE);
@@ -2904,7 +2913,15 @@ static void DetectMidiInputInteractive()
             }
             if (LOWORD(wp) == IDCANCEL)
             {
-                EndDialog(hDlg, IDCANCEL);
+                int answer = MessageBoxW(hDlg,
+                    L"Do you want to abort the initial MIDI configuration and exit AhlbornBridge?",
+                    L"AhlbornBridge \u2014 Abort Setup",
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+                if (answer == IDYES)
+                {
+                    EndDialog(hDlg, IDCANCEL);
+                    return TRUE;
+                }
                 return TRUE;
             }
             break;
@@ -2924,8 +2941,8 @@ static void DetectMidiInputInteractive()
 
     if (phase2Result != IDOK || phase2.chosenName.empty())
     {
-        printf("[DetectMidi] User cancelled device selection.\n");
-        return;
+        printf("[DetectMidi] User aborted device selection.\n");
+        return false;
     }
 
     detectedName = phase2.chosenName;
@@ -3135,6 +3152,8 @@ static void DetectMidiInputInteractive()
         DeleteObject(hFN);
         DeleteObject(hFB);
     }
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3264,7 +3283,13 @@ bool initMidiState()
 
             // DetectMidiInputInteractive persists the assignment and opens
             // the devices itself, so we can return early after it runs.
-            DetectMidiInputInteractive();
+            if (!DetectMidiInputInteractive())
+            {
+                printf("[initMidiState] Initial MIDI detection aborted by user.\n");
+                DeleteSettingsFile();
+                StopMidi2Service();
+                return false;
+            }
             bool routerEnabled = false;
             if (LoadMidiRouterEnabled(routerEnabled))
                 g_midiRouterEnabled = routerEnabled;

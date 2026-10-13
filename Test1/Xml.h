@@ -166,6 +166,8 @@ bool LoadHauptwerkPrioritySettings(std::wstring& idlePriority, std::wstring& loa
 // Returns the path to the AhlbornBridge2 settings directory in the current user's AppData\Roaming.
 // Always use this instead of hardcoded paths so it works correctly on any user account.
 std::wstring GetSettingsDirPath();
+std::wstring GetSettingsFilePath();
+bool DeleteSettingsFile();
 
 // Freezes the in-memory switch cache so that reset CCs arriving from the
 // physical console during organ unload do not overwrite the captured state.

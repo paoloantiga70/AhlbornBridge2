@@ -26,16 +26,34 @@ std::wstring GetSettingsDirPath()
     return std::wstring(L"C:\\Users\\Default\\AppData\\Roaming\\AhlbornBridge2");
 }
 
+std::wstring GetSettingsFilePath()
+{
+    std::wstring dir = GetSettingsDirPath();
+    return dir + L"\\Settings.xml";
+}
+
+bool DeleteSettingsFile()
+{
+    std::wstring path = GetSettingsFilePath();
+    if (DeleteFileW(path.c_str()))
+    {
+        printf("[Settings] Deleted %S\n", path.c_str());
+        return true;
+    }
+    DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND)
+    {
+        printf("[Settings] %S not found, nothing to delete.\n", path.c_str());
+        return true;
+    }
+    printf("[Settings] Failed to delete %S (error %lu)\n", path.c_str(), err);
+    return false;
+}
+
 namespace
 {
     // Settings are stored per-user in the Roaming AppData folder.
     // Path: %APPDATA%\AhlbornBridge2\Settings.xml
-
-    std::wstring GetSettingsFilePath()
-    {
-        std::wstring dir = GetSettingsDirPath();
-        return dir + L"\\Settings.xml";
-    }
 
     bool TryGetTagEnabledAttribute(const std::wstring& xml, const std::wstring& tagName, bool& enabled)
     {

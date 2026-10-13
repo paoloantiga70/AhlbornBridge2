@@ -109,7 +109,15 @@ if (FAILED(hr))
 		g_activeSensingEnabled.store(activeSensingEnabled);
 	}
 
-	initMidiState(); // Initialize MIDI state (includes first-launch MIDI wizard if needed)
+	if (!initMidiState()) // Initialize MIDI state (includes first-launch MIDI wizard if needed)
+	{
+		printf("[Startup] MIDI state initialization aborted by user. Exiting.\n");
+		StopOrganFolderWatcher();
+		if (CONSOLE_ALLOCATION) FreeConsole();
+		if (hInstanceMutex) CloseHandle(hInstanceMutex);
+		CoUninitialize();
+		return 0;
+	}
 	printf("[Startup] MIDI state initialized.\n");
 
 	// Apply and persist the Active Sensing output name (lock is ready after initMidiState).

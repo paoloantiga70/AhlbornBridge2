@@ -40,6 +40,9 @@ void ForwardToMidi2Endpoint(DWORD wmidiMsg);
 // Tears down the virtual endpoint and releases all MIDI Services resources.
 void DisableMidi2Endpoint();
 
+// Stops the Windows MIDI Service (midisrv) to reset all virtual MIDI endpoints.
+bool StopMidi2Service();
+
 // Returns true if the endpoint is currently active.
 bool IsMidi2EndpointEnabled();
 

@@ -354,6 +354,53 @@ void DisableMidi2Endpoint()
 }
 
 // ---------------------------------------------------------------------------
+// StopMidi2Service
+// ---------------------------------------------------------------------------
+bool StopMidi2Service()
+{
+	DisableMidi2Endpoint();
+
+	SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+	if (!hScm)
+	{
+		printf("[Midi2] Cannot open SCM to stop MIDI service (error %lu).\n", GetLastError());
+		return false;
+	}
+
+	bool stopped = false;
+	for (const wchar_t* svcName : { L"MidiSrv2", L"WindowsMidiService", L"midisrv" })
+	{
+		SC_HANDLE hSvc = OpenServiceW(hScm, svcName, SERVICE_STOP | SERVICE_QUERY_STATUS);
+		if (hSvc)
+		{
+			SERVICE_STATUS status{};
+			if (ControlService(hSvc, SERVICE_CONTROL_STOP, &status))
+			{
+				printf("[Midi2] Sent stop control to service '%ls'.\n", svcName);
+				stopped = true;
+			}
+			else
+			{
+				DWORD err = GetLastError();
+				if (err == ERROR_SERVICE_NOT_ACTIVE)
+				{
+					printf("[Midi2] Service '%ls' already stopped.\n", svcName);
+					stopped = true;
+				}
+				else
+				{
+					printf("[Midi2] ControlService failed for '%ls' (error %lu).\n", svcName, err);
+				}
+			}
+			CloseServiceHandle(hSvc);
+			break;
+		}
+	}
+	CloseServiceHandle(hScm);
+	return stopped;
+}
+
+// ---------------------------------------------------------------------------
 // IsMidi2EndpointEnabled
 // ---------------------------------------------------------------------------
 bool IsMidi2EndpointEnabled()
