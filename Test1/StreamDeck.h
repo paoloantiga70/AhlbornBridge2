@@ -1,6 +1,8 @@
 #pragma once
 
 #include <windows.h>
+#include <string>
+#include <vector>
 
 #define LOAD_FAVORITE_ORGAN_1   1
 #define LOAD_FAVORITE_ORGAN_2   2
@@ -43,3 +45,21 @@ void MirrorHauptwerkOutputToConsole(DWORD midiMsg);
 // Refreshes the internal cache of AhlbornSwitchInfo used by MirrorHauptwerkOutputToConsole.
 // Call after organ load so the cache reflects the current switch definitions.
 void RefreshSwitchesCache();
+
+// Structure and queue APIs for monitoring MIDI messages sent to the physical console.
+struct ConsoleMidiMonitorEntry
+{
+    SYSTEMTIME timestamp;
+    std::wstring source;     // L"SwitchCC" or L"HwMirror"
+    std::wstring targetDev;  // e.g. L"Focusrite USB MIDI"
+    int channel;             // 1..16
+    int controlChange;       // 0..127
+    int value;               // 0..127
+    std::wstring switchName; // Switch name if matched/known
+    std::wstring result;     // L"OK", L"FAILED", L"SKIPPED", etc.
+};
+
+void PushConsoleMidiMonitorEvent(const std::wstring& source, const std::wstring& targetDev,
+    int channel, int controlChange, int value, const std::wstring& switchName, const std::wstring& result);
+std::vector<ConsoleMidiMonitorEntry> PopConsoleMidiMonitorEvents();
+void ClearConsoleMidiMonitorEvents();

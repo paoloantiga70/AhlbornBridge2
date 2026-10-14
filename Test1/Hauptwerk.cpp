@@ -929,11 +929,13 @@ bool HideBiduleWindow()
     if (bidulePid == 0)
         return false;
 
-    HWND visibleWindow = FindPrimaryBiduleWindow(bidulePid, true);
-    if (!visibleWindow || !IsWindow(visibleWindow))
+    HWND targetWindow = FindPrimaryBiduleWindow(bidulePid, true);
+    if (!targetWindow || !IsWindow(targetWindow))
+        targetWindow = FindPrimaryBiduleWindow(bidulePid, false);
+    if (!targetWindow || !IsWindow(targetWindow))
         return false;
 
-    ShowWindowAsync(visibleWindow, SW_HIDE);
+    ShowWindowAsync(targetWindow, SW_HIDE);
     return true;
 }
 

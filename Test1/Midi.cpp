@@ -1012,48 +1012,6 @@ namespace
 					return;
 				}
 			}
-
-			// Toggle Hauptwerk main window visibility if it is available.
-			HWND mainWindow = g_hauptwerkMainWindow;
-			if (!mainWindow || !IsWindow(mainWindow))
-			{
-				return;
-			}
-
-			// If the window is visible, hide it; otherwise, show it.
-			if (IsWindowVisible(mainWindow))
-			{
-				ShowWindow(mainWindow, SW_HIDE);
-				UpdateTrayIconFromFile(kIconFlash);
-				//g_trayIconImageStatus = TrayIconImageStatus::Standby;
-			}
-			else
-			{
-				ShowWindow(mainWindow, SW_SHOW);
-				// Ripristina l'ultima immagine salvata per la tray icon.
-				TrayIconImageStatus lastStatus = g_trayIconImageStatus.load();
-				switch (lastStatus)
-				{
-				case TrayIconImageStatus::Disabled:
-					UpdateTrayIconFromFile(kIconDisabled);
-					break;
-				case TrayIconImageStatus::Standby:
-					UpdateTrayIconFromFile(GetStandbyIconForCurrentDeviceState());
-					break;
-				case TrayIconImageStatus::Online:
-					UpdateTrayIconFromFile(GetOnlineIconForCurrentDeviceState());
-					break;
-				case TrayIconImageStatus::Error:
-					UpdateTrayIconFromFile(kIconError);
-					break;
-				case TrayIconImageStatus::Offline:
-					UpdateTrayIconFromFile(kIconOffline);
-					break;
-				case TrayIconImageStatus::Unknown:
-				default:
-					break;
-				}
-			}
 		}
 
     DWORD WINAPI TrayFlashThread(LPVOID)
@@ -1334,6 +1292,12 @@ namespace
 							{
 								printf("[Bidule] Launch splash timeout waiting for audio engine readiness.\n");
 								UpdateBiduleLaunchSplashProgress(90);
+							}
+
+							if (!shouldShowBiduleWindow)
+							{
+								HideBiduleWindow();
+								printf("[Bidule] Profile exists and loaded; ensuring window is hidden.\n");
 							}
 							CloseBiduleLaunchSplash();
 							g_streamDeckBiduleSplashActive.store(false);

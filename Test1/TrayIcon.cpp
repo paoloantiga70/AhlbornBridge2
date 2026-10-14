@@ -51,6 +51,11 @@ static HWND g_settingsProcessMgrPageHwnd = nullptr;
 static HWND g_processMgrStatusTextHwnd = nullptr;
 static HWND g_processMgrIdlePriorityComboHwnd   = nullptr;
 static HWND g_processMgrLoadedPriorityComboHwnd = nullptr;
+static HWND g_settingsConsoleMidiPageHwnd = nullptr;
+static HWND g_consoleMidiListViewHwnd = nullptr;
+static HWND g_consoleMidiAutoScrollCheckHwnd = nullptr;
+static HWND g_consoleMidiCountTextHwnd = nullptr;
+static int  g_consoleMidiTotalEventCount = 0;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -84,6 +89,8 @@ constexpr int kProcessMgrUninstallButtonId = 703;
 constexpr int kProcessMgrRefreshButtonId = 704;
 constexpr int kProcessMgrIdlePriorityComboId   = 705;
 constexpr int kProcessMgrLoadedPriorityComboId = 706;
+constexpr int kConsoleMidiClearButtonId = 801;
+constexpr int kConsoleMidiAutoScrollCheckId = 802;
 
 namespace
 {
@@ -666,8 +673,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         TabCtrl_InsertItem(g_settingsTabHwnd, 5, &tabItem);
         tabItem.pszText = const_cast<wchar_t*>(L"Process Mgr");
         TabCtrl_InsertItem(g_settingsTabHwnd, 6, &tabItem);
-        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        tabItem.pszText = const_cast<wchar_t*>(L"Console MIDI");
         TabCtrl_InsertItem(g_settingsTabHwnd, 7, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        TabCtrl_InsertItem(g_settingsTabHwnd, 8, &tabItem);
 
         RECT tabRect = {};
         GetClientRect(g_settingsTabHwnd, &tabRect);
@@ -710,6 +719,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             hWnd, nullptr, nullptr, nullptr);
 
         g_settingsProcessMgrPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
+            tabRect.left, tabRect.top,
+            tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+            hWnd, nullptr, nullptr, nullptr);
+
+        g_settingsConsoleMidiPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
             tabRect.left, tabRect.top,
             tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
             hWnd, nullptr, nullptr, nullptr);
@@ -927,6 +941,47 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
             CreateWindowW(L"STATIC", L"github.com/paoloantiga70/AhlbornBridge", WS_CHILD | WS_VISIBLE,
                 22, 80, 270, 20, g_settingsAboutPageHwnd, nullptr, nullptr, nullptr);
+        }
+
+        // --- Console MIDI monitor page controls ---
+        {
+            CreateWindowW(L"BUTTON", L"Physical Console MIDI Output Monitor", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 740, 530, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Real-time log of MIDI CC messages transmitted to the physical organ console (SwitchCC restore and HwMirror).",
+                WS_CHILD | WS_VISIBLE,
+                24, 30, 700, 18, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
+
+            g_consoleMidiListViewHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                24, 54, 710, 430, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
+
+            ListView_SetExtendedListViewStyle(g_consoleMidiListViewHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+            LVCOLUMNW col = {};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(L"Time");        col.cx = 75;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 0, &col);
+            col.pszText = const_cast<LPWSTR>(L"Source");      col.cx = 80;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 1, &col);
+            col.pszText = const_cast<LPWSTR>(L"Target Port"); col.cx = 175; ListView_InsertColumn(g_consoleMidiListViewHwnd, 2, &col);
+            col.pszText = const_cast<LPWSTR>(L"Ch");          col.cx = 38;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 3, &col);
+            col.pszText = const_cast<LPWSTR>(L"CC#");         col.cx = 45;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 4, &col);
+            col.pszText = const_cast<LPWSTR>(L"Val");         col.cx = 45;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 5, &col);
+            col.pszText = const_cast<LPWSTR>(L"Switch / Register Name"); col.cx = 175; ListView_InsertColumn(g_consoleMidiListViewHwnd, 6, &col);
+            col.pszText = const_cast<LPWSTR>(L"Result");      col.cx = 70;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 7, &col);
+
+            CreateWindowW(L"BUTTON", L"Clear Log",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                24, 492, 100, 26, g_settingsConsoleMidiPageHwnd, (HMENU)kConsoleMidiClearButtonId, nullptr, nullptr);
+
+            g_consoleMidiAutoScrollCheckHwnd = CreateWindowW(L"BUTTON", L"Auto-scroll to latest",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                140, 496, 170, 20, g_settingsConsoleMidiPageHwnd, (HMENU)kConsoleMidiAutoScrollCheckId, nullptr, nullptr);
+            SendMessageW(g_consoleMidiAutoScrollCheckHwnd, BM_SETCHECK, BST_CHECKED, 0);
+
+            g_consoleMidiCountTextHwnd = CreateWindowW(L"STATIC", L"Total events: 0",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                480, 498, 250, 20, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
         }
 
         RECT organRect = {};
@@ -1665,6 +1720,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 idlePri.c_str(), loadedPri.c_str());
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kConsoleMidiClearButtonId)
+        {
+            ClearConsoleMidiMonitorEvents();
+            if (g_consoleMidiListViewHwnd)
+            {
+                ListView_DeleteAllItems(g_consoleMidiListViewHwnd);
+            }
+            g_consoleMidiTotalEventCount = 0;
+            if (g_consoleMidiCountTextHwnd)
+            {
+                SetWindowTextW(g_consoleMidiCountTextHwnd, L"Total events: 0");
+            }
+            return 0;
+        }
         break;
     }
         if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE || wParam == DBT_DEVNODES_CHANGED)
@@ -1729,9 +1798,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                         MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
                         reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
             }
+            if (g_settingsConsoleMidiPageHwnd)
+            {
+                ShowWindow(g_settingsConsoleMidiPageHwnd, sel == 7 ? SW_SHOW : SW_HIDE);
+            }
             if (g_settingsAboutPageHwnd)
             {
-                ShowWindow(g_settingsAboutPageHwnd, sel == 7 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_settingsAboutPageHwnd, sel == 8 ? SW_SHOW : SW_HIDE);
             }
             if (sel == 2)
             {
@@ -1748,6 +1821,80 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 InvalidateRect(g_feLedHwnd, nullptr, FALSE);
             }
             UpdateOrganInfoGroupTitle();
+
+            if (g_consoleMidiListViewHwnd)
+            {
+                auto events = PopConsoleMidiMonitorEvents();
+                if (!events.empty())
+                {
+                    SendMessageW(g_consoleMidiListViewHwnd, WM_SETREDRAW, FALSE, 0);
+                    for (const auto& ev : events)
+                    {
+                        wchar_t timeBuf[32] = {};
+                        wsprintfW(timeBuf, L"%02u:%02u:%02u.%03u",
+                            ev.timestamp.wHour, ev.timestamp.wMinute,
+                            ev.timestamp.wSecond, ev.timestamp.wMilliseconds);
+
+                        wchar_t chBuf[16] = {};
+                        wsprintfW(chBuf, L"%d", ev.channel);
+
+                        wchar_t ccBuf[16] = {};
+                        wsprintfW(ccBuf, L"%d", ev.controlChange);
+
+                        wchar_t valBuf[16] = {};
+                        wsprintfW(valBuf, L"%d", ev.value);
+
+                        LVITEMW lvi = {};
+                        lvi.mask = LVIF_TEXT;
+                        lvi.iItem = ListView_GetItemCount(g_consoleMidiListViewHwnd);
+                        lvi.pszText = timeBuf;
+                        int itemIdx = ListView_InsertItem(g_consoleMidiListViewHwnd, &lvi);
+                        if (itemIdx >= 0)
+                        {
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 1, const_cast<LPWSTR>(ev.source.c_str()));
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 2, const_cast<LPWSTR>(ev.targetDev.c_str()));
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 3, chBuf);
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 4, ccBuf);
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 5, valBuf);
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 6, const_cast<LPWSTR>(ev.switchName.c_str()));
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 7, const_cast<LPWSTR>(ev.result.c_str()));
+                        }
+                        g_consoleMidiTotalEventCount++;
+                    }
+
+                    // Keep total rows in ListView reasonable (max 1000)
+                    constexpr int kMaxListRows = 1000;
+                    int curCount = ListView_GetItemCount(g_consoleMidiListViewHwnd);
+                    if (curCount > kMaxListRows)
+                    {
+                        int removeCount = curCount - kMaxListRows;
+                        for (int i = 0; i < removeCount; ++i)
+                        {
+                            ListView_DeleteItem(g_consoleMidiListViewHwnd, 0);
+                        }
+                    }
+
+                    SendMessageW(g_consoleMidiListViewHwnd, WM_SETREDRAW, TRUE, 0);
+                    InvalidateRect(g_consoleMidiListViewHwnd, nullptr, TRUE);
+
+                    if (g_consoleMidiAutoScrollCheckHwnd &&
+                        SendMessageW(g_consoleMidiAutoScrollCheckHwnd, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                    {
+                        int lastIdx = ListView_GetItemCount(g_consoleMidiListViewHwnd) - 1;
+                        if (lastIdx >= 0)
+                        {
+                            ListView_EnsureVisible(g_consoleMidiListViewHwnd, lastIdx, FALSE);
+                        }
+                    }
+
+                    if (g_consoleMidiCountTextHwnd)
+                    {
+                        wchar_t countBuf[64] = {};
+                        wsprintfW(countBuf, L"Total events: %d", g_consoleMidiTotalEventCount);
+                        SetWindowTextW(g_consoleMidiCountTextHwnd, countBuf);
+                    }
+                }
+            }
         }
         return 0;
     case WM_CLOSE:
@@ -1766,6 +1913,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_settingsOrganInfoGroupHwnd = nullptr;
         g_settingsAboutPageHwnd = nullptr;
         g_settingsStreamDeckPageHwnd = nullptr;
+        g_settingsProcessMgrPageHwnd = nullptr;
+        g_settingsConsoleMidiPageHwnd = nullptr;
+        g_consoleMidiListViewHwnd = nullptr;
+        g_consoleMidiAutoScrollCheckHwnd = nullptr;
+        g_consoleMidiCountTextHwnd = nullptr;
         g_hauptwerkOrganListHwnd = nullptr;
         g_hauptwerkAudioDeviceComboHwnd = nullptr;
         g_bidulePathEditHwnd = nullptr;

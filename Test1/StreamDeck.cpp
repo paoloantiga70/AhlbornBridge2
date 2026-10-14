@@ -33,6 +33,66 @@ static std::wstring                   g_cachedOrganUniqueId; // organ context fo
 static CRITICAL_SECTION g_switchesCacheLock;
 static bool g_switchesCacheLockInit = false;
 
+// ---------------------------------------------------------------------------
+// Console MIDI Monitor Event Queue
+// ---------------------------------------------------------------------------
+static std::vector<ConsoleMidiMonitorEntry> g_consoleMidiQueue;
+static CRITICAL_SECTION g_consoleMidiQueueLock;
+static bool g_consoleMidiQueueLockInit = false;
+constexpr size_t kMaxConsoleMidiQueueEntries = 500;
+
+static void EnsureConsoleMidiQueueLock()
+{
+    if (!g_consoleMidiQueueLockInit)
+    {
+        InitializeCriticalSection(&g_consoleMidiQueueLock);
+        g_consoleMidiQueueLockInit = true;
+    }
+}
+
+void PushConsoleMidiMonitorEvent(const std::wstring& source, const std::wstring& targetDev,
+    int channel, int controlChange, int value, const std::wstring& switchName, const std::wstring& result)
+{
+    EnsureConsoleMidiQueueLock();
+    EnterCriticalSection(&g_consoleMidiQueueLock);
+    if (g_consoleMidiQueue.size() >= kMaxConsoleMidiQueueEntries)
+    {
+        // Drop oldest entries to keep buffer bounded
+        g_consoleMidiQueue.erase(g_consoleMidiQueue.begin(), g_consoleMidiQueue.begin() + 50);
+    }
+    ConsoleMidiMonitorEntry entry = {};
+    GetLocalTime(&entry.timestamp);
+    entry.source = source;
+    entry.targetDev = targetDev;
+    entry.channel = channel;
+    entry.controlChange = controlChange;
+    entry.value = value;
+    entry.switchName = switchName;
+    entry.result = result;
+    g_consoleMidiQueue.push_back(std::move(entry));
+    LeaveCriticalSection(&g_consoleMidiQueueLock);
+}
+
+std::vector<ConsoleMidiMonitorEntry> PopConsoleMidiMonitorEvents()
+{
+    std::vector<ConsoleMidiMonitorEntry> drained;
+    EnsureConsoleMidiQueueLock();
+    if (TryEnterCriticalSection(&g_consoleMidiQueueLock))
+    {
+        drained.swap(g_consoleMidiQueue);
+        LeaveCriticalSection(&g_consoleMidiQueueLock);
+    }
+    return drained;
+}
+
+void ClearConsoleMidiMonitorEvents()
+{
+    EnsureConsoleMidiQueueLock();
+    EnterCriticalSection(&g_consoleMidiQueueLock);
+    g_consoleMidiQueue.clear();
+    LeaveCriticalSection(&g_consoleMidiQueueLock);
+}
+
 static void EnsureSwitchesCacheLock()
 {
     if (!g_switchesCacheLockInit)
@@ -40,6 +100,67 @@ static void EnsureSwitchesCacheLock()
         InitializeCriticalSection(&g_switchesCacheLock);
         g_switchesCacheLockInit = true;
     }
+}
+
+static std::wstring FindSwitchNameForMidiCC(int channel, int controlChange, int value)
+{
+    EnsureSwitchesCacheLock();
+    if (!TryEnterCriticalSection(&g_switchesCacheLock))
+        return L"";
+
+    std::wstring result;
+    // 1. Try exact match on channel + cc + value (valueOn if >=64, valueOff if <64)
+    for (const auto& sw : g_cachedSwitches)
+    {
+        if (sw.channel == channel && sw.controlChange == controlChange)
+        {
+            if (value >= 64 && sw.valueOn == value)
+            {
+                result = sw.name;
+                break;
+            }
+            else if (value < 64 && sw.valueOff == value)
+            {
+                result = sw.name;
+                break;
+            }
+        }
+    }
+
+    // 2. Fallback: if value didn't match (or custom CC), match any switch with exact value match
+    if (result.empty())
+    {
+        for (const auto& sw : g_cachedSwitches)
+        {
+            if (sw.channel == channel && (sw.valueOn == value || sw.valueOff == value))
+            {
+                result = sw.name;
+                break;
+            }
+        }
+    }
+
+    // 3. Fallback: if only 1 switch exists for that channel & CC
+    if (result.empty())
+    {
+        int matchCount = 0;
+        std::wstring candidate;
+        for (const auto& sw : g_cachedSwitches)
+        {
+            if (sw.channel == channel && sw.controlChange == controlChange)
+            {
+                matchCount++;
+                candidate = sw.name;
+            }
+        }
+        if (matchCount == 1)
+        {
+            result = candidate;
+        }
+    }
+
+    LeaveCriticalSection(&g_switchesCacheLock);
+    return result;
 }
 
 void RefreshSwitchesCache()
@@ -1044,6 +1165,9 @@ void SendAhlbornSwitchControlChange(int channel, int controlChange, int value)
     DWORD status  = static_cast<DWORD>(0xB0 | ((channel - 1) & 0x0F));
     DWORD midiMsg = status | (static_cast<DWORD>(controlChange) << 8) | (static_cast<DWORD>(value) << 16);
 
+    // Look up switch name if present in cache (channel + cc + value matching)
+    std::wstring swName = FindSwitchNameForMidiCC(channel, controlChange, value);
+
     // 1. Send to Hauptwerk via virtual Port (A)
     bool enqueued = EnqueueMidiOutMessage(midiMsg);
     printf("[StreamDeck] Send switch CC ch=%d cc=%d value=%d: %s\n",
@@ -1054,8 +1178,17 @@ void SendAhlbornSwitchControlChange(int channel, int controlChange, int value)
     if (g_hPhysicalOut != nullptr)
     {
         MMRESULT res = midiOutShortMsg(g_hPhysicalOut, midiMsg);
+        bool ok = (res == MMSYSERR_NOERROR);
         printf("[SwitchCC] Mirrored to console '%S': %s\n",
-            g_physicalOutOpenedName.c_str(), res == MMSYSERR_NOERROR ? "OK" : "FAILED");
+            g_physicalOutOpenedName.c_str(), ok ? "OK" : "FAILED");
+        PushConsoleMidiMonitorEvent(L"SwitchCC", g_physicalOutOpenedName,
+            channel, controlChange, value, swName, ok ? L"OK" : L"FAILED");
+    }
+    else
+    {
+        std::wstring target = LoadFixedHauptwerkOutputName();
+        PushConsoleMidiMonitorEvent(L"SwitchCC", target.empty() ? L"(none)" : target,
+            channel, controlChange, value, swName, L"SKIPPED (no port)");
     }
 }
 
@@ -1068,19 +1201,36 @@ void SendAhlbornSwitchControlChange(int channel, int controlChange, int value)
 // ---------------------------------------------------------------------------
 void MirrorHauptwerkOutputToConsole(DWORD midiMsg)
 {
+    const uint8_t rawStatus = static_cast<uint8_t>(midiMsg & 0xFF);
+    const int rawCh  = (rawStatus & 0x0F) + 1;
+    const int rawCc  = static_cast<int>((midiMsg >> 8)  & 0xFF);
+    const int rawVal = static_cast<int>((midiMsg >> 16) & 0xFF);
+    const bool isCC  = ((rawStatus & 0xF0) == 0xB0);
+
+    // Look up switch name if present in cache (channel + cc + value matching)
+    std::wstring matchedSwName;
+    if (isCC)
+    {
+        matchedSwName = FindSwitchNameForMidiCC(rawCh, rawCc, rawVal);
+    }
+
     // 1. Mirror to physical console (LED sync)
     EnsurePhysicalOutOpen();
     if (g_hPhysicalOut != nullptr)
     {
-        midiOutShortMsg(g_hPhysicalOut, midiMsg);
+        MMRESULT res = midiOutShortMsg(g_hPhysicalOut, midiMsg);
+        bool ok = (res == MMSYSERR_NOERROR);
         // Log only non-trivial channel voice messages (skip 0xFE Active Sensing etc.)
-        uint8_t status = static_cast<uint8_t>(midiMsg & 0xFF);
-        if (status < 0xF0)
+        if (rawStatus < 0xF0)
         {
-            printf("[HwMirror] ch=%d CC%d=%d -> '%S'\n",
-                (status & 0x0F) + 1,
-                (midiMsg >> 8) & 0xFF, (midiMsg >> 16) & 0xFF,
-                g_physicalOutOpenedName.c_str());
+            printf("[HwMirror] ch=%d CC%d=%d -> '%S': %s\n",
+                rawCh, rawCc, rawVal,
+                g_physicalOutOpenedName.c_str(), ok ? "OK" : "FAILED");
+            if (isCC)
+            {
+                PushConsoleMidiMonitorEvent(L"HwMirror", g_physicalOutOpenedName,
+                    rawCh, rawCc, rawVal, matchedSwName, ok ? L"OK" : L"FAILED");
+            }
         }
     }
     else
@@ -1088,6 +1238,11 @@ void MirrorHauptwerkOutputToConsole(DWORD midiMsg)
         std::wstring target = LoadFixedHauptwerkOutputName();
         printf("[HwMirror] SKIPPED — g_hPhysicalOut=null, FixedHauptwerkOutput='%S'\n",
             target.c_str());
+        if (rawStatus < 0xF0 && isCC)
+        {
+            PushConsoleMidiMonitorEvent(L"HwMirror", target.empty() ? L"(none)" : target,
+                rawCh, rawCc, rawVal, matchedSwName, L"SKIPPED (no port)");
+        }
     }
 
     // 2. Update Stream Deck switch state if the CC matches a configured switch.
