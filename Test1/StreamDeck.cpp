@@ -1074,10 +1074,21 @@ void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
         loadedIndex, organInfo.id.c_str(), organInfo.uniqueOrganId.c_str(), uniqueId.c_str());
 
     std::vector<AhlbornSwitchInfo> switches = LoadAhlbornSwitches();
-    std::map<int, bool> states = LoadOrganSwitchStates(uniqueId);
+    bool restoreStatesEnabled = true;
+    LoadRestoreOrganSwitchStates(restoreStatesEnabled);
+    std::map<int, bool> savedStates = LoadOrganSwitchStates(uniqueId);
+    std::map<int, bool> states;
+    if (restoreStatesEnabled)
+    {
+        states = savedStates;
+    }
+    else
+    {
+        printf("[NotifyStreamDeckSwitchesForOrgan] Restore organ switch states on load is disabled in settings. Skipping UI and MIDI restore.\n");
+    }
 
-    printf("[NotifyStreamDeckSwitchesForOrgan] pipeConnected=%d stateCount=%d\n",
-        (int)g_pipeConnected.load(), (int)states.size());
+    printf("[NotifyStreamDeckSwitchesForOrgan] pipeConnected=%d savedCount=%d restoredCount=%d\n",
+        (int)g_pipeConnected.load(), (int)savedStates.size(), (int)states.size());
 
     // Send the state first so the plugin knows an organ is loaded before
     // receiving switchState messages (which are ignored when loadedIndex == 0).
@@ -1116,9 +1127,11 @@ void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
     printf("[NotifyStreamDeckSwitchesForOrgan] Waiting 2s for Hauptwerk post-load reset to complete...\n");
     Sleep(2000);
 
-    // Write all restored states into memory first, then freeze so that any
-    // late reset CCs still arriving via MidiInProc cannot overwrite them.
-    for (const auto& [switchIndex, isOn] : states)
+    // If restore is disabled, preserve existing saved states in memory so that
+    // an unload flush does not overwrite the organ's node with an empty state.
+    // If restore is enabled, write all restored states into memory.
+    const std::map<int, bool>& statesToSeed = restoreStatesEnabled ? states : savedStates;
+    for (const auto& [switchIndex, isOn] : statesToSeed)
     {
         if (switchIndex >= 1 && switchIndex <= static_cast<int>(switches.size()))
         {

@@ -672,16 +672,22 @@ namespace
                                     printf("[AudioPreload] Audio config already aligned for this organ. No restart needed.\n");
                                 }
                             }
-                            else
-                            {
-                                printf("[AudioPreload] Organ has empty Output_Device. Audio pre-load alignment skipped.\n");
-                            }
-                        }
-                        else
-                        {
-                            printf("[AudioPreload] Installed organ metadata index %d not found (list size=%zu).\n",
-                                idx, organInfos.size());
-                        }
+							else
+							{
+								printf("[AudioPreload] Organ has empty Output_Device. Audio pre-load alignment skipped.\n");
+							}
+
+							// Ensure SwitchInputOutput nodes are patched with the default MIDI output if needed
+							EnsureOrganSwitchOutputDevices(organInfo.uniqueOrganId);
+
+							// Ensure SysFunctionSwitchInputOutput combination nodes are configured
+							EnsureOrganSysFunctionSwitchInputs(organInfo.uniqueOrganId);
+						}
+						else
+						{
+							printf("[AudioPreload] Installed organ metadata index %d not found (list size=%zu).\n",
+								idx, organInfos.size());
+						}
 
 							if (!LoadOrganByName(g_hauptwerkMainWindow, name))
 							{
@@ -1325,6 +1331,7 @@ namespace
 							int nMapped = BuildOrganStopMappings(uid);
 							printf("[TitleMonitor] BuildOrganStopMappings (startup): %d stop(s) mapped.\n", nMapped);
 							StartOrganConfigWatcher(uid);
+							NotifyHauptwerkStopMappingsChanged();
 						}
 					}
 				}
@@ -1698,6 +1705,7 @@ namespace
                                     // made in Hauptwerk while this organ is loaded triggers a
                                     // rebuild of OrganStopMappings without requiring a reload.
                                     StartOrganConfigWatcher(uid);
+                                    NotifyHauptwerkStopMappingsChanged();
                                 }
                             }
                         }

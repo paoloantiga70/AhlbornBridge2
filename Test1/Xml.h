@@ -190,6 +190,7 @@ struct OrganStopMapping
     int cc       = 70;           // always 70 (from <c>19 → cc 70)
     int dataOn   = 0;            // dataOff + 64
     int dataOff  = 0;            // <s> - 1
+    bool midiOut = false;        // true if <i2> exists in the SwitchInputOutput node
 };
 
 // Scans the OrganConfig file for the currently loaded organ, matches every
@@ -202,3 +203,23 @@ int BuildOrganStopMappings(const std::wstring& uniqueOrganId);
 // Loads the persisted stop mappings for a specific organ from
 // <StreamDeck><OrganStopMappings> in Settings.xml.
 std::vector<OrganStopMapping> LoadOrganStopMappings(const std::wstring& uniqueOrganId);
+
+// Removes the <ObjectList ObjectType="SwitchInputOutput"> section from the organ's
+// OrganConfig_Hauptwerk_xml file and removes its persisted stop mappings from Settings.xml.
+bool ResetOrganSwitchInputOutput(const std::wstring& uniqueOrganId);
+
+// Loads/saves the preference for auto-assigning Hauptwerk Virtual (A) to switch outputs on organ load.
+bool LoadAutoAssignSwitchOutputs(bool& enabled);
+bool SaveAutoAssignSwitchOutputs(bool enabled);
+
+// Loads/saves the preference for restoring saved organ switch states on organ load.
+bool LoadRestoreOrganSwitchStates(bool& enabled);
+bool SaveRestoreOrganSwitchStates(bool enabled);
+
+// Ensures all SwitchInputOutput nodes in the organ's OrganConfig have the default
+// Hauptwerk Virtual (A) output device configured (<i2>1</i2><j2>{hwId}</j2><a3>1</a3>).
+bool EnsureOrganSwitchOutputDevices(const std::wstring& uniqueOrganId);
+
+// Ensures the 12 combination system function switch input nodes (<a> 541..550, 581, 613)
+// are present and configured with "AhlbornBridge Virtual Port (B)" in <g>.
+bool EnsureOrganSysFunctionSwitchInputs(const std::wstring& uniqueOrganId);

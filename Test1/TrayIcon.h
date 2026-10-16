@@ -3,6 +3,7 @@
 #include <windows.h>
 
 constexpr UINT WM_TRAYICON = WM_APP + 1;
+constexpr UINT WM_HAUPTWERK_STOP_MAPPINGS_CHANGED = WM_APP + 2;
 constexpr UINT ID_TRAY_SETTINGS = 1001;
 constexpr UINT ID_TRAY_EXIT = 1002;
 constexpr UINT ID_TRAY_UPDATE = 1003;
@@ -41,4 +42,5 @@ bool UpdateTrayIconFromFile(const wchar_t* iconPath);
 bool UpdateTrayIconTooltip(const wchar_t* tooltip);
 void CloseSettingsWindowIfAutoClose();
 void NotifyOrganInfoTitleChanged();
+void NotifyHauptwerkStopMappingsChanged();
 bool EnsureBiduleVisibleViaTrayToggle();

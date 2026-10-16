@@ -41,6 +41,8 @@ static HWND g_feLedHwnd = nullptr;
 static HWND g_activeSensingOutputComboHwnd = nullptr;
 static HWND g_hauptwerkOrganListHwnd = nullptr;
 static HWND g_hauptwerkAudioDeviceComboHwnd = nullptr;
+static HWND g_hauptwerkStopListHwnd = nullptr;
+static HWND g_hauptwerkResetStopsButtonHwnd = nullptr;
 static HWND g_bidulePathEditHwnd = nullptr;
 static HWND g_biduleCloseOnUnloadCheckHwnd = nullptr;
 static HWND g_biduleOscAddressEditHwnd = nullptr;
@@ -79,6 +81,10 @@ constexpr int kHauptwerkOrganListId = 501;
 constexpr int kHauptwerkAudioDeviceComboId = 502;
 constexpr int kHauptwerkSaveAudioAssignmentButtonId = 503;
 constexpr int kHauptwerkClearBiduleProfileButtonId  = 504;
+constexpr int kHauptwerkAutoAssignSwitchOutputsCheckId = 505;
+constexpr int kHauptwerkRestoreOrganSwitchStatesCheckId = 508;
+constexpr int kHauptwerkStopListId = 506;
+constexpr int kHauptwerkResetStopsButtonId = 507;
 constexpr int kBiduleBrowseButtonId = 601;
 constexpr int kBiduleAutoDetectButtonId = 602;
 constexpr int kBiduleCloseOnUnloadCheckId = 603;
@@ -91,6 +97,7 @@ constexpr int kProcessMgrIdlePriorityComboId   = 705;
 constexpr int kProcessMgrLoadedPriorityComboId = 706;
 constexpr int kConsoleMidiClearButtonId = 801;
 constexpr int kConsoleMidiAutoScrollCheckId = 802;
+constexpr int kOrganMappingsResetButtonId = 901;
 
 namespace
 {
@@ -102,6 +109,8 @@ namespace
         InstalledOrganInfo organ;
         std::vector<OrganStopMapping> mappings;
         HWND listHwnd = nullptr;
+        HWND resetBtnHwnd = nullptr;
+        HWND titleHwnd = nullptr;
     };
 
     LRESULT CALLBACK OrganMappingsWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -121,26 +130,32 @@ namespace
             GetClientRect(hWnd, &rc);
 
             std::wstring titleText = L"Stop assignments for: " + state->organ.name;
-            CreateWindowW(L"STATIC", titleText.c_str(),
+            state->titleHwnd = CreateWindowW(L"STATIC", titleText.c_str(),
                 WS_CHILD | WS_VISIBLE,
-                12, 12, rc.right - 24, 20,
+                12, 12, rc.right - 220, 24,
                 hWnd, nullptr, nullptr, nullptr);
+
+            state->resetBtnHwnd = CreateWindowW(L"BUTTON", L"Reset stop assignments",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                rc.right - 192, 8, 180, 26,
+                hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOrganMappingsResetButtonId)), nullptr, nullptr);
 
             state->listHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
                 WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                12, 40, rc.right - 24, rc.bottom - 52,
+                12, 42, rc.right - 24, rc.bottom - 54,
                 hWnd, nullptr, nullptr, nullptr);
 
             ListView_SetExtendedListViewStyle(state->listHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
             LVCOLUMNW col = {};
             col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-            col.pszText = const_cast<LPWSTR>(L"Ahlborn Stop");  col.cx = 180; ListView_InsertColumn(state->listHwnd, 0, &col);
-            col.pszText = const_cast<LPWSTR>(L"Hauptwerk Stop"); col.cx = 320; ListView_InsertColumn(state->listHwnd, 1, &col);
-            col.pszText = const_cast<LPWSTR>(L"Ch");            col.cx = 45;  ListView_InsertColumn(state->listHwnd, 2, &col);
-            col.pszText = const_cast<LPWSTR>(L"CC");            col.cx = 45;  ListView_InsertColumn(state->listHwnd, 3, &col);
-            col.pszText = const_cast<LPWSTR>(L"ON");            col.cx = 55;  ListView_InsertColumn(state->listHwnd, 4, &col);
-            col.pszText = const_cast<LPWSTR>(L"OFF");           col.cx = 55;  ListView_InsertColumn(state->listHwnd, 5, &col);
+            col.pszText = const_cast<LPWSTR>(L"Ahlborn Stop");  col.cx = 170; ListView_InsertColumn(state->listHwnd, 0, &col);
+            col.pszText = const_cast<LPWSTR>(L"Hauptwerk Stop"); col.cx = 300; ListView_InsertColumn(state->listHwnd, 1, &col);
+            col.pszText = const_cast<LPWSTR>(L"Ch");            col.cx = 40;  ListView_InsertColumn(state->listHwnd, 2, &col);
+            col.pszText = const_cast<LPWSTR>(L"CC");            col.cx = 40;  ListView_InsertColumn(state->listHwnd, 3, &col);
+            col.pszText = const_cast<LPWSTR>(L"ON");            col.cx = 50;  ListView_InsertColumn(state->listHwnd, 4, &col);
+            col.pszText = const_cast<LPWSTR>(L"OFF");           col.cx = 50;  ListView_InsertColumn(state->listHwnd, 5, &col);
+            col.pszText = const_cast<LPWSTR>(L"Midi Out");      col.cx = 85;  ListView_InsertColumn(state->listHwnd, 6, &col);
 
             for (int i = 0; i < static_cast<int>(state->mappings.size()); ++i)
             {
@@ -156,21 +171,101 @@ namespace
                 std::wstring cc  = std::to_wstring(m.cc);
                 std::wstring on  = std::to_wstring(m.dataOn);
                 std::wstring off = std::to_wstring(m.dataOff);
+                const wchar_t* midiOutText = m.midiOut ? L"Enabled" : L"Disabled";
                 ListView_SetItemText(state->listHwnd, i, 2, const_cast<LPWSTR>(ch.c_str()));
                 ListView_SetItemText(state->listHwnd, i, 3, const_cast<LPWSTR>(cc.c_str()));
                 ListView_SetItemText(state->listHwnd, i, 4, const_cast<LPWSTR>(on.c_str()));
                 ListView_SetItemText(state->listHwnd, i, 5, const_cast<LPWSTR>(off.c_str()));
+                ListView_SetItemText(state->listHwnd, i, 6, const_cast<LPWSTR>(midiOutText));
             }
             return 0;
         }
         case WM_SIZE:
-            if (state && state->listHwnd)
+            if (state)
             {
                 RECT rc = {};
                 GetClientRect(hWnd, &rc);
-                MoveWindow(state->listHwnd, 12, 40, rc.right - 24, rc.bottom - 52, TRUE);
+                if (state->titleHwnd)
+                {
+                    MoveWindow(state->titleHwnd, 12, 12, (rc.right > 230 ? rc.right - 220 : 100), 24, TRUE);
+                }
+                if (state->resetBtnHwnd)
+                {
+                    MoveWindow(state->resetBtnHwnd, (rc.right > 200 ? rc.right - 192 : 10), 8, 180, 26, TRUE);
+                }
+                if (state->listHwnd)
+                {
+                    MoveWindow(state->listHwnd, 12, 42, rc.right - 24, rc.bottom - 54, TRUE);
+                }
             }
             return 0;
+        case WM_COMMAND:
+        {
+            if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kOrganMappingsResetButtonId)
+            {
+                if (!state) return 0;
+
+                // Find 1-based installed organ index from g_hauptwerkOrgans
+                int organOneBased = -1;
+                for (int i = 0; i < static_cast<int>(g_hauptwerkOrgans.size()); ++i)
+                {
+                    if (g_hauptwerkOrgans[i].uniqueOrganId == state->organ.uniqueOrganId)
+                    {
+                        organOneBased = i + 1;
+                        break;
+                    }
+                }
+
+                bool wasLoaded = (organOneBased > 0 && g_currentLoadedInstalledOrganIndex.load() == organOneBased);
+
+                std::wstring confirmMsg = L"Are you sure you want to delete all stop assignments for:\n"
+                    + state->organ.name + L"?\n\n"
+                    + L"This will remove the SwitchInputOutput section from Hauptwerk's configuration.";
+                if (wasLoaded)
+                {
+                    confirmMsg += L"\n\nThe organ is currently loaded and will be reloaded so Hauptwerk can recreate the section.";
+                }
+
+                int answer = MessageBoxW(hWnd, confirmMsg.c_str(), L"Reset stop assignments", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                if (answer != IDYES)
+                    return 0;
+
+                // If this organ is currently loaded, unload it first and wait for unload to complete
+                // so Hauptwerk does not overwrite the configuration file during unload.
+                if (wasLoaded)
+                {
+                    EnqueueUnloadOrgan();
+                    for (int w = 0; w < 100 && g_currentLoadedInstalledOrganIndex.load() > 0; ++w)
+                    {
+                        Sleep(100);
+                    }
+                }
+
+                bool ok = ResetOrganSwitchInputOutput(state->organ.uniqueOrganId);
+                if (!ok)
+                {
+                    MessageBoxW(hWnd, L"Failed to reset the organ configuration file.", L"Reset stop assignments", MB_OK | MB_ICONERROR);
+                    return 0;
+                }
+
+                // Clear the list view and in-memory mappings
+                state->mappings.clear();
+                ListView_DeleteAllItems(state->listHwnd);
+
+                // Only reload if the organ was actually loaded
+                if (wasLoaded && organOneBased > 0)
+                {
+                    EnqueueLoadInstalledOrgan(organOneBased);
+                    MessageBoxW(hWnd, L"Stop assignments reset successfully.\nHauptwerk organ reload has been requested.", L"Reset stop assignments", MB_OK | MB_ICONINFORMATION);
+                }
+                else
+                {
+                    MessageBoxW(hWnd, L"Stop assignments reset successfully.", L"Reset stop assignments", MB_OK | MB_ICONINFORMATION);
+                }
+                return 0;
+            }
+            break;
+        }
         case WM_CLOSE:
             DestroyWindow(hWnd);
             return 0;
@@ -187,6 +282,8 @@ namespace
 
     void ShowOrganStopMappingsWindow(HWND hOwner, const InstalledOrganInfo& organ)
     {
+        // Refresh mappings and ensure midiOut attributes match the current OrganConfig
+        BuildOrganStopMappings(organ.uniqueOrganId);
         std::vector<OrganStopMapping> mappings = LoadOrganStopMappings(organ.uniqueOrganId);
 
         WNDCLASSW wc = {};
@@ -329,6 +426,11 @@ namespace
                 SendMessageW(g_hauptwerkAudioDeviceComboHwnd, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(device.name.c_str()));
             SendMessageW(g_hauptwerkAudioDeviceComboHwnd, CB_SETCURSEL, 0, 0);
         }
+
+        if (g_hauptwerkStopListHwnd)
+        {
+            ListView_DeleteAllItems(g_hauptwerkStopListHwnd);
+        }
     }
 
     void SyncHauptwerkAudioComboToSelection()
@@ -348,6 +450,47 @@ namespace
                 SendMessageW(g_hauptwerkAudioDeviceComboHwnd, CB_SETCURSEL, i, 0);
                 return;
             }
+        }
+    }
+
+    void RefreshHauptwerkStopMappingsUI()
+    {
+        if (!g_hauptwerkStopListHwnd)
+            return;
+
+        ListView_DeleteAllItems(g_hauptwerkStopListHwnd);
+
+        if (!g_hauptwerkOrganListHwnd)
+            return;
+
+        int sel = ListView_GetNextItem(g_hauptwerkOrganListHwnd, -1, LVNI_SELECTED);
+        if (sel < 0 || sel >= static_cast<int>(g_hauptwerkOrgans.size()))
+            return;
+
+        const auto& organ = g_hauptwerkOrgans[sel];
+        BuildOrganStopMappings(organ.uniqueOrganId);
+        std::vector<OrganStopMapping> mappings = LoadOrganStopMappings(organ.uniqueOrganId);
+
+        for (int i = 0; i < static_cast<int>(mappings.size()); ++i)
+        {
+            const auto& m = mappings[i];
+            LVITEMW item = {};
+            item.mask = LVIF_TEXT;
+            item.iItem = i;
+            item.pszText = const_cast<LPWSTR>(m.ahlbornName.c_str());
+            ListView_InsertItem(g_hauptwerkStopListHwnd, &item);
+            ListView_SetItemText(g_hauptwerkStopListHwnd, i, 1, const_cast<LPWSTR>(m.hwStopName.c_str()));
+
+            std::wstring ch  = std::to_wstring(m.channel);
+            std::wstring cc  = std::to_wstring(m.cc);
+            std::wstring on  = std::to_wstring(m.dataOn);
+            std::wstring off = std::to_wstring(m.dataOff);
+            const wchar_t* midiOutText = m.midiOut ? L"Enabled" : L"Disabled";
+            ListView_SetItemText(g_hauptwerkStopListHwnd, i, 2, const_cast<LPWSTR>(ch.c_str()));
+            ListView_SetItemText(g_hauptwerkStopListHwnd, i, 3, const_cast<LPWSTR>(cc.c_str()));
+            ListView_SetItemText(g_hauptwerkStopListHwnd, i, 4, const_cast<LPWSTR>(on.c_str()));
+            ListView_SetItemText(g_hauptwerkStopListHwnd, i, 5, const_cast<LPWSTR>(off.c_str()));
+            ListView_SetItemText(g_hauptwerkStopListHwnd, i, 6, const_cast<LPWSTR>(midiOutText));
         }
     }
 
@@ -946,7 +1089,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         // --- Console MIDI monitor page controls ---
         {
             CreateWindowW(L"BUTTON", L"Physical Console MIDI Output Monitor", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                10, 8, 740, 530, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
+                10, 8, 740, 740, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
 
             CreateWindowW(L"STATIC",
                 L"Real-time log of MIDI CC messages transmitted to the physical organ console (SwitchCC restore and HwMirror).",
@@ -955,7 +1098,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
             g_consoleMidiListViewHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
                 WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                24, 54, 710, 430, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
+                24, 54, 710, 640, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
 
             ListView_SetExtendedListViewStyle(g_consoleMidiListViewHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
@@ -968,20 +1111,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             col.pszText = const_cast<LPWSTR>(L"CC#");         col.cx = 45;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 4, &col);
             col.pszText = const_cast<LPWSTR>(L"Val");         col.cx = 45;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 5, &col);
             col.pszText = const_cast<LPWSTR>(L"Switch / Register Name"); col.cx = 175; ListView_InsertColumn(g_consoleMidiListViewHwnd, 6, &col);
-            col.pszText = const_cast<LPWSTR>(L"Result");      col.cx = 70;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 7, &col);
+            col.pszText = const_cast<LPWSTR>(L"Status");      col.cx = 70;  ListView_InsertColumn(g_consoleMidiListViewHwnd, 7, &col);
 
             CreateWindowW(L"BUTTON", L"Clear Log",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                24, 492, 100, 26, g_settingsConsoleMidiPageHwnd, (HMENU)kConsoleMidiClearButtonId, nullptr, nullptr);
+                24, 702, 100, 26, g_settingsConsoleMidiPageHwnd, (HMENU)kConsoleMidiClearButtonId, nullptr, nullptr);
 
             g_consoleMidiAutoScrollCheckHwnd = CreateWindowW(L"BUTTON", L"Auto-scroll to latest",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                140, 496, 170, 20, g_settingsConsoleMidiPageHwnd, (HMENU)kConsoleMidiAutoScrollCheckId, nullptr, nullptr);
+                140, 706, 170, 20, g_settingsConsoleMidiPageHwnd, (HMENU)kConsoleMidiAutoScrollCheckId, nullptr, nullptr);
             SendMessageW(g_consoleMidiAutoScrollCheckHwnd, BM_SETCHECK, BST_CHECKED, 0);
 
             g_consoleMidiCountTextHwnd = CreateWindowW(L"STATIC", L"Total events: 0",
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                480, 498, 250, 20, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
+                480, 708, 250, 20, g_settingsConsoleMidiPageHwnd, nullptr, nullptr, nullptr);
         }
 
         RECT organRect = {};
@@ -994,7 +1137,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
         {
             CreateWindowW(L"BUTTON", L"Hauptwerk Integration", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                10, 8, 740, 500, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+                10, 8, 740, 710, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
 
             CreateWindowW(L"STATIC", L"Installed organs audio output",
                 WS_CHILD | WS_VISIBLE,
@@ -1011,7 +1154,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
             g_hauptwerkOrganListHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
                 WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                24, 96, 700, 300, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkOrganListId, nullptr, nullptr);
+                24, 88, 700, 130, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkOrganListId, nullptr, nullptr);
 
             ListView_SetExtendedListViewStyle(g_hauptwerkOrganListHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
@@ -1024,21 +1167,63 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             col.pszText = const_cast<LPWSTR>(L"Audio Device"); col.cx = 180; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 4, &col);
             col.pszText = const_cast<LPWSTR>(L"Bidule Profile"); col.cx = 220; ListView_InsertColumn(g_hauptwerkOrganListHwnd, 5, &col);
 
+            CreateWindowW(L"STATIC", L"Assigned Stops:",
+                WS_CHILD | WS_VISIBLE,
+                24, 226, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+
+            g_hauptwerkResetStopsButtonHwnd = CreateWindowW(L"BUTTON", L"Reset stop assignments",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                544, 222, 180, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkResetStopsButtonId, nullptr, nullptr);
+
+            g_hauptwerkStopListHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                24, 248, 700, 360, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkStopListId, nullptr, nullptr);
+
+            ListView_SetExtendedListViewStyle(g_hauptwerkStopListHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+            LVCOLUMNW stopCol = {};
+            stopCol.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            stopCol.pszText = const_cast<LPWSTR>(L"Ahlborn Stop");   stopCol.cx = 145; ListView_InsertColumn(g_hauptwerkStopListHwnd, 0, &stopCol);
+            stopCol.pszText = const_cast<LPWSTR>(L"Hauptwerk Stop"); stopCol.cx = 240; ListView_InsertColumn(g_hauptwerkStopListHwnd, 1, &stopCol);
+            stopCol.pszText = const_cast<LPWSTR>(L"Ch");             stopCol.cx = 40;  ListView_InsertColumn(g_hauptwerkStopListHwnd, 2, &stopCol);
+            stopCol.pszText = const_cast<LPWSTR>(L"CC");             stopCol.cx = 40;  ListView_InsertColumn(g_hauptwerkStopListHwnd, 3, &stopCol);
+            stopCol.pszText = const_cast<LPWSTR>(L"ON");             stopCol.cx = 50;  ListView_InsertColumn(g_hauptwerkStopListHwnd, 4, &stopCol);
+            stopCol.pszText = const_cast<LPWSTR>(L"OFF");            stopCol.cx = 50;  ListView_InsertColumn(g_hauptwerkStopListHwnd, 5, &stopCol);
+            stopCol.pszText = const_cast<LPWSTR>(L"Midi Out");       stopCol.cx = 85;  ListView_InsertColumn(g_hauptwerkStopListHwnd, 6, &stopCol);
+
             CreateWindowW(L"STATIC", L"Assign device:",
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                24, 418, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
+                24, 622, 120, 20, g_settingsHauptwerkPageHwnd, nullptr, nullptr, nullptr);
 
             g_hauptwerkAudioDeviceComboHwnd = CreateWindowW(L"COMBOBOX", nullptr,
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                156, 414, 410, 220, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkAudioDeviceComboId, nullptr, nullptr);
+                156, 618, 410, 220, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkAudioDeviceComboId, nullptr, nullptr);
 
             CreateWindowW(L"BUTTON", L"Save assignment",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                584, 414, 140, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkSaveAudioAssignmentButtonId, nullptr, nullptr);
+                584, 618, 140, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkSaveAudioAssignmentButtonId, nullptr, nullptr);
 
             CreateWindowW(L"BUTTON", L"Clear Bidule Profile",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                584, 444, 140, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkClearBiduleProfileButtonId, nullptr, nullptr);
+                584, 648, 140, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkClearBiduleProfileButtonId, nullptr, nullptr);
+
+            bool autoAssignSwitchOutputs = true;
+            LoadAutoAssignSwitchOutputs(autoAssignSwitchOutputs);
+            HWND hAutoAssignCheck = CreateWindowW(L"BUTTON",
+                L"Auto-assign Hauptwerk Virtual (A) to organ switch outputs on load",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 678, 540, 20, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHauptwerkAutoAssignSwitchOutputsCheckId, nullptr, nullptr);
+            SendMessageW(hAutoAssignCheck, BM_SETCHECK, autoAssignSwitchOutputs ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            bool restoreOrganSwitchStates = true;
+            LoadRestoreOrganSwitchStates(restoreOrganSwitchStates);
+            HWND hRestoreStatesCheck = CreateWindowW(L"BUTTON",
+                L"Restore saved organ switch states on load",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 702, 540, 20, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHauptwerkRestoreOrganSwitchStatesCheckId, nullptr, nullptr);
+            SendMessageW(hRestoreStatesCheck, BM_SETCHECK, restoreOrganSwitchStates ? BST_CHECKED : BST_UNCHECKED, 0);
 
             RefreshHauptwerkAudioAssignmentsUI();
         }
@@ -1463,6 +1648,82 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             }
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkResetStopsButtonId)
+        {
+            if (!g_hauptwerkOrganListHwnd) return 0;
+            int selectedOrgan = ListView_GetNextItem(g_hauptwerkOrganListHwnd, -1, LVNI_SELECTED);
+            if (selectedOrgan < 0 || selectedOrgan >= static_cast<int>(g_hauptwerkOrgans.size()))
+            {
+                MessageBoxW(hWnd, L"Select an organ first.", L"Reset stop assignments", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+
+            const auto& organ = g_hauptwerkOrgans[selectedOrgan];
+            int organOneBased = selectedOrgan + 1;
+            bool wasLoaded = (organOneBased > 0 && g_currentLoadedInstalledOrganIndex.load() == organOneBased);
+
+            std::wstring confirmMsg = L"Are you sure you want to delete all stop assignments for:\n"
+                + organ.name + L"?\n\n"
+                + L"This will remove the SwitchInputOutput section from Hauptwerk's configuration.";
+            if (wasLoaded)
+            {
+                confirmMsg += L"\n\nThe organ is currently loaded and will be reloaded so Hauptwerk can recreate the section.";
+            }
+
+            int answer = MessageBoxW(hWnd, confirmMsg.c_str(), L"Reset stop assignments", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (answer != IDYES)
+                return 0;
+
+            if (wasLoaded)
+            {
+                EnqueueUnloadOrgan();
+                for (int w = 0; w < 100 && g_currentLoadedInstalledOrganIndex.load() > 0; ++w)
+                {
+                    Sleep(100);
+                }
+            }
+
+            bool ok = ResetOrganSwitchInputOutput(organ.uniqueOrganId);
+            if (!ok)
+            {
+                MessageBoxW(hWnd, L"Failed to reset the organ configuration file.", L"Reset stop assignments", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+
+            if (g_hauptwerkStopListHwnd)
+            {
+                ListView_DeleteAllItems(g_hauptwerkStopListHwnd);
+            }
+
+            if (wasLoaded && organOneBased > 0)
+            {
+                EnqueueLoadInstalledOrgan(organOneBased);
+                MessageBoxW(hWnd, L"Stop assignments reset successfully.\nHauptwerk organ reload has been requested.", L"Reset stop assignments", MB_OK | MB_ICONINFORMATION);
+            }
+            else
+            {
+                MessageBoxW(hWnd, L"Stop assignments reset successfully.", L"Reset stop assignments", MB_OK | MB_ICONINFORMATION);
+            }
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkAutoAssignSwitchOutputsCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = GetDlgItem(g_settingsHauptwerkPageHwnd ? g_settingsHauptwerkPageHwnd : hWnd, kHauptwerkAutoAssignSwitchOutputsCheckId);
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveAutoAssignSwitchOutputs(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkRestoreOrganSwitchStatesCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = GetDlgItem(g_settingsHauptwerkPageHwnd ? g_settingsHauptwerkPageHwnd : hWnd, kHauptwerkRestoreOrganSwitchStatesCheckId);
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveRestoreOrganSwitchStates(enabled);
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleBrowseButtonId)
         {
             std::wstring bidulePath;
@@ -1745,7 +2006,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hauptwerkOrganListHwnd
             && reinterpret_cast<LPNMHDR>(lParam)->code == LVN_ITEMCHANGED)
         {
-            SyncHauptwerkAudioComboToSelection();
+            auto* nmlv = reinterpret_cast<LPNMLISTVIEW>(lParam);
+            if ((nmlv->uChanged & LVIF_STATE) && (nmlv->uNewState & LVIS_SELECTED))
+            {
+                SyncHauptwerkAudioComboToSelection();
+                RefreshHauptwerkStopMappingsUI();
+            }
             return 0;
         }
         if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hauptwerkOrganListHwnd
@@ -1844,6 +2110,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                         wchar_t valBuf[16] = {};
                         wsprintfW(valBuf, L"%d", ev.value);
 
+                        const wchar_t* statusText = (ev.value >= 64) ? L"ON" : L"OFF";
+
                         LVITEMW lvi = {};
                         lvi.mask = LVIF_TEXT;
                         lvi.iItem = ListView_GetItemCount(g_consoleMidiListViewHwnd);
@@ -1857,7 +2125,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                             ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 4, ccBuf);
                             ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 5, valBuf);
                             ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 6, const_cast<LPWSTR>(ev.switchName.c_str()));
-                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 7, const_cast<LPWSTR>(ev.result.c_str()));
+                            ListView_SetItemText(g_consoleMidiListViewHwnd, itemIdx, 7, const_cast<LPWSTR>(statusText));
                         }
                         g_consoleMidiTotalEventCount++;
                     }
@@ -1897,6 +2165,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             }
         }
         return 0;
+    case WM_HAUPTWERK_STOP_MAPPINGS_CHANGED:
+        RefreshHauptwerkStopMappingsUI();
+        return 0;
     case WM_CLOSE:
         DestroyWindow(hWnd);
         return 0;
@@ -1920,6 +2191,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_consoleMidiCountTextHwnd = nullptr;
         g_hauptwerkOrganListHwnd = nullptr;
         g_hauptwerkAudioDeviceComboHwnd = nullptr;
+        g_hauptwerkStopListHwnd = nullptr;
+        g_hauptwerkResetStopsButtonHwnd = nullptr;
         g_bidulePathEditHwnd = nullptr;
         g_biduleCloseOnUnloadCheckHwnd = nullptr;
         g_sdPipeServerCheckHwnd = nullptr;
@@ -2054,6 +2327,16 @@ void NotifyOrganInfoTitleChanged()
     }
 
     UpdateOrganInfoGroupTitle();
+}
+
+void NotifyHauptwerkStopMappingsChanged()
+{
+    if (!g_settingsHwnd || !IsWindow(g_settingsHwnd))
+    {
+        return;
+    }
+
+    PostMessageW(g_settingsHwnd, WM_HAUPTWERK_STOP_MAPPINGS_CHANGED, 0, 0);
 }
 
 bool EnsureBiduleVisibleViaTrayToggle()
@@ -2308,7 +2591,7 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
         kSettingsClassName,
         L"General Preferences",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 780, 610,
+        CW_USEDEFAULT, CW_USEDEFAULT, 780, 820,
         hOwner,
         nullptr,
         hInstance,
