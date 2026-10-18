@@ -48,6 +48,7 @@ static HWND g_biduleCloseOnUnloadCheckHwnd = nullptr;
 static HWND g_biduleOscAddressEditHwnd = nullptr;
 static HWND g_biduleOscValueEditHwnd = nullptr;
 static HWND g_biduleOscPortEditHwnd = nullptr;
+static HWND g_biduleOscStatusTextHwnd = nullptr;
 static HWND g_sdPipeServerCheckHwnd = nullptr;
 static HWND g_settingsProcessMgrPageHwnd = nullptr;
 static HWND g_processMgrStatusTextHwnd = nullptr;
@@ -61,6 +62,7 @@ static int  g_consoleMidiTotalEventCount = 0;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
+constexpr UINT kBiduleOscStatusTimerId = 2;
 constexpr UINT kLedTimerIntervalMs = 30;
 constexpr DWORD kInputRefreshBlinkIntervalMs = 150;
 constexpr DWORD kInputRefreshDurationMs = 1200;
@@ -784,6 +786,50 @@ void PopulateMidiOutputs(HWND hCombo)
     SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
 }
 
+void SelectSettingsTab(int tabIndex)
+{
+    if (!g_settingsTabHwnd || !IsWindow(g_settingsTabHwnd) || tabIndex < 0)
+        return;
+
+    int count = TabCtrl_GetItemCount(g_settingsTabHwnd);
+    if (tabIndex >= count)
+        return;
+
+    TabCtrl_SetCurSel(g_settingsTabHwnd, tabIndex);
+
+    if (g_settingsMidiPageHwnd)
+        ShowWindow(g_settingsMidiPageHwnd, tabIndex == 0 ? SW_SHOW : SW_HIDE);
+    if (g_settingsInfoPageHwnd)
+        ShowWindow(g_settingsInfoPageHwnd, tabIndex == 1 ? SW_SHOW : SW_HIDE);
+    if (g_settingsOrganInfoPageHwnd)
+        ShowWindow(g_settingsOrganInfoPageHwnd, tabIndex == 2 ? SW_SHOW : SW_HIDE);
+    if (g_settingsHauptwerkPageHwnd)
+        ShowWindow(g_settingsHauptwerkPageHwnd, tabIndex == 3 ? SW_SHOW : SW_HIDE);
+    if (g_settingsBidulePageHwnd)
+        ShowWindow(g_settingsBidulePageHwnd, tabIndex == 4 ? SW_SHOW : SW_HIDE);
+    if (g_settingsStreamDeckPageHwnd)
+    {
+        ShowWindow(g_settingsStreamDeckPageHwnd, tabIndex == 5 ? SW_SHOW : SW_HIDE);
+        if (tabIndex == 5)
+            RefreshStreamDeckSettingsUI();
+    }
+    if (g_settingsProcessMgrPageHwnd)
+    {
+        ShowWindow(g_settingsProcessMgrPageHwnd, tabIndex == 6 ? SW_SHOW : SW_HIDE);
+        if (tabIndex == 6 && g_settingsHwnd)
+            SendMessageW(g_settingsHwnd, WM_COMMAND,
+                MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
+                reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
+    }
+    if (g_settingsConsoleMidiPageHwnd)
+        ShowWindow(g_settingsConsoleMidiPageHwnd, tabIndex == 7 ? SW_SHOW : SW_HIDE);
+    if (g_settingsAboutPageHwnd)
+        ShowWindow(g_settingsAboutPageHwnd, tabIndex == 8 ? SW_SHOW : SW_HIDE);
+
+    if (tabIndex == 2)
+        UpdateOrganInfoGroupTitle();
+}
+
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -1043,7 +1089,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
                 24, 180, 100, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
-            g_biduleOscAddressEditHwnd = CreateWindowW(L"EDIT", L"/open",
+            g_biduleOscAddressEditHwnd = CreateWindowW(L"EDIT", L"/play",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
                 136, 176, 220, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
@@ -1051,7 +1097,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 WS_CHILD | WS_VISIBLE | SS_RIGHT,
                 24, 210, 100, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
-            g_biduleOscValueEditHwnd = CreateWindowW(L"EDIT", L"C:\\Users\\paolo\\AppData\\Roaming\\AhlbornBridge\\BiduleProfiles\\OSC_Test.bidule",
+            g_biduleOscValueEditHwnd = CreateWindowW(L"EDIT", L"true",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
                 136, 206, 430, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
@@ -1066,6 +1112,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(L"BUTTON", L"Send OSC",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 230, 236, 100, 24, g_settingsBidulePageHwnd, (HMENU)kBiduleOscSendButtonId, nullptr, nullptr);
+
+            g_biduleOscStatusTextHwnd = CreateWindowW(L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE,
+                342, 240, 224, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
             RefreshBiduleSettingsUI();
         }
@@ -1768,9 +1818,16 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 port = static_cast<unsigned short>(parsed);
 
             if (SendBiduleOscStringCommand(addrBuf, valueBuf, port))
-                MessageBoxW(hWnd, L"OSC command sent.", L"Bidule OSC", MB_OK | MB_ICONINFORMATION);
+            {
+                if (g_biduleOscStatusTextHwnd)
+                    SetWindowTextW(g_biduleOscStatusTextHwnd, L"OSC command sent.");
+            }
             else
-                MessageBoxW(hWnd, L"Failed to send OSC command.", L"Bidule OSC", MB_OK | MB_ICONWARNING);
+            {
+                if (g_biduleOscStatusTextHwnd)
+                    SetWindowTextW(g_biduleOscStatusTextHwnd, L"Failed to send OSC command.");
+            }
+            SetTimer(hWnd, kBiduleOscStatusTimerId, 3000, nullptr);
             return 0;
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kProcessMgrRefreshButtonId)
@@ -2030,52 +2087,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             && reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_settingsTabHwnd)
         {
             int sel = TabCtrl_GetCurSel(g_settingsTabHwnd);
-            if (g_settingsMidiPageHwnd)
-            {
-                ShowWindow(g_settingsMidiPageHwnd, sel == 0 ? SW_SHOW : SW_HIDE);
-            }
-            if (g_settingsInfoPageHwnd)
-            {
-                ShowWindow(g_settingsInfoPageHwnd, sel == 1 ? SW_SHOW : SW_HIDE);
-            }
-            if (g_settingsOrganInfoPageHwnd)
-            {
-                ShowWindow(g_settingsOrganInfoPageHwnd, sel == 2 ? SW_SHOW : SW_HIDE);
-            }
-            if (g_settingsHauptwerkPageHwnd)
-            {
-                ShowWindow(g_settingsHauptwerkPageHwnd, sel == 3 ? SW_SHOW : SW_HIDE);
-            }
-            if (g_settingsBidulePageHwnd)
-            {
-                ShowWindow(g_settingsBidulePageHwnd, sel == 4 ? SW_SHOW : SW_HIDE);
-            }
-            if (g_settingsStreamDeckPageHwnd)
-            {
-                ShowWindow(g_settingsStreamDeckPageHwnd, sel == 5 ? SW_SHOW : SW_HIDE);
-                if (sel == 5)
-                    RefreshStreamDeckSettingsUI();
-            }
-            if (g_settingsProcessMgrPageHwnd)
-            {
-                ShowWindow(g_settingsProcessMgrPageHwnd, sel == 6 ? SW_SHOW : SW_HIDE);
-                if (sel == 6)
-                    SendMessageW(hWnd, WM_COMMAND,
-                        MAKEWPARAM(kProcessMgrRefreshButtonId, BN_CLICKED),
-                        reinterpret_cast<LPARAM>(GetDlgItem(g_settingsProcessMgrPageHwnd, kProcessMgrRefreshButtonId)));
-            }
-            if (g_settingsConsoleMidiPageHwnd)
-            {
-                ShowWindow(g_settingsConsoleMidiPageHwnd, sel == 7 ? SW_SHOW : SW_HIDE);
-            }
-            if (g_settingsAboutPageHwnd)
-            {
-                ShowWindow(g_settingsAboutPageHwnd, sel == 8 ? SW_SHOW : SW_HIDE);
-            }
-            if (sel == 2)
-            {
-                UpdateOrganInfoGroupTitle();
-            }
+            SelectSettingsTab(sel);
             return 0;
         }
         break;
@@ -2164,6 +2176,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 }
             }
         }
+        else if (wParam == kBiduleOscStatusTimerId)
+        {
+            KillTimer(hWnd, kBiduleOscStatusTimerId);
+            if (g_biduleOscStatusTextHwnd)
+                SetWindowTextW(g_biduleOscStatusTextHwnd, L"");
+        }
         return 0;
     case WM_HAUPTWERK_STOP_MAPPINGS_CHANGED:
         RefreshHauptwerkStopMappingsUI();
@@ -2173,6 +2191,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         return 0;
     case WM_DESTROY:
         KillTimer(hWnd, kLedTimerId);
+        KillTimer(hWnd, kBiduleOscStatusTimerId);
         g_feLedHwnd = nullptr;
         g_activeSensingOutputComboHwnd = nullptr;
         g_settingsTabHwnd = nullptr;
@@ -2199,6 +2218,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_biduleOscAddressEditHwnd = nullptr;
         g_biduleOscValueEditHwnd = nullptr;
         g_biduleOscPortEditHwnd = nullptr;
+        g_biduleOscStatusTextHwnd = nullptr;
         g_settingsHwnd = nullptr;
         return 0;
     default:
@@ -2223,6 +2243,7 @@ bool CreateTrayIcon(HINSTANCE hInstance, HWND hWnd)
     {
         return false;
     }
+
     // Prefer per-user icons in %APPDATA%\AhlbornBridge2\Icons\A_Disabled.png when available.
     wchar_t appdataBuf[MAX_PATH] = {};
     std::wstring iconPath;
@@ -2319,6 +2340,29 @@ bool UpdateTrayIconTooltip(const wchar_t* tooltip)
     return Shell_NotifyIconW(NIM_MODIFY, &g_nid) != FALSE;
 }
 
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* message, DWORD infoFlags)
+{
+    if (!g_nid.hWnd)
+    {
+        printf("[Tray] ShowTrayBalloon skipped: g_nid.hWnd is NULL\n");
+        return;
+    }
+
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = g_nid.hWnd;
+    nid.uID = g_nid.uID;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = infoFlags;
+    wcsncpy_s(nid.szInfoTitle, title ? title : L"", _countof(nid.szInfoTitle) - 1);
+    wcsncpy_s(nid.szInfo, message ? message : L"", _countof(nid.szInfo) - 1);
+    nid.uTimeout = 10000; // 10s
+
+    BOOL ok = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    printf("[Tray] ShowTrayBalloon: title='%S' res=%d err=%lu\n",
+           title ? title : L"", ok ? 1 : 0, ok ? 0 : GetLastError());
+}
+
 void NotifyOrganInfoTitleChanged()
 {
     if (!g_settingsHwnd || !IsWindow(g_settingsHwnd))
@@ -2362,6 +2406,7 @@ void ShowTrayMenu(HWND hWnd, POINT pt)
     LoadShowDebugConsole(showConsole);
 
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS_HAUPTWERK, L"Settings: Hauptwerk");
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_MIDI_ASSIGN, L"Assign MIDI devices\u2026");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING | (g_activeSensingEnabled.load() ? MF_CHECKED : MF_UNCHECKED),
@@ -2431,6 +2476,12 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 			GetCursorPos(&pt);
 			ShowTrayMenu(hWnd, pt);
 		}
+		// Click on balloon notification: open Bidule window for editing
+		else if (LOWORD(lParam) == NIN_BALLOONUSERCLICK || lParam == NIN_BALLOONUSERCLICK)
+		{
+			printf("[Tray] NIN_BALLOONUSERCLICK received -> invoking ShowBiduleWindow\n");
+			ShowBiduleWindow();
+		}
 		return 0;
 
 	case WM_COMMAND:
@@ -2438,6 +2489,9 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		{
 		case ID_TRAY_SETTINGS:
 			ShowSettingsWindow((HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE), hWnd);
+			return 0;
+		case ID_TRAY_SETTINGS_HAUPTWERK:
+			ShowSettingsWindow((HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE), hWnd, 3);
 			return 0;
 		case ID_TRAY_MIDI_ASSIGN:
 			ShowMidiAssignmentWindow((HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE), hWnd);
@@ -2564,10 +2618,12 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 	return DefWindowProcW(hWnd, message, wParam, lParam);
 }
 
-void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
+void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner, int initialTab)
 {
     if (g_settingsHwnd && IsWindow(g_settingsHwnd))
     {
+        if (initialTab >= 0)
+            SelectSettingsTab(initialTab);
         SetForegroundWindow(g_settingsHwnd);
         return;
     }
@@ -2599,6 +2655,8 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
 
     if (g_settingsHwnd)
     {
+        if (initialTab >= 0)
+            SelectSettingsTab(initialTab);
         ShowWindow(g_settingsHwnd, SW_SHOW);
         UpdateWindow(g_settingsHwnd);
     }

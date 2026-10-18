@@ -12,13 +12,14 @@ constexpr UINT ID_TRAY_MIDI_ASSIGN     = 1005;
 constexpr UINT ID_TRAY_TOGGLE_ACTIVE_SENSING = 1006;
 constexpr UINT ID_TRAY_TOGGLE_BIDULE = 1007;
 constexpr UINT ID_TRAY_BIDULE_OSC_TEST = 1008;
+constexpr UINT ID_TRAY_SETTINGS_HAUPTWERK = 1009;
 
 
 bool CreateTrayIcon(HINSTANCE hInstance, HWND hWnd);
 void RemoveTrayIcon(HWND hWnd);
 void ShowTrayMenu(HWND hWnd, POINT pt);
 LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner);
+void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner, int initialTab = -1);
 void PopulateMidiInputs(HWND hCombo);
 void PopulateMidiOutputs(HWND hCombo);
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -40,6 +41,7 @@ void UpdateBiduleLaunchSplashProgress(int percent);
 void CloseBiduleLaunchSplash();
 bool UpdateTrayIconFromFile(const wchar_t* iconPath);
 bool UpdateTrayIconTooltip(const wchar_t* tooltip);
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* message, DWORD infoFlags = 1 /* NIIF_INFO */);
 void CloseSettingsWindowIfAutoClose();
 void NotifyOrganInfoTitleChanged();
 void NotifyHauptwerkStopMappingsChanged();

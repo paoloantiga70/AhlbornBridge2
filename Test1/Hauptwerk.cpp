@@ -215,6 +215,64 @@ namespace
         return TRUE;
     }
 
+    static void DisableWindowCloseButton(HWND hwnd)
+    {
+        if (!hwnd || !IsWindow(hwnd))
+            return;
+
+        HMENU hSysMenu = GetSystemMenu(hwnd, FALSE);
+        if (hSysMenu)
+        {
+            EnableMenuItem(hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_DISABLED | MF_GRAYED);
+        }
+    }
+
+    static void EnableWindowCloseButton(HWND hwnd)
+    {
+        if (!hwnd || !IsWindow(hwnd))
+            return;
+
+        GetSystemMenu(hwnd, TRUE); // Revert to standard menu with SC_CLOSE enabled
+    }
+
+    static std::atomic<bool> g_biduleMinimizeWatcherRunning{ false };
+    static std::atomic<HWND> g_watchedBiduleWindow{ nullptr };
+
+    static void StartBiduleMinimizeWatcher(HWND hwnd)
+    {
+        g_watchedBiduleWindow.store(hwnd);
+        if (g_biduleMinimizeWatcherRunning.exchange(true))
+            return; // watcher already running
+
+        HANDLE hThread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+            while (g_biduleMinimizeWatcherRunning.load())
+            {
+                Sleep(200);
+                HWND target = g_watchedBiduleWindow.load();
+                if (!target || !IsWindow(target))
+                {
+                    // Check if Bidule is still running; if not, exit watcher
+                    if (!IsProcessRunningByName(L"bidule.exe") && !IsProcessRunningByName(L"Bidule.exe"))
+                        break;
+                    continue;
+                }
+
+                if (IsIconic(target)) // User clicked Minimize
+                {
+                    printf("[Bidule] Minimize detected on HWND=%p -> hiding window completely.\n", target);
+                    HideBiduleWindow();
+                    // Once hidden, reset watched window until next ShowBiduleWindow
+                    g_watchedBiduleWindow.store(nullptr);
+                }
+            }
+            g_biduleMinimizeWatcherRunning.store(false);
+            return 0;
+        }, nullptr, 0, nullptr);
+
+        if (hThread)
+            CloseHandle(hThread);
+    }
+
     HWND FindPrimaryBiduleWindow(DWORD bidulePid, bool preferVisible)
     {
         BiduleWindowEnumContext ctx{};
@@ -653,7 +711,7 @@ bool LaunchBidule()
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
+    si.wShowWindow = SW_SHOWMINNOACTIVE;
     PROCESS_INFORMATION pi = {};
 
     std::wstring cmd = L"\"" + exePath + L"\"";
@@ -661,16 +719,65 @@ bool LaunchBidule()
     std::vector<wchar_t> cmdLine(cmd.begin(), cmd.end());
     cmdLine.push_back(L'\0');
 
-    printf("[Bidule] LaunchBidule: starting hidden (SW_HIDE). exe=%S\n", exePath.c_str());
-    if (!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+    std::wstring workingDir;
+    size_t lastBackslash = exePath.find_last_of(L"\\/");
+    if (lastBackslash != std::wstring::npos)
+        workingDir = exePath.substr(0, lastBackslash);
+
+    printf("[Bidule] LaunchBidule: starting exe=%S (dir=%S)\n", exePath.c_str(), workingDir.c_str());
+    if (!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE, 0,
+                        nullptr, workingDir.empty() ? nullptr : workingDir.c_str(), &si, &pi))
     {
         printf("[Bidule] LaunchBidule: CreateProcess failed (error %lu).\n", GetLastError());
         return false;
     }
 
+    const DWORD pid = pi.dwProcessId;
     CloseHandle(pi.hThread);
+
+    // Retain process handle in a background watcher to diagnose early exit / monitor lifetime
+    HANDLE hProcessDup = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &hProcessDup,
+                        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0))
+    {
+        HANDLE hWatcher = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+            HANDLE hProc = static_cast<HANDLE>(param);
+            if (!hProc)
+                return 0;
+
+            // Monitor in steps up to 10 seconds: 1s, 2s, 3s, 5s, 10s
+            const DWORD checkPoints[] = { 1000, 1000, 1000, 2000, 5000 };
+            DWORD totalWaited = 0;
+            for (DWORD stepWait : checkPoints)
+            {
+                DWORD waitRes = WaitForSingleObject(hProc, stepWait);
+                totalWaited += stepWait;
+                DWORD exitCode = STILL_ACTIVE;
+                GetExitCodeProcess(hProc, &exitCode);
+                if (waitRes == WAIT_OBJECT_0)
+                {
+                    printf("[Bidule] Diagnostics: process terminated at ~%lu ms. exitCode=%lu (0x%08lX)\n",
+                           totalWaited, exitCode, exitCode);
+                    CloseHandle(hProc);
+                    return 0;
+                }
+                else
+                {
+                    printf("[Bidule] Diagnostics: process still active at ~%lu ms (exitCode=STILL_ACTIVE).\n", totalWaited);
+                }
+            }
+
+            printf("[Bidule] Diagnostics: process remained active after %lu ms.\n", totalWaited);
+            CloseHandle(hProc);
+            return 0;
+        }, hProcessDup, 0, nullptr);
+
+        if (hWatcher)
+            CloseHandle(hWatcher);
+    }
+
     CloseHandle(pi.hProcess);
-    printf("[Bidule] LaunchBidule: process started hidden successfully.\n");
+    printf("[Bidule] LaunchBidule: process started (PID=%lu).\n", pid);
     return true;
 }
 
@@ -742,6 +849,15 @@ bool SendBiduleOscFileSaveAs(const std::wstring& profilePath, unsigned short por
     return ok;
 }
 
+bool SendBiduleOscPlay(bool play, unsigned short port)
+{
+    const std::wstring val = play ? L"true" : L"false";
+    bool ok = SendBiduleOscSingleStringCommand("/play", val, port);
+    if (ok)
+        printf("[BiduleOSC] Sent /play %S to 127.0.0.1:%u\n", val.c_str(), static_cast<unsigned>(port));
+    return ok;
+}
+
 bool SendBiduleOscStringCommand(const std::wstring& address, const std::wstring& value, unsigned short port)
 {
     if (address.empty() || value.empty())
@@ -762,6 +878,7 @@ bool SendBiduleOscStringCommand(const std::wstring& address, const std::wstring&
 
 void CloseBiduleProcess()
 {
+    printf("[Bidule] CloseBiduleProcess CALLED.\n");
     bool runningBefore = IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe");
     if (!runningBefore)
     {
@@ -776,6 +893,7 @@ void CloseBiduleProcess()
     HWND mainWindow = (bidulePid != 0) ? FindPrimaryBiduleWindow(bidulePid, false) : nullptr;
     if (mainWindow && IsWindow(mainWindow))
     {
+        EnableWindowCloseButton(mainWindow);
         printf("[Bidule] CloseBiduleProcess: posting WM_CLOSE to HWND=%p PID=%lu\n", mainWindow, static_cast<unsigned long>(bidulePid));
         PostMessageW(mainWindow, WM_CLOSE, 0, 0);
         Sleep(250);
@@ -877,47 +995,57 @@ bool ShowBiduleWindow()
     if (bidulePid == 0)
         bidulePid = FindProcessId(L"Bidule.exe");
     if (bidulePid == 0)
-        return false;
-
-    if (!EnsureBiduleWindowReady(12000))
     {
-        printf("[Bidule] ShowBiduleWindow: timed out waiting for main window readiness (main UI area too small or unstable).\n");
+        printf("[Bidule] ShowBiduleWindow: process not found.\n");
         return false;
     }
 
-    const LONG kMinReadyArea = 300000;
-    ShowWindowAsync(FindPrimaryBiduleWindow(bidulePid, false), SW_SHOW);
-    const DWORD showStartTick = GetTickCount();
-    const DWORD showTimeout = 8000;
-    while (GetTickCount() - showStartTick < showTimeout)
+    HWND primaryWindow = FindPrimaryBiduleWindow(bidulePid, false);
+    if (primaryWindow && IsWindow(primaryWindow))
     {
-        HWND mainWindow = FindPrimaryBiduleWindow(bidulePid, false);
-        if (mainWindow && IsWindow(mainWindow))
+        ShowWindowAsync(primaryWindow, SW_SHOW);
+        ShowWindowAsync(primaryWindow, SW_RESTORE);
+        SetForegroundWindow(primaryWindow);
+        DisableWindowCloseButton(primaryWindow);
+        StartBiduleMinimizeWatcher(primaryWindow);
+        printf("[Bidule] ShowBiduleWindow: restored primary window HWND=%p for PID=%lu (close disabled, minimize watcher active)\n",
+               primaryWindow, static_cast<unsigned long>(bidulePid));
+        return true;
+    }
+
+    // Fallback: if no single primary window was identified, restore the first valid top-level window
+    HWND fallbackWindow = nullptr;
+    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+        auto* pTargetHwnd = reinterpret_cast<HWND*>(lParam);
+        DWORD wndPid = 0;
+        GetWindowThreadProcessId(hwnd, &wndPid);
+        DWORD targetPid = FindProcessId(L"bidule.exe");
+        if (targetPid == 0) targetPid = FindProcessId(L"Bidule.exe");
+        if (wndPid != 0 && wndPid == targetPid && IsWindow(hwnd))
         {
-            ShowWindowAsync(mainWindow, SW_RESTORE);
-            ShowWindowAsync(mainWindow, SW_SHOW);
-            SetForegroundWindow(mainWindow);
-
-            Sleep(180);
-
-            RECT rc{};
-            LONG area = 0;
-            if (GetWindowRect(mainWindow, &rc))
+            if (GetWindow(hwnd, GW_OWNER) == nullptr && GetParent(hwnd) == nullptr)
             {
-                LONG width = rc.right - rc.left;
-                LONG height = rc.bottom - rc.top;
-                if (width > 0 && height > 0)
-                    area = width * height;
+                *pTargetHwnd = hwnd;
+                return FALSE; // found top-level candidate, stop enumeration
             }
-
-            if (IsWindowVisible(mainWindow) && area >= kMinReadyArea)
-                return true;
         }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&fallbackWindow));
 
-        Sleep(180);
+    if (fallbackWindow && IsWindow(fallbackWindow))
+    {
+        ShowWindowAsync(fallbackWindow, SW_SHOW);
+        ShowWindowAsync(fallbackWindow, SW_RESTORE);
+        SetForegroundWindow(fallbackWindow);
+        DisableWindowCloseButton(fallbackWindow);
+        StartBiduleMinimizeWatcher(fallbackWindow);
+        printf("[Bidule] ShowBiduleWindow: fallback restored HWND=%p for PID=%lu (close disabled, minimize watcher active)\n",
+               fallbackWindow, static_cast<unsigned long>(bidulePid));
+        return true;
     }
 
-    printf("[Bidule] ShowBiduleWindow: show retry timeout, UI still not in ready size/visible state.\n");
+    printf("[Bidule] ShowBiduleWindow: no suitable window found for PID=%lu\n",
+           static_cast<unsigned long>(bidulePid));
     return false;
 }
 
@@ -927,15 +1055,42 @@ bool HideBiduleWindow()
     if (bidulePid == 0)
         bidulePid = FindProcessId(L"Bidule.exe");
     if (bidulePid == 0)
+    {
+        printf("[Bidule] HideBiduleWindow: process not found.\n");
         return false;
+    }
 
-    HWND targetWindow = FindPrimaryBiduleWindow(bidulePid, true);
-    if (!targetWindow || !IsWindow(targetWindow))
-        targetWindow = FindPrimaryBiduleWindow(bidulePid, false);
-    if (!targetWindow || !IsWindow(targetWindow))
-        return false;
+    int hiddenCount = 0;
+    // Iterate all top-level windows of Bidule process and hide any visible ones,
+    // logging each window's HWND, class, title and visibility.
+    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+        auto* pCount = reinterpret_cast<int*>(lParam);
+        DWORD wndPid = 0;
+        GetWindowThreadProcessId(hwnd, &wndPid);
+        DWORD targetPid = FindProcessId(L"bidule.exe");
+        if (targetPid == 0) targetPid = FindProcessId(L"Bidule.exe");
+        if (wndPid != 0 && wndPid == targetPid && IsWindow(hwnd))
+        {
+            wchar_t title[256] = {};
+            GetWindowTextW(hwnd, title, static_cast<int>(_countof(title)));
+            wchar_t cls[256] = {};
+            GetClassNameW(hwnd, cls, static_cast<int>(_countof(cls)));
+            BOOL visBefore = IsWindowVisible(hwnd);
+            if (visBefore)
+            {
+                ShowWindow(hwnd, SW_HIDE);
+                BOOL visAfter = IsWindowVisible(hwnd);
+                printf("[Bidule] HideBiduleWindow: HWND=%p Class='%S' Title='%S' VisBefore=%d VisAfter=%d\n",
+                       hwnd, cls, title, visBefore ? 1 : 0, visAfter ? 1 : 0);
+                if (pCount) (*pCount)++;
+            }
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&hiddenCount));
 
-    ShowWindowAsync(targetWindow, SW_HIDE);
+    printf("[Bidule] HideBiduleWindow: finished hiding %d window(s) for PID=%lu.\n",
+           hiddenCount, static_cast<unsigned long>(bidulePid));
+
     return true;
 }
 

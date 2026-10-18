@@ -544,14 +544,11 @@ namespace
 							g_streamDeckLoadingProgress.store(0);
 							NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
 
-						// If an organ is already loaded, close Bidule and unload it first,
+						// If an organ is already loaded, silence Bidule and unload it first,
 						// then wait until Hauptwerk reports standby before proceeding.
 						if (g_currentLoadedInstalledOrganIndex.load() > 0)
 						{
-							printf("[Deferred] Organ already loaded — closing Bidule and unloading before loading new organ.\n");
-							// Close Bidule unconditionally if running: the audio device assignment
-							// may have already been changed, so ShouldUseBiduleForInstalledOrgan
-							// might return false even though Bidule is still open with the old config.
+							printf("[Deferred] Organ already loaded — muting Bidule and unloading before loading new organ.\n");
 							if (IsProcessRunningByName(L"bidule.exe") || IsProcessRunningByName(L"Bidule.exe"))
 							{
 								int prevIdx = g_currentLoadedInstalledOrganIndex.load();
@@ -567,7 +564,7 @@ namespace
 										Sleep(300);
 									}
 								}
-								CloseBiduleProcess();
+								SendBiduleOscPlay(false);
 							}
 							ClickMenu(g_hauptwerkMainWindow, mUNLOAD_ORGAN);
 							// Wait up to 10 s for the organ to be unloaded (watch thread sets index to 0)
@@ -979,7 +976,7 @@ namespace
             }
         }
 
-        CloseBiduleProcess();
+        SendBiduleOscPlay(false);
     }
 
     // Choose the appropriate standby icon based on the current device state.
@@ -1238,7 +1235,16 @@ namespace
 
 						if (biduleProfilePath.empty())
 						{
-							printf("[Bidule] No profile assigned, launching Bidule with default state.\n");
+							printf("[Bidule] No profile assigned, keeping default state and activating DSP.\n");
+							std::wstring organDisplayName;
+							if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
+							{
+								const auto& info = organInfos[loadedInstalledOrganIndex - 1];
+								organDisplayName = !info.displayName.empty() ? info.displayName : info.name;
+							}
+							std::wstring balloonMsg = L"L'organo '" + (organDisplayName.empty() ? L"corrente" : organDisplayName) +
+								L"' non ha ancora un profilo Bidule.\nFai clic qui (o apri dal menu) per configurarlo.";
+							ShowTrayBalloon(L"Bidule VST Link", balloonMsg.c_str(), 1 /* NIIF_INFO */);
 						}
 						if (!LaunchBidule())
 						{
@@ -1246,69 +1252,28 @@ namespace
 						}
 						else
 						{
-							g_streamDeckBiduleSplashActive.store(true);
-							NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
-							ShowBiduleLaunchSplash();
-							UpdateBiduleLaunchSplashProgress(10);
-							if (biduleProfilePath.empty())
-								printf("[Bidule] Bidule launched after organ load completed (no profile).\n");
-							else
-								printf("[Bidule] Bidule launched after organ load completed with OSC profile request: %S\n", biduleProfilePath.c_str());
-
-							UpdateBiduleLaunchSplashProgress(30);
-							Sleep(2000);
-							UpdateBiduleLaunchSplashProgress(55);
-							bool shouldShowBiduleWindow = false;
 							if (!biduleProfilePath.empty())
 							{
 								DWORD attrs = GetFileAttributesW(biduleProfilePath.c_str());
-								if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+								if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+								{
+									SendBiduleOscOpenProfile(biduleProfilePath);
+									Sleep(200);
+								}
+								else
 								{
 									printf("[BiduleOSC] Profile file not found: %S\n", biduleProfilePath.c_str());
-									shouldShowBiduleWindow = true;
-								}
-								else if (!SendBiduleOscOpenProfile(biduleProfilePath))
-								{
-									printf("[BiduleOSC] Failed to send /open command.\n");
-									shouldShowBiduleWindow = true;
 								}
 							}
-							else
-							{
-								printf("[Bidule] Launch mode for this organ: visible (no BiduleProfile).\n");
-								shouldShowBiduleWindow = true;
-							}
-
-							if (shouldShowBiduleWindow)
-							{
-								bool shown = ShowBiduleWindow();
-								if (!shown)
-									shown = IsBiduleWindowVisible();
-								printf("[Bidule] Visible request result: %s\n", shown ? "visible" : "still hidden");
-							}
-
-							UpdateBiduleLaunchSplashProgress(75);
-							if (EnsureBiduleWindowReady(12000))
-							{
-								UpdateBiduleLaunchSplashProgress(90);
-								Sleep(400);
-								UpdateBiduleLaunchSplashProgress(100);
-							}
-							else
-							{
-								printf("[Bidule] Launch splash timeout waiting for audio engine readiness.\n");
-								UpdateBiduleLaunchSplashProgress(90);
-							}
-
-							if (!shouldShowBiduleWindow)
-							{
-								HideBiduleWindow();
-								printf("[Bidule] Profile exists and loaded; ensuring window is hidden.\n");
-							}
-							CloseBiduleLaunchSplash();
-							g_streamDeckBiduleSplashActive.store(false);
-							NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
+							HideBiduleWindow();
+							SendBiduleOscPlay(true);
+							printf("[Bidule] Activated audio engine with /play true.\n");
 						}
+					}
+					else if (loadedInstalledOrganIndex > 0)
+					{
+						// Organ does not use VST Link: ensure Bidule DSP is muted
+						SendBiduleOscPlay(false);
 					}
 				}
 				else if (deviceStateChanged)

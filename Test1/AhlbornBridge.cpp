@@ -159,7 +159,31 @@ if (FAILED(hr))
 	}
 
 	// Auto-detect and persist Bidule path at startup (instead of waiting for Settings UI).
-	DetectBiduleExePath();
+	std::wstring bidulePath = DetectBiduleExePath();
+	if (!bidulePath.empty())
+	{
+		LaunchBidule();
+		// In background, wait for Bidule to initialize, silence audio/MIDI with /play false, then hide window.
+		// Repeat hiding checks over a short window in case wxWidgets restores/activates the window late.
+		HANDLE hBiduleInitThread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+			Sleep(4000);
+			SendBiduleOscPlay(false);
+			Sleep(500);
+			HideBiduleWindow();
+
+			// Retry hide every 500ms for up to 3 seconds if any Bidule window is or becomes visible
+			for (int attempt = 0; attempt < 6; ++attempt)
+			{
+				Sleep(500);
+				if (IsBiduleWindowVisible())
+				{
+					HideBiduleWindow();
+				}
+			}
+			return 0;
+		}, nullptr, 0, nullptr);
+		if (hBiduleInitThread) CloseHandle(hBiduleInitThread);
+	}
 
 	// Start Stream Deck pipe server AFTER MIDI init and first-launch wizard are complete,
 	// and only if Stream Deck is actually installed on this system and the user has enabled it.
@@ -287,6 +311,8 @@ if (FAILED(hr))
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+
+    CloseBiduleProcess();
 
 #ifdef _DEBUG
     if (CONSOLE_ALLOCATION)
