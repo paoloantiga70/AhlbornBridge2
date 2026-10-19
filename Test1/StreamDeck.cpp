@@ -277,6 +277,7 @@ static HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION g_pipeLock;
 static bool g_pipeLockInitialized = false;
 static std::atomic<bool> g_pipeConnected{ false };
+static std::atomic<bool> g_altiverbUiOpen{ false };
 
 static void PipeSend(const std::string& json)
 {
@@ -446,9 +447,11 @@ static std::string BuildStateJson(int loadedIndex)
 
     int effectiveLoadedIndex = loadingVisible ? 0 : loadedIndex;
     bool vstLink = IsVstLinkEngineForInstalledOrgan(effectiveLoadedIndex);
+    bool altiverbUiOpen = g_altiverbUiOpen.load();
 
     return "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(effectiveLoadedIndex) +
            ",\"vstLink\":" + std::string(vstLink ? "true" : "false") +
+           ",\"altiverbUiOpen\":" + std::string(altiverbUiOpen ? "true" : "false") +
            ",\"consoleConnected\":" + std::string(consoleConnected ? "true" : "false") +
            ",\"hauptwerkRunning\":" + std::string(hauptwerkRunning ? "true" : "false") +
            ",\"loadingIndex\":" + std::to_string(loadingIndex) +
@@ -509,6 +512,19 @@ static void HandlePipeMessage(const std::string& msg)
         printf("[PipeServer] Toggle Bidule window requested\n");
         bool toggled = ToggleBiduleWindowVisibility();
         PipeSend(std::string("{\"type\":\"ack\",\"command\":\"toggleBiduleWindow\",\"ok\":") + (toggled ? "true" : "false") + "}");
+    }
+    else if (msg.find("\"toggleAltiverbUi\"") != std::string::npos)
+    {
+        bool newState = !g_altiverbUiOpen.load();
+        g_altiverbUiOpen.store(newState);
+        const std::wstring oscVal = newState ? L"true" : L"false";
+        printf("[PipeServer] Toggle Altiverb UI requested -> %s\n", newState ? "true" : "false");
+        SendBiduleOscStringCommand(L"/DSP_FRONT/Open_UI", oscVal);
+        SendBiduleOscStringCommand(L"/DSP_SIDE/Open_UI", oscVal);
+        SendBiduleOscStringCommand(L"/DSP_REAR/Open_UI", oscVal);
+        NotifyStreamDeckAltiverbUiState(newState);
+        PipeSend(std::string("{\"type\":\"ack\",\"command\":\"toggleAltiverbUi\",\"open\":") +
+            (newState ? "true" : "false") + "}");
     }
     else if (msg.find("\"toggleActiveSensing\"") != std::string::npos)
     {
@@ -1022,7 +1038,18 @@ void NotifyStreamDeckOrganUnloaded(bool resetSwitches)
         }
     }
 
+    g_altiverbUiOpen.store(false);
     PipeSend(BuildStateJson(0));
+}
+
+void NotifyStreamDeckAltiverbUiState(bool isOpen)
+{
+    if (!g_pipeConnected)
+        return;
+    std::string msg = std::string("{\"type\":\"altiverbUiState\",\"open\":") +
+             (isOpen ? "true" : "false") + "}";
+    printf("[NotifyStreamDeckAltiverbUiState] Sending: %s\n", msg.c_str());
+    PipeSend(msg);
 }
 
 void NotifyStreamDeckSwitchState(int switchIndex, bool isOn)
@@ -1099,8 +1126,10 @@ void NotifyStreamDeckSwitchesForOrgan(int loadedIndex)
         bool consoleConnected = (deviceState.load() == DeviceState::Connected);
         bool hauptwerkRunning = IsProcessRunningByName(L"Hauptwerk.exe");
         bool vstLink = IsVstLinkEngineForInstalledOrgan(loadedIndex);
+        bool altiverbUiOpen = g_altiverbUiOpen.load();
         std::string stateMsg = "{\"type\":\"state\",\"loadedIndex\":" + std::to_string(loadedIndex) +
             ",\"vstLink\":" + std::string(vstLink ? "true" : "false") +
+            ",\"altiverbUiOpen\":" + std::string(altiverbUiOpen ? "true" : "false") +
             ",\"consoleConnected\":" + std::string(consoleConnected ? "true" : "false") +
             ",\"hauptwerkRunning\":" + std::string(hauptwerkRunning ? "true" : "false") +
             ",\"loadingIndex\":0,\"loadingProgress\":0,\"loadingVisible\":false,\"biduleSplashActive\":false}";

@@ -28,6 +28,7 @@ void NotifyStreamDeckOrganUnloaded(bool resetSwitches = true);
 void NotifyStreamDeckSwitchState(int switchIndex, bool isOn);
 void NotifyStreamDeckSwitchesForOrgan(int loadedIndex);
 void NotifyStreamDeckActiveSensingState(bool enabled);
+void NotifyStreamDeckAltiverbUiState(bool isOpen);
 
 struct AhlbornSwitchInfo;
 

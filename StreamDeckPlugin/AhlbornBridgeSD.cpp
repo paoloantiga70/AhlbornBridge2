@@ -57,6 +57,7 @@ static void Log(const char* fmt, ...)
     vfprintf(g_logFile, fmt, ap);
     va_end(ap);
     fprintf(g_logFile, "\n");
+    fflush(g_logFile);
 }
 
 // ─── Globals ────────────────────────────────────────────────────────────
@@ -76,6 +77,9 @@ static std::mutex  g_pipeMutex;
 static std::atomic<bool> g_pipeConnected{ false };
 
 static std::atomic<bool> g_running{ true };
+
+static std::mutex  g_deviceMutex;
+static std::string g_currentDeviceId;
 
 // Track visible buttons for both actions
 struct ButtonInfo
@@ -97,6 +101,7 @@ static std::map<std::string, ButtonInfo> g_visibleButtons; // context -> info
 static std::mutex g_stateMutex;
 static int g_loadedOrganIndex = 0;
 static bool g_loadedOrganUsesVstLink = false;
+static bool g_altiverbUiOpen = false;
 static bool g_consoleConnected = false;
 static bool g_hauptwerkRunning = false;
 static bool g_biduleSplashActive = false;
@@ -327,6 +332,28 @@ static void SdGetSettings(const std::string& context)
 {
     std::string json = "{\"event\":\"getSettings\",\"context\":\"" + context + "\"}";
     WsSend(json);
+}
+
+static bool SdSwitchToProfile(const std::string& profileName, const std::string& explicitDeviceId = "")
+{
+    std::string deviceId = explicitDeviceId;
+    if (deviceId.empty())
+    {
+        std::lock_guard<std::mutex> dl(g_deviceMutex);
+        deviceId = g_currentDeviceId;
+    }
+
+    if (deviceId.empty())
+    {
+        Log("[SD] SdSwitchToProfile FAILED: deviceId unknown");
+        return false;
+    }
+
+    std::string json = "{\"event\":\"switchToProfile\",\"context\":\"" + g_pluginUUID +
+        "\",\"device\":\"" + deviceId +
+        "\",\"payload\":{\"profile\":\"" + EscapeJson(profileName) + "\"}}";
+    Log("[SD] SdSwitchToProfile: device=%s profile=%s", deviceId.c_str(), profileName.c_str());
+    return WsSend(json);
 }
 
 static std::string BuildOrgansPayload()
@@ -604,7 +631,8 @@ static std::string BuildConsolePowerButtonSvg(const std::string& title, bool isO
 
 // Build an SVG image for a button with improved visual states and title layout
 static std::string BuildButtonSvg(const std::string& title, bool loaded, bool vstLink, bool consoleConnected, bool hauptwerkRunning,
-                                  bool loadingActive = false, int loadingProgress = 0, bool requestActive = false, bool requestBlinkOn = true)
+                                  bool loadingActive = false, int loadingProgress = 0, bool requestActive = false, bool requestBlinkOn = true,
+                                  bool altiverbUiOpen = false)
 {
     const bool isEmpty = (title == "Empty");
     const bool isOffline = (title == "Disconnected.");
@@ -612,16 +640,17 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded, bool vs
     const bool isLoading = loadingActive && !isEmpty && !isOffline;
     const bool isReady = !loaded && !isEmpty && !isOffline && !isLoading && !isRequest;
     const bool isVstLinkLoaded = loaded && vstLink;
+    const bool isAltiverbActive = isVstLinkLoaded && altiverbUiOpen;
     const bool isReadyYellow = isReady && hauptwerkRunning;
     const bool isConnectedIdle = isReady && !hauptwerkRunning;
 
     const std::string& bgImage = loaded ? g_bgImageOn : g_bgImageOff;
-    std::string frameColor = isRequest ? (requestBlinkOn ? "#ff4d4f" : "#ff9b9c") : isLoading ? "#ffd33d" : isVstLinkLoaded ? "#a371f7" : loaded ? "#39d353" : isOffline ? "#ff4d4f" : isEmpty ? "#7d8590" : isConnectedIdle && consoleConnected ? "#ff7b72" : isConnectedIdle ? "#9aa4b2" : isReadyYellow ? "#ffd33d" : "#58a6ff";
-    std::string outerBorderColor = isRequest ? (requestBlinkOn ? "#ff4d4f" : "#7d8590") : isLoading && consoleConnected ? "#ff4d4f" : isLoading ? "#ffd33d" : loaded ? "#39d353" : isOffline ? "#ff4d4f" : isEmpty ? "#7d8590" : isConnectedIdle && consoleConnected ? "#ff4d4f" : isConnectedIdle ? "#7d8590" : isReadyYellow && consoleConnected ? "#ff4d4f" : isReadyYellow ? "#ffd33d" : "#58a6ff";
+    std::string frameColor = isRequest ? (requestBlinkOn ? "#ff4d4f" : "#ff9b9c") : isLoading ? "#ffd33d" : isAltiverbActive ? "#00e5ff" : isVstLinkLoaded ? "#a371f7" : loaded ? "#39d353" : isOffline ? "#ff4d4f" : isEmpty ? "#7d8590" : isConnectedIdle && consoleConnected ? "#ff7b72" : isConnectedIdle ? "#9aa4b2" : isReadyYellow ? "#ffd33d" : "#58a6ff";
+    std::string outerBorderColor = isRequest ? (requestBlinkOn ? "#ff4d4f" : "#7d8590") : isLoading && consoleConnected ? "#ff4d4f" : isLoading ? "#ffd33d" : isAltiverbActive ? "#00e5ff" : loaded ? "#39d353" : isOffline ? "#ff4d4f" : isEmpty ? "#7d8590" : isConnectedIdle && consoleConnected ? "#ff4d4f" : isConnectedIdle ? "#7d8590" : isReadyYellow && consoleConnected ? "#ff4d4f" : isReadyYellow ? "#ffd33d" : "#58a6ff";
     std::string badgeBorderColor = ((loaded || isConnectedIdle) && consoleConnected) ? "#ff4d4f" : outerBorderColor;
-    std::string badgeText = isRequest ? "REQUEST" : isLoading ? "LOADING" : isVstLinkLoaded ? "VST LINK" : loaded ? "LOADED" : isOffline ? "OFFLINE" : isEmpty ? "EMPTY" : "READY";
-    std::string badgeFill = isRequest ? (requestBlinkOn ? "#4f1012" : "#30363d") : isLoading ? "#4a3b0a" : isVstLinkLoaded ? "#2f1a47" : loaded ? "#123c1f" : isOffline ? "#4f1012" : isEmpty ? "#30363d" : isConnectedIdle ? "#2d333b" : isReadyYellow ? "#4a3b0a" : "#0d2d4f";
-    std::string titleColor = isVstLinkLoaded ? "#a371f7" : loaded ? "#39d353" : isOffline ? "#ffd6d6" : isEmpty ? "#e6edf3" : isConnectedIdle ? "#e6edf3" : isReadyYellow || isLoading || isRequest ? "#fff1b8" : "#ffffff";
+    std::string badgeText = isRequest ? "REQUEST" : isLoading ? "LOADING" : isAltiverbActive ? "ALTIVERB" : isVstLinkLoaded ? "VST LINK" : loaded ? "LOADED" : isOffline ? "OFFLINE" : isEmpty ? "EMPTY" : "READY";
+    std::string badgeFill = isRequest ? (requestBlinkOn ? "#4f1012" : "#30363d") : isLoading ? "#4a3b0a" : isAltiverbActive ? "#003b46" : isVstLinkLoaded ? "#2f1a47" : loaded ? "#123c1f" : isOffline ? "#4f1012" : isEmpty ? "#30363d" : isConnectedIdle ? "#2d333b" : isReadyYellow ? "#4a3b0a" : "#0d2d4f";
+    std::string titleColor = isAltiverbActive ? "#00e5ff" : isVstLinkLoaded ? "#a371f7" : loaded ? "#39d353" : isOffline ? "#ffd6d6" : isEmpty ? "#e6edf3" : isConnectedIdle ? "#e6edf3" : isReadyYellow || isLoading || isRequest ? "#fff1b8" : "#ffffff";
     std::string shadowColor = loaded ? "#0b1f10" : "#111111";
     if (loadingProgress < 0) loadingProgress = 0;
     if (loadingProgress > 100) loadingProgress = 100;
@@ -948,12 +977,14 @@ static void UpdateAllButtons()
     std::lock_guard<std::mutex> lk(g_buttonsMutex);
     int loaded = 0;
     bool loadedUsesVstLink = false;
+    bool altiverbUiOpen = false;
     bool consoleConnected = false;
     bool hauptwerkRunning = false;
     {
         std::lock_guard<std::mutex> sl(g_stateMutex);
         loaded = g_loadedOrganIndex;
         loadedUsesVstLink = g_loadedOrganUsesVstLink;
+        altiverbUiOpen = g_altiverbUiOpen;
         consoleConnected = g_consoleConnected;
         hauptwerkRunning = g_hauptwerkRunning;
     }
@@ -1010,7 +1041,7 @@ static void UpdateAllButtons()
             ? BuildConsolePowerButtonSvg(title, st == 1)
             : (isSwitchAction
                 ? BuildSwitchButtonSvg(title, st == 1, switchChannel)
-                : BuildButtonSvg(title, st == 1, st == 1 && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkOn));
+                : BuildButtonSvg(title, st == 1, st == 1 && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkOn, (st == 1 && loadedUsesVstLink && altiverbUiOpen)));
         if (svg != info.lastSvg)
         {
             SdSetImage(ctx, svg, 0);
@@ -1075,12 +1106,14 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
 
     int loaded;
     bool loadedUsesVstLink;
+    bool altiverbUiOpen;
     bool consoleConnected;
     bool hauptwerkRunning;
     {
         std::lock_guard<std::mutex> sl(g_stateMutex);
         loaded = g_loadedOrganIndex;
         loadedUsesVstLink = g_loadedOrganUsesVstLink;
+        altiverbUiOpen = g_altiverbUiOpen;
         consoleConnected = g_consoleConnected;
         hauptwerkRunning = g_hauptwerkRunning;
     }
@@ -1098,7 +1131,7 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
         ? BuildConsolePowerButtonSvg(title, isLoaded)
         : (isSwitchAction
             ? BuildSwitchButtonSvg(title, isLoaded, switchChannel)
-            : BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkState));
+            : BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkState, (isLoaded && loadedUsesVstLink && altiverbUiOpen)));
     int newState = isLoaded ? 1 : 0;
     {
         std::lock_guard<std::mutex> lk(g_buttonsMutex);
@@ -1397,6 +1430,16 @@ static void HandlePipeMessage(const std::string& msg)
         g_activeSensingEnabledState.store(enabled);
         UpdateAllButtons();
     }
+    else if (msg.find("\"altiverbUiState\"") != std::string::npos)
+    {
+        bool open = JsonExtractBool(msg, "open", false);
+        {
+            std::lock_guard<std::mutex> lk(g_stateMutex);
+            g_altiverbUiOpen = open;
+        }
+        Log("[Pipe] Altiverb UI state update: open=%d", (int)open);
+        UpdateAllButtons();
+    }
     else if (msg.find("\"state\"") != std::string::npos)
     {
         int loaded = JsonExtractInt(msg, "loadedIndex");
@@ -1406,6 +1449,7 @@ static void HandlePipeMessage(const std::string& msg)
         if (loadingProgress < 0) loadingProgress = 0;
         if (loadingProgress > 100) loadingProgress = 100;
         bool vstLink = (msg.find("\"vstLink\":true") != std::string::npos);
+        bool altiverbUiOpen = JsonExtractBool(msg, "altiverbUiOpen", false);
         bool consoleConnected = (msg.find("\"consoleConnected\":true") != std::string::npos);
         bool hauptwerkRunning = (msg.find("\"hauptwerkRunning\":true") != std::string::npos);
         bool biduleSplashActive = (msg.find("\"biduleSplashActive\":true") != std::string::npos);
@@ -1415,6 +1459,7 @@ static void HandlePipeMessage(const std::string& msg)
             previousLoaded = g_loadedOrganIndex;
             g_loadedOrganIndex = loaded;
             g_loadedOrganUsesVstLink = (loaded > 0) && vstLink;
+            g_altiverbUiOpen = (loaded > 0) && altiverbUiOpen;
             g_consoleConnected = consoleConnected;
             g_hauptwerkRunning = hauptwerkRunning;
             g_biduleSplashActive = biduleSplashActive;
@@ -1678,6 +1723,28 @@ static void HttpListenerThread()
             int organIndex = atoi(organStr.c_str());
             int switchIndex = atoi(switchStr.c_str());
 
+            std::string profileName = ExtractQueryParam(request, "name");
+            std::string profileDevice = ExtractQueryParam(request, "device");
+            if (request.find("/switchProfile") != std::string::npos || !profileName.empty())
+            {
+                bool switched = false;
+                if (!profileName.empty())
+                {
+                    switched = SdSwitchToProfile(profileName, profileDevice);
+                }
+
+                std::string body = switched ? "OK: Switched" : "ERR: SwitchFailed";
+                std::string resp = "HTTP/1.1 200 OK\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                    "Access-Control-Allow-Headers: *\r\n"
+                    "Content-Length: " + std::to_string(body.size()) + "\r\n"
+                    "Connection: close\r\n\r\n" + body;
+                send(client, resp.c_str(), (int)resp.size(), 0);
+                closesocket(client);
+                continue;
+            }
+
             if (!ctx.empty() && organIndex > 0)
             {
                 Log("[HTTP] SetOrgan: ctx=%.40s organIndex=%d", ctx.c_str(), organIndex);
@@ -1799,6 +1866,11 @@ static void HandleSdEvent(const std::string& json)
             auto sit = g_currentSwitchStateByIndex.find(switchIndex);
             if (sit != g_currentSwitchStateByIndex.end())
                 switchIsOn = sit->second;
+        }
+        if (!device.empty())
+        {
+            std::lock_guard<std::mutex> dl(g_deviceMutex);
+            g_currentDeviceId = device;
         }
         Log("[SD] willAppear: context=%.40s organIndex=%d switchIndex=%d organName=%s device=%.60s action=%s",
             context.c_str(), organIndex, switchIndex, organName.c_str(), device.c_str(), action.c_str());
@@ -2044,14 +2116,15 @@ static void HandleSdEvent(const std::string& json)
                 }).detach();
             }
         }
-        else if (organIndex > 0 && organIndex == loaded)
+        else if (organIndex > 0)
         {
             ULONGLONG downTick = GetTickCount64();
             {
                 std::lock_guard<std::mutex> kl(g_keyDownMutex);
                 g_keyDownTickByContext[context] = { downTick, organIndex, false };
             }
-            Log("[SD] keyDown: loaded organ button hold tracking started (ctx=%.40s)", context.c_str());
+            Log("[SD] keyDown: organ button %d hold tracking started (ctx=%.40s, loaded=%d)",
+                organIndex, context.c_str(), loaded);
 
             std::string holdContext = context;
             std::thread([holdContext, organIndex, downTick]() {
@@ -2074,31 +2147,25 @@ static void HandleSdEvent(const std::string& json)
                 if (!shouldTrigger)
                     return;
 
-                int loadedNow;
-                bool loadedUsesVstLinkNow;
+                int loadedNow = 0;
                 {
                     std::lock_guard<std::mutex> sl(g_stateMutex);
                     loadedNow = g_loadedOrganIndex;
-                    loadedUsesVstLinkNow = g_loadedOrganUsesVstLink;
                 }
 
-                if (organIndex <= 0 || organIndex != loadedNow || !loadedUsesVstLinkNow)
+                if (organIndex == loadedNow && loadedNow > 0)
                 {
-                    Log("[SD] hold threshold reached, action ignored (organIndex=%d loaded=%d vst=%d)",
-                        organIndex, loadedNow, (int)loadedUsesVstLinkNow);
-                    return;
+                    Log("[SD] hold threshold reached (2000 ms) on loaded organ %d -> unload organ", organIndex);
+                    g_freezeSwitchStateDuringUnload.store(true);
+                    PipeSend("{\"type\":\"unload\"}");
                 }
-
-                Log("[SD] hold threshold reached (2000 ms) on loaded organ %d -> toggle Bidule window", organIndex);
-                PipeSend("{\"type\":\"toggleBiduleWindow\"}");
+                else
+                {
+                    Log("[SD] hold threshold reached (2000 ms) on unloaded organ %d -> load organ", organIndex);
+                    StartOrganRequest(organIndex);
+                    PipeSend("{\"type\":\"load\",\"index\":" + std::to_string(organIndex) + "}");
+                }
             }).detach();
-        }
-        else if (organIndex > 0)
-        {
-            // Not loaded → request load and wait for loading dialog visibility
-            Log("[SD] keyDown: loading organ %d", organIndex);
-            StartOrganRequest(organIndex);
-            PipeSend("{\"type\":\"load\",\"index\":" + std::to_string(organIndex) + "}");
         }
         else
         {
@@ -2180,22 +2247,30 @@ static void HandleSdEvent(const std::string& json)
         }
 
         int loaded;
+        bool loadedUsesVstLink;
         {
             std::lock_guard<std::mutex> sl(g_stateMutex);
             loaded = g_loadedOrganIndex;
+            loadedUsesVstLink = g_loadedOrganUsesVstLink;
         }
 
         if (organIndex <= 0 || organIndex != loaded)
         {
-            Log("[SD] keyUp: ignoring short press action, organ changed (organIndex=%d loaded=%d held=%llu)",
+            Log("[SD] keyUp: ignoring short press action (organIndex=%d loaded=%d held=%llu)",
                 organIndex, loaded, (unsigned long long)heldMs);
             return;
         }
 
-        // Short press on loaded organ keeps existing behavior
-        Log("[SD] keyUp: short press (%llu ms) on loaded organ %d -> unload", (unsigned long long)heldMs, organIndex);
-        g_freezeSwitchStateDuringUnload.store(true);
-        PipeSend("{\"type\":\"unload\"}");
+        if (!loadedUsesVstLink)
+        {
+            Log("[SD] keyUp: short press (%llu ms) on loaded non-VST organ %d -> no Altiverb action",
+                (unsigned long long)heldMs, organIndex);
+            return;
+        }
+
+        Log("[SD] keyUp: short press (%llu ms) on loaded VST organ %d -> toggle Altiverb UI",
+            (unsigned long long)heldMs, organIndex);
+        PipeSend("{\"type\":\"toggleAltiverbUi\"}");
     }
     else if (event == "propertyInspectorDidAppear")
     {
