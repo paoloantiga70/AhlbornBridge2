@@ -8,6 +8,7 @@
 #include <cwchar>
 #include <string>
 #include <vector>
+#include <thread>
 #include <shlobj.h>
 #include <knownfolders.h>
 
@@ -61,6 +62,10 @@ static bool g_activeSensingNameLockInit = false;
 static std::atomic<bool> s_activeSensingReopenNeeded{ false };
 std::atomic<int> g_currentLoadedFavoriteIndex{ 0 };
 std::atomic<int> g_currentLoadedInstalledOrganIndex{ 0 };
+// True when Bidule currently has Empty.bidule loaded (after an unload save).
+// Prevents a second CloseBiduleIfConfigured from overwriting an organ profile
+// with the Empty document when unload triggers the save path twice.
+std::atomic<bool> g_biduleEmptyLoaded{ false };
 std::atomic<int> g_streamDeckLoadingInstalledOrganIndex{ 0 };
 std::atomic<int> g_streamDeckLoadingProgress{ 0 };
 std::atomic<bool> g_streamDeckBiduleSplashActive{ false };
@@ -556,12 +561,36 @@ namespace
 								if (!savePath.empty())
 								{
 									printf("[Deferred] Saving Bidule profile before unload: %S\n", savePath.c_str());
+									FILETIME prevWriteTime{};
+									bool hadPrevTime = false;
+									{
+										WIN32_FILE_ATTRIBUTE_DATA fad{};
+										if (GetFileAttributesExW(savePath.c_str(), GetFileExInfoStandard, &fad))
+										{
+											prevWriteTime = fad.ftLastWriteTime;
+											hadPrevTime = true;
+										}
+									}
 									if (SendBiduleOscFileSaveAs(savePath))
 									{
 										size_t sep = savePath.find_last_of(L"\\/");
 										std::wstring profileName = (sep == std::wstring::npos) ? savePath : savePath.substr(sep + 1);
 										SaveInstalledOrganBiduleProfile(GetInstalledOrganUniqueId(prevIdx), profileName);
-										Sleep(300);
+
+										// Wait until Bidule has actually written the file before unloading.
+										bool saved = false;
+										for (int w = 0; w < 50 && !saved; ++w) // up to ~5s
+										{
+											Sleep(100);
+											WIN32_FILE_ATTRIBUTE_DATA fad{};
+											if (GetFileAttributesExW(savePath.c_str(), GetFileExInfoStandard, &fad))
+											{
+												if (!hadPrevTime || CompareFileTime(&fad.ftLastWriteTime, &prevWriteTime) != 0)
+													saved = true;
+											}
+										}
+										if (!saved)
+											printf("[Deferred] Warning: profile save not confirmed within timeout: %S\n", savePath.c_str());
 									}
 								}
 								SendBiduleOscPlay(false);
@@ -947,6 +976,15 @@ namespace
         if (!closeOnUnload)
             return;
 
+        // If Bidule already has Empty.bidule loaded (a previous CloseBiduleIfConfigured
+        // during the same unload sequence already saved the organ and switched to Empty),
+        // do NOT save again — otherwise we would overwrite the organ profile with Empty.
+        if (g_biduleEmptyLoaded.load())
+        {
+            printf("[Bidule] Empty.bidule already loaded; skipping redundant save-on-unload.\n");
+            return;
+        }
+
         printf("[Bidule] save-on-unload triggered (organ index %d).\n", loadedInstalledOrganIndex);
         std::wstring savePath = BuildBiduleProfilePathForOrgan(loadedInstalledOrganIndex);
         if (savePath.empty())
@@ -967,13 +1005,59 @@ namespace
         }
         if (!savePath.empty())
         {
+            // Capture the file's current last-write time (if it exists) so we can
+            // detect when Bidule has actually finished writing the save.
+            FILETIME prevWriteTime{};
+            bool hadPrevTime = false;
+            {
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (GetFileAttributesExW(savePath.c_str(), GetFileExInfoStandard, &fad))
+                {
+                    prevWriteTime = fad.ftLastWriteTime;
+                    hadPrevTime = true;
+                }
+            }
+
             if (SendBiduleOscFileSaveAs(savePath))
             {
                 size_t sep = savePath.find_last_of(L"\\/");
                 std::wstring profileName = (sep == std::wstring::npos) ? savePath : savePath.substr(sep + 1);
                 SaveInstalledOrganBiduleProfile(GetInstalledOrganUniqueId(loadedInstalledOrganIndex), profileName);
-                Sleep(300);
+
+                // Wait (poll) until Bidule has actually written the file before we load
+                // Empty.bidule. Otherwise the /open can be processed first and Bidule
+                // saves the Empty document into the organ profile path.
+                bool saved = false;
+                for (int w = 0; w < 50 && !saved; ++w) // up to ~5s
+                {
+                    Sleep(100);
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (GetFileAttributesExW(savePath.c_str(), GetFileExInfoStandard, &fad))
+                    {
+                        if (!hadPrevTime)
+                        {
+                            saved = true; // file now exists (was absent before)
+                        }
+                        else if (CompareFileTime(&fad.ftLastWriteTime, &prevWriteTime) != 0)
+                        {
+                            saved = true; // timestamp changed -> written
+                        }
+                    }
+                }
+                if (saved)
+                    printf("[Bidule] Profile save confirmed: %S\n", savePath.c_str());
+                else
+                    printf("[Bidule] Warning: profile save not confirmed within timeout: %S\n", savePath.c_str());
             }
+        }
+
+        // On organ unload, load Empty.bidule so no DSP plugins remain loaded
+        std::wstring emptyProfile = GetSettingsDirPath() + L"\\BiduleProfiles\\Empty.bidule";
+        if (GetFileAttributesW(emptyProfile.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            SendBiduleOscOpenProfile(emptyProfile);
+            g_biduleEmptyLoaded.store(true);
+            Sleep(200);
         }
 
         SendBiduleOscPlay(false);
@@ -1233,15 +1317,111 @@ namespace
 							biduleProfilePath = BuildBiduleProfilePathForOrgan(loadedInstalledOrganIndex);
 						}
 
-						if (biduleProfilePath.empty())
+						bool isDefaultProfileFallback = false;
+						std::wstring targetProfilePath = biduleProfilePath;
+						std::wstring organDisplayName;
+						if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
 						{
-							printf("[Bidule] No profile assigned, keeping default state and activating DSP.\n");
-							std::wstring organDisplayName;
-							if (loadedInstalledOrganIndex <= static_cast<int>(organInfos.size()))
+							const auto& info = organInfos[loadedInstalledOrganIndex - 1];
+							organDisplayName = !info.displayName.empty() ? info.displayName : info.name;
+						}
+
+						if (targetProfilePath.empty())
+						{
+							printf("[Bidule] No profile assigned, loading Default.bidule template.\n");
+							std::wstring defaultProfile = GetSettingsDirPath() + L"\\BiduleProfiles\\Default.bidule";
+							if (GetFileAttributesW(defaultProfile.c_str()) != INVALID_FILE_ATTRIBUTES)
 							{
-								const auto& info = organInfos[loadedInstalledOrganIndex - 1];
-								organDisplayName = !info.displayName.empty() ? info.displayName : info.name;
+								targetProfilePath = defaultProfile;
+								isDefaultProfileFallback = true;
+
+								// Deterministic rename: instead of relying on OSC name_set (which races with
+								// Bidule's profile load and self-invalidates once the box is renamed), pre-write
+								// the organ name directly into a working copy of Default.bidule and open that copy.
+								if (!organDisplayName.empty())
+								{
+									// Read Default.bidule as raw UTF-8 bytes.
+									HANDLE hFile = CreateFileW(defaultProfile.c_str(), GENERIC_READ, FILE_SHARE_READ,
+										nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+									if (hFile != INVALID_HANDLE_VALUE)
+									{
+										LARGE_INTEGER fileSize{};
+										std::string content;
+										if (GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart > 0 && fileSize.QuadPart < (100 * 1024 * 1024))
+										{
+											content.resize(static_cast<size_t>(fileSize.QuadPart));
+											DWORD bytesRead = 0;
+											if (!ReadFile(hFile, &content[0], static_cast<DWORD>(content.size()), &bytesRead, nullptr))
+											{
+												content.clear();
+											}
+											else
+											{
+												content.resize(bytesRead);
+											}
+										}
+										CloseHandle(hFile);
+
+										if (!content.empty())
+										{
+											// Convert organ display name to UTF-8.
+											std::string nameUtf8;
+											int utf8Len = WideCharToMultiByte(CP_UTF8, 0, organDisplayName.c_str(), -1, nullptr, 0, nullptr, nullptr);
+											if (utf8Len > 1)
+											{
+												nameUtf8.resize(utf8Len - 1);
+												WideCharToMultiByte(CP_UTF8, 0, organDisplayName.c_str(), -1, &nameUtf8[0], utf8Len, nullptr, nullptr);
+											}
+
+											// XML-escape the name for use inside a double-quoted attribute value.
+											std::string nameEscaped;
+											nameEscaped.reserve(nameUtf8.size());
+											for (char ch : nameUtf8)
+											{
+												switch (ch)
+												{
+												case '&':  nameEscaped += "&amp;";  break;
+												case '<':  nameEscaped += "&lt;";   break;
+												case '>':  nameEscaped += "&gt;";   break;
+												case '"':  nameEscaped += "&quot;"; break;
+												case '\'': nameEscaped += "&apos;"; break;
+												default:   nameEscaped += ch;       break;
+												}
+											}
+
+											// Replace the first occurrence of the Default profile comment displayName.
+											const std::string needle = "displayName=\"Default profile\"";
+											const std::string replacement = "displayName=\"" + nameEscaped + "\"";
+											size_t pos = content.find(needle);
+											if (pos != std::string::npos)
+											{
+												content.replace(pos, needle.size(), replacement);
+
+												// Write the modified copy to DefaultActive.bidule.
+												std::wstring activeProfile = GetSettingsDirPath() + L"\\BiduleProfiles\\DefaultActive.bidule";
+												HANDLE hOut = CreateFileW(activeProfile.c_str(), GENERIC_WRITE, 0,
+													nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+												if (hOut != INVALID_HANDLE_VALUE)
+												{
+													DWORD written = 0;
+													if (WriteFile(hOut, content.data(), static_cast<DWORD>(content.size()), &written, nullptr) &&
+														written == content.size())
+													{
+														targetProfilePath = activeProfile;
+														printf("[Bidule] Pre-wrote organ name into DefaultActive.bidule: %S\n", organDisplayName.c_str());
+													}
+													CloseHandle(hOut);
+												}
+											}
+											else
+											{
+												printf("[Bidule] Could not find 'Default profile' comment in Default.bidule; opening template unchanged.\n");
+											}
+										}
+									}
+								}
 							}
+
 							std::wstring balloonMsg = L"L'organo '" + (organDisplayName.empty() ? L"corrente" : organDisplayName) +
 								L"' non ha ancora un profilo Bidule.\nFai clic qui (o apri dal menu) per configurarlo.";
 							ShowTrayBalloon(L"Bidule VST Link", balloonMsg.c_str(), 1 /* NIIF_INFO */);
@@ -1252,17 +1432,22 @@ namespace
 						}
 						else
 						{
-							if (!biduleProfilePath.empty())
+							if (!targetProfilePath.empty())
 							{
-								DWORD attrs = GetFileAttributesW(biduleProfilePath.c_str());
+								DWORD attrs = GetFileAttributesW(targetProfilePath.c_str());
 								if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
 								{
-									SendBiduleOscOpenProfile(biduleProfilePath);
-									Sleep(200);
+									SendBiduleOscOpenProfile(targetProfilePath);
+										g_biduleEmptyLoaded.store(false);
+										Sleep(200);
+
+									// The organ name was pre-written into DefaultActive.bidule before opening,
+									// so the comment box already shows the correct name at load time.
+									// No OSC name_set needed (it would race and self-invalidate the address).
 								}
 								else
 								{
-									printf("[BiduleOSC] Profile file not found: %S\n", biduleProfilePath.c_str());
+									printf("[BiduleOSC] Profile file not found: %S\n", targetProfilePath.c_str());
 								}
 							}
 							HideBiduleWindow();

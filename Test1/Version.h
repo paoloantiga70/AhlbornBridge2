@@ -8,8 +8,8 @@
 // ---------------------------------------------------------------
 #define APP_VERSION_MAJOR 1
 #define APP_VERSION_MINOR 3
-#define APP_VERSION_PATCH 66
-inline constexpr const	char* APP_VERSION = "1.3.66";
+#define APP_VERSION_PATCH 87
+inline constexpr const	char* APP_VERSION = "1.3.87";
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

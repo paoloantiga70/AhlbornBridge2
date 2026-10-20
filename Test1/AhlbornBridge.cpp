@@ -163,10 +163,16 @@ if (FAILED(hr))
 	if (!bidulePath.empty())
 	{
 		LaunchBidule();
-		// In background, wait for Bidule to initialize, silence audio/MIDI with /play false, then hide window.
+		// In background, wait for Bidule to initialize, load Empty.bidule, silence audio/MIDI with /play false, then hide window.
 		// Repeat hiding checks over a short window in case wxWidgets restores/activates the window late.
 		HANDLE hBiduleInitThread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
 			Sleep(4000);
+			std::wstring emptyProfile = GetSettingsDirPath() + L"\\BiduleProfiles\\Empty.bidule";
+			if (GetFileAttributesW(emptyProfile.c_str()) != INVALID_FILE_ATTRIBUTES)
+			{
+				SendBiduleOscOpenProfile(emptyProfile);
+				Sleep(300);
+			}
 			SendBiduleOscPlay(false);
 			Sleep(500);
 			HideBiduleWindow();
