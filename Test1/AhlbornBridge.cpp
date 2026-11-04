@@ -206,6 +206,11 @@ if (FAILED(hr))
 				DWORD attr = GetFileAttributesW(sdPath.c_str());
 				if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
 				{
+					// First install bootstrap: create any of the three standard
+					// Stream Deck profiles that are not already present. This is
+					// idempotent, so existing profiles are preserved.
+					EnsureStreamDeckProfilesInstalled();
+
 					StartStreamDeckPipeServer();
 				}
 				else

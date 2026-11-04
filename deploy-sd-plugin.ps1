@@ -77,6 +77,13 @@ function Copy-PluginPackage {
         Copy-Item $irThumbs (Join-Path $DestinationRoot 'IR_thumbnails') -Recurse -Force
     }
 
+    # Copy churches.json so the host app can generate the OrganLoaded profile
+    # dynamically at runtime (reading church names, OSC values and thumbnails).
+    $churchesJson = Join-Path $SourceBase 'churches.json'
+    if (Test-Path $churchesJson) {
+        Copy-Item $churchesJson $DestinationRoot -Force
+    }
+
     # Copy any bundled .streamDeckProfile packages (e.g. OrganLoaded) so the
     # switchToProfile API can activate them. These are exported from the Stream
     # Deck app to guarantee the exact format Stream Deck expects.

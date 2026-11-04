@@ -2,6 +2,7 @@
 #include "StreamDeck_profiler.h"
 #include "Xml.h"
 
+#include <algorithm>
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
@@ -321,6 +322,13 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         actionDisplayName = "DSP Command";
         pluginVersion = GetInstalledPluginVersion(pluginUUID);
     }
+    else if (action.actionUUID == "com.ahlbornbridge.ir")
+    {
+        pluginUUID = "com.ahlbornbridge.organ";
+        pluginName = "AhlbornBridge";
+        actionDisplayName = "IR Church";
+        pluginVersion = GetInstalledPluginVersion(pluginUUID);
+    }
     else
     {
         pluginName = action.actionUUID;
@@ -378,6 +386,24 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         settings = "{\"oscAddress\":\"" + escapeJson(action.oscAddress)
             + "\",\"oscValue\":\"" + escapeJson(action.oscValue) + "\"}";
     }
+    else if (action.actionUUID == "com.ahlbornbridge.ir")
+    {
+        auto escapeJson = [](const std::string& in) {
+            std::string out;
+            for (char c : in)
+            {
+                if (c == '"') out += "\\\"";
+                else if (c == '\\') out += "\\\\";
+                else out += c;
+            }
+            return out;
+        };
+        settings = "{\"churchName\":\"" + escapeJson(action.churchName)
+            + "\",\"thumbnail\":\"" + escapeJson(action.thumbnail)
+            + "\",\"oscFront\":\"" + escapeJson(action.oscFront)
+            + "\",\"oscSide\":\"" + escapeJson(action.oscSide)
+            + "\",\"oscRear\":\"" + escapeJson(action.oscRear) + "\"}";
+    }
     else
         settings = "{}";
 
@@ -387,6 +413,34 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
     // states, no Title field, no image (the plugin renders its own SVG).
     std::string states;
     std::string fontSizeStr = std::to_string(action.fontSize);
+
+    if (action.actionUUID == "com.ahlbornbridge.ir")
+    {
+        // IR Church: single state, title hidden (plugin renders its own SVG
+        // badge from the thumbnail). An image may still be referenced so the
+        // profile shows the thumbnail before the plugin takes over.
+        std::string imageField = imageRef.empty() ? "" : "\"Image\":\"" + imageRef + "\",";
+        std::string stateBlock =
+            "{" + imageField +
+            "\"FontFamily\":\"\",\"FontSize\":" + fontSizeStr + ",\"FontStyle\":\"\","
+            "\"FontUnderline\":false,\"OutlineThickness\":2,\"ShowTitle\":false,"
+            "\"TitleAlignment\":\"" + action.titleAlignment + "\","
+            "\"TitleColor\":\"" + action.titleColor + "\"}";
+        states = "[" + stateBlock + "]";
+
+        return
+            "{\"ActionID\":\"" + instanceId + "\","
+            "\"LinkedTitle\":true,"
+            "\"Name\":\"" + actionDisplayName + "\","
+            "\"Plugin\":{\"Name\":\"" + pluginName + "\","
+            "\"UUID\":\"" + pluginUUID + "\","
+            "\"Version\":\"" + pluginVersion + "\"},"
+            "\"Resources\":null,"
+            "\"Settings\":" + settings + ","
+            "\"State\":0,"
+            "\"States\":" + states + ","
+            "\"UUID\":\"" + action.actionUUID + "\"}";
+    }
 
     if (action.actionUUID == "com.ahlbornbridge.switch"
         || action.actionUUID == "com.ahlbornbridge.activesensing")
@@ -475,7 +529,7 @@ std::string BuildPageManifest(const std::string& pageName, int deviceType,
     const std::map<int, std::string>& imageRefsOn)
 {
     int rows = 3, cols = 5;
-    if (deviceType == 3) { rows = 2; cols = 3; }
+    if (deviceType == 3) { rows = 3; cols = 5; }  // Stream Deck Mobile 5x3 = 15 keys
     if (deviceType == 4) { rows = 4; cols = 8; }
     int totalKeys = rows * cols;
 
@@ -571,6 +625,70 @@ std::vector<OrganInfo> LoadInstalledOrgans(const std::string& xmlPath)
         pos = titleEnd;
     }
     return organs;
+}
+
+// Reads the installed plugin's churches.json (a JSON array of church records)
+// and returns them sorted alphabetically by name.
+std::vector<ChurchInfo> LoadChurches()
+{
+    wchar_t appData[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+        return {};
+    std::wstring pathW = std::wstring(appData)
+        + L"\\Elgato\\StreamDeck\\Plugins\\com.ahlbornbridge.organ.sdPlugin\\churches.json";
+
+    std::ifstream f(pathW);
+    if (!f.is_open())
+    {
+        std::cerr << "LoadChurches: cannot open churches.json in installed plugin.\n";
+        return {};
+    }
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    // Extracts the string value of "key":"value" starting from a search origin.
+    auto extractField = [](const std::string& obj, const std::string& key) -> std::string
+        {
+            std::string k = "\"" + key + "\"";
+            size_t kp = obj.find(k);
+            if (kp == std::string::npos) return {};
+            size_t colon = obj.find(':', kp + k.size());
+            if (colon == std::string::npos) return {};
+            size_t q1 = obj.find('"', colon + 1);
+            if (q1 == std::string::npos) return {};
+            std::string out;
+            for (size_t i = q1 + 1; i < obj.size(); ++i)
+            {
+                char c = obj[i];
+                if (c == '\\' && i + 1 < obj.size()) { out += obj[++i]; continue; }
+                if (c == '"') break;
+                out += c;
+            }
+            return out;
+        };
+
+    std::vector<ChurchInfo> churches;
+    size_t pos = 0;
+    while ((pos = content.find('{', pos)) != std::string::npos)
+    {
+        size_t objEnd = content.find('}', pos);
+        if (objEnd == std::string::npos) break;
+        std::string obj = content.substr(pos, objEnd - pos + 1);
+
+        ChurchInfo c;
+        c.name = extractField(obj, "name");
+        c.thumbnail = extractField(obj, "thumbnail");
+        c.front = extractField(obj, "front");
+        c.side = extractField(obj, "side");
+        c.rear = extractField(obj, "rear");
+        if (!c.name.empty())
+            churches.push_back(c);
+
+        pos = objEnd + 1;
+    }
+
+    std::sort(churches.begin(), churches.end(),
+        [](const ChurchInfo& a, const ChurchInfo& b) { return a.name < b.name; });
+    return churches;
 }
 
 // Searches ProfilesV3 for an existing .sdProfile whose manifest.json has "Name":"<profileName>"
@@ -1046,33 +1164,150 @@ bool CreateStreamDeckPluginProfile(const std::string& profileName,
 // just copy it into the installed plugin folder.
 bool CreateStreamDeckOrganLoadedProfile()
 {
+    // Diagnostic log so first-install failures on other PCs can be traced.
+    wchar_t appDataLog[MAX_PATH] = {};
+    std::wofstream dbg;
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appDataLog)))
+    {
+        std::wstring logPath = std::wstring(appDataLog) + L"\\AhlbornBridge2\\OrganLoaded_debug.log";
+        dbg.open(logPath, std::ios::trunc);
+    }
+    auto log = [&dbg](const std::string& m) {
+        if (dbg.is_open()) { dbg << std::wstring(m.begin(), m.end()) << L"\n"; dbg.flush(); }
+    };
+
+    // Load the 23 IR churches from the installed plugin's churches.json.
+    std::vector<ChurchInfo> churches = LoadChurches();
+    log("Churches loaded: " + std::to_string(churches.size()));
+    if (churches.empty())
+    {
+        log("FAILED: no churches found in churches.json (check plugin folder deployment).");
+        std::cerr << "CreateStreamDeckOrganLoadedProfile: no churches found in churches.json.\n";
+        return false;
+    }
+
+    // Resolve the installed plugin's IR_thumbnails directory (image source).
     wchar_t appData[MAX_PATH] = {};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
         return false;
+    std::wstring thumbsDirW = std::wstring(appData)
+        + L"\\Elgato\\StreamDeck\\Plugins\\com.ahlbornbridge.organ.sdPlugin\\IR_thumbnails\\";
+    std::string thumbsDir(thumbsDirW.begin(), thumbsDirW.end());
 
-    const std::wstring pluginDir = std::wstring(appData)
-        + L"\\Elgato\\StreamDeck\\Plugins\\com.ahlbornbridge.organ.sdPlugin";
-    if (!fs::exists(pluginDir))
+    // Determine the device grid so we can place the Current Organ button at
+    // slot 0 of EVERY page and pad the final page with black fillers. This is
+    // the layout that works reliably on Stream Deck Mobile.
+    std::wstring rootPath = GetProfilesRootPath();
+    DeviceInfo device = FindFirstDevice(rootPath);
+    log("Profiles root: " + std::string(rootPath.begin(), rootPath.end()));
+    log("Device model: '" + device.model + "'  uuid: '" + device.uuid + "'");
+    if (device.model.empty())
+        log("WARNING: no Stream Deck device found. CreateStreamDeckProfile will fail.");
+    int deviceType = DeviceTypeFromModel(device.model);
+    int keysPerPage = GetKeysPerPage(deviceType);
+    if (keysPerPage < 2) keysPerPage = 15;
+    int churchesPerPage = keysPerPage - 1;  // slot 0 is the organ button
+
+    // Current Organ (unload) button template.
+    KeyAction organTemplate;
+    organTemplate.actionUUID = "com.ahlbornbridge.organ.load";
+    organTemplate.titleAlignment = "middle";
+    organTemplate.titleColor = "#ffffff";
+    organTemplate.titleColorOn = "#44ff44";
+    organTemplate.organIndex = 0;  // 0 = "current organ" / unload button
+
+    // Build the full key map, paginated: each page starts with the organ
+    // button, then up to (keysPerPage-1) churches, padded with ir fillers.
+    std::map<int, KeyAction> keys;
+    int numPages = (static_cast<int>(churches.size()) + churchesPerPage - 1) / churchesPerPage;
+    if (numPages < 1) numPages = 1;
+
+    int churchIdx = 0;
+    for (int p = 0; p < numPages; ++p)
     {
-        std::wcerr << L"CreateStreamDeckOrganLoadedProfile: plugin folder not found: " << pluginDir << L"\n";
+        int base = p * keysPerPage;
+        // Slot 0: Current Organ button.
+        keys[base] = organTemplate;
+
+        // Slots 1..keysPerPage-1: churches then fillers.
+        for (int s = 1; s < keysPerPage; ++s)
+        {
+            KeyAction key;
+            key.actionUUID = "com.ahlbornbridge.ir";
+            key.titleAlignment = "bottom";
+            key.titleColor = "#ffffff";
+            key.fontSize = 11;
+            if (churchIdx < static_cast<int>(churches.size()))
+            {
+                const ChurchInfo& c = churches[churchIdx++];
+                key.churchName = c.name;
+                key.thumbnail = c.thumbnail;
+                key.oscFront = c.front;
+                key.oscSide = c.side;
+                key.oscRear = c.rear;
+                if (!c.thumbnail.empty())
+                    key.imagePath = thumbsDir + c.thumbnail;
+            }
+            // else: empty IR action = black filler (plugin paints it black)
+            keys[base + s] = key;
+        }
+    }
+
+    bool ok = CreateStreamDeckProfile("OrganLoaded", -1, keys);
+    log(std::string("CreateStreamDeckProfile returned: ") + (ok ? "SUCCESS" : "FAILED"));
+    if (ok)
+        std::cout << "OrganLoaded profile generated dynamically for "
+                  << churches.size() << " churches across " << numPages << " page(s).\n";
+    return ok;
+}
+
+// Creates any of the three standard profiles that are not already present in
+// the ProfilesV3 store. Idempotent, so it is safe to call on every startup;
+// existing profiles are left untouched. Intended for first-install bootstrap.
+bool EnsureStreamDeckProfilesInstalled()
+{
+    std::wstring rootPath = GetProfilesRootPath();
+    if (rootPath.empty())
+    {
+        std::cerr << "EnsureStreamDeckProfilesInstalled: cannot find ProfilesV3 path.\n";
         return false;
     }
 
-    const std::wstring dst = pluginDir + L"\\OrganLoaded.streamDeckProfile";
-
-    // The bundled source already lives in the installed plugin folder (deployed
-    // by deploy-sd-plugin.ps1). If it is present, the profile is already
-    // installed and there is nothing more to do.
-    std::error_code ec;
-    if (fs::exists(dst, ec) && fs::file_size(dst, ec) > 100)
+    // If no Stream Deck device is registered yet we cannot generate profiles;
+    // bail out quietly so startup is not blocked.
+    DeviceInfo device = FindFirstDevice(rootPath);
+    if (device.model.empty())
     {
-        std::wcout << L"OrganLoaded profile already installed at:\n  " << dst << L"\n";
-        return true;
+        std::cout << "EnsureStreamDeckProfilesInstalled: no Stream Deck device found; skipping.\n";
+        return false;
     }
 
-    std::wcerr << L"CreateStreamDeckOrganLoadedProfile: bundled OrganLoaded.streamDeckProfile "
-                  L"not found in plugin folder. Re-deploy the plugin to install it.\n";
-    return false;
+    auto profileExists = [&](const std::string& name) -> bool
+        {
+            return !FindExistingProfile(rootPath, name).empty();
+        };
+
+    bool allOk = true;
+
+    if (!profileExists("AhlbornBridge"))
+    {
+        std::cout << "First install: creating 'AhlbornBridge' profile...\n";
+        if (!CreateStreamDeckProfileFromSettings()) allOk = false;
+    }
+
+    if (!profileExists("AhlbornBridge Switches"))
+    {
+        std::cout << "First install: creating 'AhlbornBridge Switches' profile...\n";
+        if (!CreateStreamDeckSwitchesProfile()) allOk = false;
+    }
+
+    if (!profileExists("OrganLoaded"))
+    {
+        std::cout << "First install: creating 'OrganLoaded' profile...\n";
+        if (!CreateStreamDeckOrganLoadedProfile()) allOk = false;
+    }
+
+    return allOk;
 }
 
 

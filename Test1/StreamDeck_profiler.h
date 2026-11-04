@@ -72,6 +72,12 @@ struct KeyAction
     int organIndex = 0;         // 1-based organ index (for com.ahlbornbridge.organ.load)
     std::string oscAddress;     // OSC address for com.ahlbornbridge.dsp
     std::string oscValue;       // OSC float value (as string) for com.ahlbornbridge.dsp
+    // IR Church action (com.ahlbornbridge.ir) settings
+    std::string churchName;     // church display name
+    std::string thumbnail;      // thumbnail PNG file name (inside IR_thumbnails)
+    std::string oscFront;       // FRONT IR_Autom value
+    std::string oscSide;        // SIDE IR_Autom value
+    std::string oscRear;        // REAR IR_Autom value
     MidiSettings midi;
 };
 
@@ -110,6 +116,20 @@ struct OrganInfo
 // Reads all <Organ id=...> nodes from <InstalledOrgans> in Settings.xml
 std::vector<OrganInfo> LoadInstalledOrgans(const std::string& xmlPath);
 
+// IR Church entry loaded from the plugin's churches.json
+struct ChurchInfo
+{
+    std::string name;
+    std::string thumbnail;
+    std::string front;
+    std::string side;
+    std::string rear;
+};
+
+// Reads all church records from the installed plugin's churches.json,
+// sorted alphabetically by name.
+std::vector<ChurchInfo> LoadChurches();
+
 // Searches ProfilesV3 for an existing .sdProfile with the given name.
 // Returns the full path to the .sdProfile folder, or empty if not found.
 std::wstring FindExistingProfile(const std::wstring& rootPath, const std::string& profileName);
@@ -127,6 +147,13 @@ bool CreateStreamDeckSwitchesProfile();
 // Creates (or updates) the "OrganLoaded" profile: the organ key plus
 // configurable DSP command keys. Activated automatically when an organ loads.
 bool CreateStreamDeckOrganLoadedProfile();
+
+// Creates any of the three standard profiles ("AhlbornBridge",
+// "AhlbornBridge Switches", "OrganLoaded") that are not already present in the
+// Stream Deck ProfilesV3 store. Idempotent: existing profiles are left as-is.
+// Intended to run once at startup so a fresh install gets all profiles
+// automatically. Returns true if all required profiles exist afterwards.
+bool EnsureStreamDeckProfilesInstalled();
 
 // Builds the profile structure and packages it as a plugin-bundled
 // <profileName>.streamDeckProfile inside the installed plugin folder. This is

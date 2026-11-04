@@ -32,6 +32,9 @@ Source: "AhlbornBridgeSD.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceBase}\manifest.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceBase}\property_inspector.html"; DestDir: "{app}"; Flags: ignoreversion
 
+; Church metadata (read at runtime by the host app to generate the OrganLoaded profile)
+Source: "{#SourceBase}\churches.json"; DestDir: "{app}"; Flags: ignoreversion
+
 ; Images
 Source: "{#SourceBase}\images\*"; DestDir: "{app}\images"; Flags: ignoreversion recursesubdirs createallsubdirs
 
