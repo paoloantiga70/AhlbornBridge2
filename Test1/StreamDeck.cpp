@@ -279,6 +279,31 @@ static bool g_pipeLockInitialized = false;
 static std::atomic<bool> g_pipeConnected{ false };
 static std::atomic<bool> g_altiverbUiOpen{ false };
 
+// Sends the CTRL+ALT+S keyboard combination to the current foreground window
+// using synthetic input events (keydown Ctrl, Alt, S -> keyup S, Alt, Ctrl).
+static void SendCtrlAltS()
+{
+    INPUT inputs[6] = {};
+    const WORD keys[3] = { VK_CONTROL, VK_MENU, 'S' };
+
+    // Key down: Ctrl, Alt, S
+    for (int i = 0; i < 3; ++i)
+    {
+        inputs[i].type = INPUT_KEYBOARD;
+        inputs[i].ki.wVk = keys[i];
+    }
+    // Key up: S, Alt, Ctrl (reverse order)
+    for (int i = 0; i < 3; ++i)
+    {
+        inputs[3 + i].type = INPUT_KEYBOARD;
+        inputs[3 + i].ki.wVk = keys[2 - i];
+        inputs[3 + i].ki.dwFlags = KEYEVENTF_KEYUP;
+    }
+
+    SendInput(6, inputs, sizeof(INPUT));
+    printf("[PipeServer] Sent CTRL+ALT+S to foreground window.\n");
+}
+
 static void PipeSend(const std::string& json)
 {
     if (!g_pipeLockInitialized) return;
@@ -351,6 +376,29 @@ static int JsonExtractInt(const std::string& json, const std::string& key)
         return 0;
     pos += search.size();
     return atoi(json.c_str() + pos);
+}
+
+static double JsonExtractDouble(const std::string& json, const std::string& key)
+{
+    std::string search = "\"" + key + "\":";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos)
+        return 0.0;
+    pos += search.size();
+    return atof(json.c_str() + pos);
+}
+
+static std::string JsonExtractStringValue(const std::string& json, const std::string& key)
+{
+    std::string search = "\"" + key + "\":\"";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos)
+        return {};
+    pos += search.size();
+    size_t end = json.find('"', pos);
+    if (end == std::string::npos)
+        return {};
+    return json.substr(pos, end - pos);
 }
 
 static std::string BuildSwitchesPayload()
@@ -442,6 +490,7 @@ static std::string BuildStateJson(int loadedIndex)
     int loadingIndex = g_streamDeckLoadingInstalledOrganIndex.load();
     int loadingProgress = std::clamp(g_streamDeckLoadingProgress.load(), 0, 100);
     bool biduleSplashActive = g_streamDeckBiduleSplashActive.load();
+    int audioClipping = std::clamp(g_hwAudioLevelClipping.load(), 0, 2);
     if (loadingVisible && loadingIndex <= 0)
         loadingIndex = loadedIndex;
 
@@ -457,7 +506,8 @@ static std::string BuildStateJson(int loadedIndex)
            ",\"loadingIndex\":" + std::to_string(loadingIndex) +
            ",\"loadingProgress\":" + std::to_string(loadingProgress) +
            ",\"loadingVisible\":" + std::string(loadingVisible ? "true" : "false") +
-           ",\"biduleSplashActive\":" + std::string(biduleSplashActive ? "true" : "false") + "}";
+           ",\"biduleSplashActive\":" + std::string(biduleSplashActive ? "true" : "false") +
+           ",\"audioClipping\":" + std::to_string(audioClipping) + "}";
 }
 
 static void HandlePipeMessage(const std::string& msg)
@@ -522,6 +572,43 @@ static void HandlePipeMessage(const std::string& msg)
         SendBiduleOscStringCommand(L"/DSP_FRONT/Open_UI", oscVal);
         SendBiduleOscStringCommand(L"/DSP_SIDE/Open_UI", oscVal);
         SendBiduleOscStringCommand(L"/DSP_REAR/Open_UI", oscVal);
+
+        // Send CTRL+ALT+S to the foreground window on both open and close.
+        SendCtrlAltS();
+
+        // When opening the Altiverb plugin UIs, hide the Hauptwerk main window so the
+        // plugin editors are not obscured; restore it (to its exact previous state,
+        // e.g. maximized) when the UIs are closed again. Controlled by a Settings option.
+        bool hideHwEnabled = true;
+        LoadBiduleHideHauptwerkOnAltiverbUi(hideHwEnabled);
+        static WINDOWPLACEMENT s_hwPrevPlacement{};
+        static bool s_hwPlacementSaved = false;
+        HWND hwMain = g_hauptwerkMainWindow.load();
+        if (hideHwEnabled && hwMain != nullptr && IsWindow(hwMain))
+        {
+            if (newState)
+            {
+                s_hwPrevPlacement.length = sizeof(WINDOWPLACEMENT);
+                s_hwPlacementSaved = (GetWindowPlacement(hwMain, &s_hwPrevPlacement) != FALSE);
+                ShowWindow(hwMain, SW_HIDE);
+                printf("[PipeServer] Hauptwerk window hidden while Altiverb UI is open.\n");
+            }
+            else
+            {
+                if (s_hwPlacementSaved)
+                {
+                    // Restore the exact previous placement (normal/maximized/minimized).
+                    SetWindowPlacement(hwMain, &s_hwPrevPlacement);
+                }
+                else
+                {
+                    ShowWindow(hwMain, SW_SHOW);
+                }
+                SetForegroundWindow(hwMain);
+                printf("[PipeServer] Hauptwerk window restored after Altiverb UI closed.\n");
+            }
+        }
+
         NotifyStreamDeckAltiverbUiState(newState);
         PipeSend(std::string("{\"type\":\"ack\",\"command\":\"toggleAltiverbUi\",\"open\":") +
             (newState ? "true" : "false") + "}");
@@ -539,6 +626,22 @@ static void HandlePipeMessage(const std::string& msg)
     {
         PipeSend(std::string("{\"type\":\"activeSensingState\",\"enabled\":") +
             (g_activeSensingEnabled.load() ? "true" : "false") + "}");
+    }
+    else if (msg.find("\"biduleOscFloat\"") != std::string::npos)
+    {
+        std::string address = JsonExtractStringValue(msg, "address");
+        float value = static_cast<float>(JsonExtractDouble(msg, "value"));
+        if (!address.empty())
+        {
+            std::wstring waddress(address.begin(), address.end());
+            printf("[PipeServer] Bidule OSC float requested: %s = %f\n", address.c_str(), value);
+            SendBiduleOscFloatCommand(waddress, value);
+            PipeSend("{\"type\":\"ack\",\"command\":\"biduleOscFloat\"}");
+        }
+        else
+        {
+            printf("[PipeServer] Bidule OSC float REJECTED: missing address\n");
+        }
     }
     else if (msg.find("\"getSwitches\"") != std::string::npos)
     {

@@ -35,6 +35,9 @@ Source: "{#SourceBase}\property_inspector.html"; DestDir: "{app}"; Flags: ignore
 ; Images
 Source: "{#SourceBase}\images\*"; DestDir: "{app}\images"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; Altiverb IR church thumbnails (loaded at runtime by the IR Church action)
+Source: "{#SourceBase}\IR_thumbnails\*"; DestDir: "{app}\IR_thumbnails"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Code]
 // Stop Stream Deck before install, restart after
 procedure CurStepChanged(CurStep: TSetupStep);

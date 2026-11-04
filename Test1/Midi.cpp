@@ -30,6 +30,21 @@ static std::atomic<bool> g_midiMonitorFilterFeEnabled{ true };
 static HMIDIIN  g_hHwVirtualBIn = nullptr;
 static UINT     g_hwVirtualBDevIndex = UINT(-1);
 
+// Handle for the "Display Port (B)" input — receives the hardware-display SysEx
+// messages Hauptwerk sends to drive an external status display. These provide
+// the authoritative, synchronized organ loading status / progress / ready state.
+static HMIDIIN   g_hDisplayPortBIn = nullptr;
+static UINT      g_displayPortBDevIndex = UINT(-1);
+static MIDIHDR   g_displayPortBHdr{};
+static char      g_displayPortBSysexBuf[256]{};
+// Authoritative "organ is ready for play" flag from the Hauptwerk display SysEx
+// (IsOrganAndAudioAndMIDIReady). Used as the primary ready-state source.
+std::atomic<bool> g_hwDisplayOrganReady{ false };
+
+// Audio level clipping state from the Hauptwerk display SysEx (AudioLevelClipping):
+// 0 = green (ok), 1 = orange (near clip), 2 = red (clipping / distortion).
+std::atomic<int> g_hwAudioLevelClipping{ 0 };
+
 // Per-slot last-message timestamp for activity indicators.
 // Index matches the slot order: 0 = hMidiIn, 1 = hMidiIn2, 2+ = g_midiIns extras.
 static constexpr int kMaxInputSlots  = 16;
@@ -72,7 +87,39 @@ std::atomic<bool> g_streamDeckBiduleSplashActive{ false };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
 std::wstring g_hauptwerkOrganTitle;
 std::atomic<bool> g_autoDetectMidiSettingsActive{ false };
-// Timestamp (GetTickCount) of the last message received on "Hauptwerk Virtual (B)".
+// True while Hauptwerk's "Rank Audio/Memory Options and Routing" dialog is open.
+// Used to detect the moment before Hauptwerk overwrites the active cache so the
+// current cache can be preserved as a preset first.
+std::atomic<bool> g_rankOptionsDialogActive{ false };
+// Set when the rank-options dialog is seen: the next organ load is a cache rebuild.
+// The organ is not known yet at dialog time; it is resolved when the "Loading
+// organ" window appears and its title is extracted, which is when the active cache
+// is preserved. The tick is used to expire a stale pending flag if the user
+// cancels the dialog (no load follows).
+std::atomic<bool> g_rankCacheRebuildPending{ false };
+std::atomic<DWORD> g_rankCacheRebuildTick{ 0 };
+// --- Altiverb knob control via incoming MIDI CC ---
+// Specific MIDI Control Change messages are translated into normalized OSC floats
+// and sent to Altiverb knobs inside Bidule. knobValue = (midiValue/127) * scale.
+// Mapping (all CC 7):
+//   176 (channel 1) -> /DSP_FRONT/RvrbTime
+//   177 (channel 2) -> /DSP_SIDE/RvrbTime
+//   178 (channel 3) -> /DSP_REAR/RvrbTime
+namespace {
+    constexpr int   kAltiverbRvrbTimeCC    = 7;        // Control Change number
+    constexpr float kAltiverbRvrbTimeScale = 0.64285f;
+
+    struct AltiverbCcMapping {
+        int            channel;      // 1-based MIDI channel
+        const wchar_t* oscAddress;
+    };
+
+    const AltiverbCcMapping kAltiverbRvrbTimeMap[] = {
+        { 1, L"/DSP_FRONT/RvrbTime" },
+        { 2, L"/DSP_SIDE/RvrbTime"  },
+        { 3, L"/DSP_REAR/RvrbTime"  },
+    };
+}
 // Updated in MidiInProc; read by RefreshInternalBridgePortLeds for the activity LED.
 static std::atomic<DWORD> g_hwVirtualBLastMsgTick{ 0 };
 
@@ -83,6 +130,7 @@ DWORD GetHauptwerkVirtualBLastMsgTime()
 
 void CloseHauptwerkProcess();
 void OpenHauptwerkVirtualBInput();
+void OpenDisplayPortBInput();
 
 // Set to true before calling CloseHauptwerkProcess() from the FE-disconnect path
 // to prevent the internal SendUnloadOrganMidiMessage() call (flush already done).
@@ -1155,6 +1203,70 @@ namespace
         return 0;
     }
 
+    // Preserve the active Hauptwerk cache of the given organ (identified by its
+    // window title) as the next free preset, before Hauptwerk finishes rebuilding
+    // and overwrites it. Called when the "Loading organ" window appears after the
+    // user confirmed the "Rank Audio/Memory Options and Routing" dialog, i.e. when
+    // the organ is finally known. The rename is instantaneous (no multi-GB copy).
+    void PreserveActiveCacheForOrganTitle(const std::wstring& organTitle)
+    {
+        std::wstring uid;
+        if (!organTitle.empty())
+        {
+            std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+            for (const auto& organ : organs)
+            {
+                if ((!organ.name.empty() && _wcsicmp(organ.name.c_str(), organTitle.c_str()) == 0) ||
+                    (!organ.displayName.empty() && _wcsicmp(organ.displayName.c_str(), organTitle.c_str()) == 0))
+                {
+                    uid = !organ.uniqueOrganId.empty() ? organ.uniqueOrganId : organ.id;
+                    break;
+                }
+            }
+        }
+
+        if (uid.empty())
+        {
+            printf("[CachePreserve] Could not resolve organ from title '%S'; skipping active cache preservation.\n",
+                   organTitle.c_str());
+            return;
+        }
+
+        bool activeCacheExists = false;
+        EnumerateCachePresets(uid, activeCacheExists);
+        if (!activeCacheExists)
+        {
+            printf("[CachePreserve] No active cache file present for organ %S; nothing to preserve.\n", uid.c_str());
+            return;
+        }
+
+        // Build a descriptive name: keep the remembered active-cache name if any,
+        // otherwise auto-generate one with a timestamp.
+        std::wstring name = GetActiveCacheName(uid);
+        if (name.empty())
+        {
+            wchar_t stamp[64] = {};
+            SYSTEMTIME st = {};
+            GetLocalTime(&st);
+            swprintf(stamp, _countof(stamp), L"Auto-saved %04d-%02d-%02d %02d:%02d",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+            name = stamp;
+        }
+
+        int presetNumber = 0;
+        std::wstring err;
+        if (SaveActiveCacheAsPreset(uid, name, presetNumber, err))
+        {
+            printf("[CachePreserve] Active cache preserved as Preset%02d ('%S') for organ %S before Hauptwerk overwrite.\n",
+                   presetNumber, name.c_str(), uid.c_str());
+        }
+        else
+        {
+            printf("[CachePreserve] Failed to preserve active cache for organ %S: %S\n",
+                   uid.c_str(), err.c_str());
+        }
+    }
+
     DWORD WINAPI HauptwerkTitleMonitorThread(LPVOID)
     {
         enum class IconState
@@ -1249,6 +1361,37 @@ namespace
 				{
 					g_autoDetectMidiSettingsActive.store(false);
 					printf("[TitleMonitor] Dialog 'Auto-detecting MIDI settings' is no longer present.\n");
+				}
+			}
+
+			// Detect Hauptwerk's "Rank Audio/Memory Options and Routing" dialog. It
+			// appears when the user chooses to load an organ while adjusting rank/
+			// audio/memory options. At this point the organ being (re)loaded is not
+			// yet known, so we only flag that the next organ load is a cache rebuild.
+			// The active cache is actually preserved later, when the "Loading organ"
+			// window appears and its organ title is extracted (the organ is then
+			// known, and the user has already confirmed the dialog).
+			{
+				std::wstring rankDlgTitle = GetRankOptionsDialogTitle();
+				HWND hRankDlg = FindWindowW(nullptr, rankDlgTitle.c_str());
+				bool rankDlgPresent = (hRankDlg != nullptr && IsWindow(hRankDlg));
+				if (rankDlgPresent)
+				{
+					if (!g_rankOptionsDialogActive.load())
+					{
+						g_rankOptionsDialogActive.store(true);
+						g_rankCacheRebuildPending.store(true);
+						g_rankCacheRebuildTick.store(GetTickCount());
+						printf("[TitleMonitor] Dialog '%S' detected! Next organ load flagged as cache rebuild.\n", rankDlgTitle.c_str());
+					}
+				}
+				else
+				{
+					if (g_rankOptionsDialogActive.load())
+					{
+						g_rankOptionsDialogActive.store(false);
+						printf("[TitleMonitor] Dialog '%S' is no longer present.\n", rankDlgTitle.c_str());
+					}
 				}
 			}
 
@@ -1692,6 +1835,9 @@ namespace
         bool titleExtracted = false;
         bool cancelDetected = false;
         bool reroutedManualLoad = false;
+        // Per-load latch: ensures the active cache is preserved at most once for a
+        // given "Loading organ" session triggered by a rank-options cache rebuild.
+        bool cachePreservedThisLoad = false;
         while (running)
         {
             HWND hWnd = FindWindowW(nullptr, L"Loading organ");
@@ -1732,8 +1878,38 @@ namespace
                 // but extract/match the organ title only once.
                 if (loading)
                 {
+                    // If the current organ load was triggered via the "Rank Audio/
+                    // Memory Options and Routing" dialog, Hauptwerk is rebuilding and
+                    // will overwrite the active cache. Preserve the current cache as a
+                    // preset first. This is checked every iteration (not only at title
+                    // extraction) so it is independent of the ordering between this
+                    // thread and the title-monitor thread that sets the flag.
+                    if (!cachePreservedThisLoad && g_rankCacheRebuildPending.load())
+                    {
+                        DWORD age = GetTickCount() - g_rankCacheRebuildTick.load();
+                        if (age <= 120000)
+                        {
+                            std::wstring organTitle = g_hauptwerkOrganTitle;
+                            if (organTitle.empty())
+                                organTitle = TryExtractOrganTitleFromLoadingWindow(hWnd);
+                            if (!organTitle.empty())
+                            {
+                                g_rankCacheRebuildPending.store(false);
+                                cachePreservedThisLoad = true;
+                                printf("[CachePreserve] Cache rebuild load detected for '%S'; preserving active cache.\n", organTitle.c_str());
+                                PreserveActiveCacheForOrganTitle(organTitle);
+                            }
+                        }
+                        else
+                        {
+                            g_rankCacheRebuildPending.store(false);
+                            printf("[CachePreserve] Stale cache-rebuild flag expired (%lu ms); skipping preservation.\n", age);
+                        }
+                    }
+
                     std::wstring title = TryExtractOrganTitleFromLoadingWindow(hWnd);
                     if (!title.empty() && !titleExtracted)
+
                     {
                         printf("[OrganLoadingWatch] Extracted organ title: %S\n", title.c_str());
                         g_hauptwerkOrganTitle = title;
@@ -1880,6 +2056,7 @@ namespace
                         titleExtracted = false;
                         cancelDetected = false;
                         reroutedManualLoad = false;
+                        cachePreservedThisLoad = false;
                     }
                 else
                 {
@@ -3330,6 +3507,155 @@ void OpenHauptwerkVirtualBInput()
             targetName.c_str(), numIn);
 }
 
+// ---------------------------------------------------------------------------
+// Hauptwerk hardware-display SysEx handling (Display Port)
+// ---------------------------------------------------------------------------
+// Hauptwerk can drive an external hardware status display by emitting SysEx
+// messages on a MIDI output. We monitor these on "Display Port (B)" to obtain
+// an authoritative, perfectly synchronized view of the organ loading lifecycle.
+//
+// Messages of interest (manufacturer id 0x7D, 0x1B prefix):
+//   F0 7D 1B 55 v F7  isOrganLoading             (v = 0/1)
+//   F0 7D 1B 28 v F7  OrganLoadingProgressPct    (v = 0..99)
+//   F0 7D 1B 26 v F7  IsOrganAndAudioAndMIDIReady (v = 0/1)
+// ---------------------------------------------------------------------------
+static void HandleDisplayPortSysex(const unsigned char* data, int len)
+{
+    // Expected form: F0 7D 1B <var> <value> F7 (6 bytes)
+    if (len < 6 || data[0] != 0xF0 || data[1] != 0x7D || data[2] != 0x1B || data[len - 1] != 0xF7)
+        return;
+
+    const unsigned char var = data[3];
+    const unsigned char value = data[4];
+    bool stateChanged = false;
+
+    switch (var)
+    {
+    case 0x55: // isOrganLoading
+    {
+        const bool loading = (value != 0);
+        printf("\n[MIDI MON] [Display] isOrganLoading = %d\n\n", (int)loading);
+        if (loading)
+        {
+            // Start of loading: show the loading UI and reset progress.
+            g_isLoadingOrgan.store(true);
+            g_streamDeckLoadingProgress.store(0);
+            g_hwDisplayOrganReady.store(false);
+            int idx = g_streamDeckLoadingInstalledOrganIndex.load();
+            if (idx <= 0)
+                idx = g_currentLoadedInstalledOrganIndex.load();
+            if (idx > 0)
+                g_streamDeckLoadingInstalledOrganIndex.store(idx);
+        }
+        else
+        {
+            // End of loading phase.
+            g_isLoadingOrgan.store(false);
+        }
+        stateChanged = true;
+        break;
+    }
+    case 0x28: // OrganLoadingProgressIndicatorPct (0..99)
+    {
+        int pct = (int)value;
+        if (pct < 0) pct = 0;
+        if (pct > 99) pct = 99;
+        g_streamDeckLoadingProgress.store(pct);
+        stateChanged = true;
+        break;
+    }
+    case 0x26: // IsOrganAndAudioAndMIDIReady
+    {
+        const bool ready = (value != 0);
+        printf("\n[MIDI MON] [Display] IsOrganAndAudioAndMIDIReady = %d\n\n", (int)ready);
+        g_hwDisplayOrganReady.store(ready);
+        if (ready)
+        {
+            // Organ fully available for play: finish any loading and mark loaded.
+            g_isLoadingOrgan.store(false);
+            g_streamDeckLoadingProgress.store(100);
+        }
+        stateChanged = true;
+        break;
+    }
+    case 0x30: // AudioLevelClipping (0 = green, 1 = orange, 2 = red/clipping)
+    {
+        int level = (int)value;
+        if (level < 0) level = 0;
+        if (level > 2) level = 2;
+        int prev = g_hwAudioLevelClipping.exchange(level);
+        if (level != prev)
+        {
+            printf("\n[MIDI MON] [Display] AudioLevelClipping = %d%s\n\n",
+                level, level == 2 ? " (RED - audio clipping!)" : "");
+            stateChanged = true;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    if (stateChanged)
+        NotifyStreamDeckOrganState(g_currentLoadedInstalledOrganIndex.load());
+}
+
+// ---------------------------------------------------------------------------
+// OpenDisplayPortBInput
+// ---------------------------------------------------------------------------
+// Opens "Display Port (B)" as an additional WinMM MIDI input and registers a
+// SysEx receive buffer so MidiInProc can process MIM_LONGDATA messages.
+// ---------------------------------------------------------------------------
+void OpenDisplayPortBInput()
+{
+    std::wstring targetName = GetDisplayPortBDeviceName();
+    if (targetName.empty())
+        return; // MIDI 2.0 service not available or pair not created
+
+    if (g_hDisplayPortBIn != nullptr)
+        return; // already open
+
+    UINT numIn = midiInGetNumDevs();
+    printf("[DisplayPortB] Scanning %u WinMM input devices for '%S'...\n",
+        numIn, targetName.c_str());
+    for (UINT i = 0; i < numIn; ++i)
+    {
+        MIDIINCAPSW caps{};
+        if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+        {
+            if (targetName == caps.szPname)
+            {
+                HMIDIIN h = nullptr;
+                if (midiInOpen(&h, i, (DWORD_PTR)MidiInProc, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR)
+                {
+                    // Prepare and add a SysEx receive buffer (required for MIM_LONGDATA).
+                    ZeroMemory(&g_displayPortBHdr, sizeof(g_displayPortBHdr));
+                    g_displayPortBHdr.lpData = g_displayPortBSysexBuf;
+                    g_displayPortBHdr.dwBufferLength = sizeof(g_displayPortBSysexBuf);
+                    midiInPrepareHeader(h, &g_displayPortBHdr, sizeof(g_displayPortBHdr));
+                    midiInAddBuffer(h, &g_displayPortBHdr, sizeof(g_displayPortBHdr));
+
+                    midiInStart(h);
+                    g_hDisplayPortBIn      = h;
+                    g_displayPortBDevIndex = i;
+                    printf("[DisplayPortB] Opened '%S' (index %u) for Hauptwerk display SysEx monitoring.\n",
+                        targetName.c_str(), i);
+                }
+                else
+                {
+                    printf("[DisplayPortB] Failed to open '%S' for display SysEx monitoring.\n",
+                        targetName.c_str());
+                }
+                break;
+            }
+        }
+    }
+
+    if (g_hDisplayPortBIn == nullptr)
+        printf("[DisplayPortB] Device '%S' not yet visible in WinMM (%u devices scanned).\n",
+            targetName.c_str(), numIn);
+}
+
 bool initMidiState()
 {
     InitializeCriticalSection(&g_midiOutLock);
@@ -3361,6 +3687,11 @@ bool initMidiState()
         {
             printf("[Midi2] Virtual ports already visible in WinMM — skipping creation.\n");
         }
+
+        // The Display Port pair is newer than Pair A/B and may be missing even
+        // when A/B already exist from a previous session. Ensure it exists.
+        if (EnsureDisplayPortEndpoint())
+            Sleep(400); // give WinMM time to register the Display Port pair
     }
 
     UINT numInDevs = midiInGetNumDevs();
@@ -3516,6 +3847,18 @@ bool initMidiState()
         }
         if (g_hHwVirtualBIn == nullptr)
             printf("[HwVirtualB] Could not open 'Hauptwerk Virtual (B)' after retries — mirror inactive.\n");
+    }
+
+    // Open the Display Port (B) input to receive Hauptwerk's hardware-display
+    // SysEx (organ loading status / progress / ready). Best-effort with retries.
+    {
+        for (int attempt = 0; attempt < 8 && g_hDisplayPortBIn == nullptr; ++attempt)
+        {
+            if (attempt > 0) Sleep(250);
+            OpenDisplayPortBInput();
+        }
+        if (g_hDisplayPortBIn == nullptr)
+            printf("[DisplayPortB] Could not open 'Display Port (B)' after retries — SysEx status inactive.\n");
     }
 
     RefreshSettingsFile();
@@ -3917,7 +4260,23 @@ void CALLBACK MidiInProc(
 	DWORD_PTR dwParam2)
 {
 	if (wMsg != MIM_DATA)
+	{
+		// Hauptwerk display-status SysEx arrives as long messages on Display Port (B).
+		if (wMsg == MIM_LONGDATA && hMidiIn == g_hDisplayPortBIn)
+		{
+			MIDIHDR* hdr = reinterpret_cast<MIDIHDR*>(dwParam1);
+			if (hdr && hdr->dwBytesRecorded > 0)
+			{
+				HandleDisplayPortSysex(
+					reinterpret_cast<const unsigned char*>(hdr->lpData),
+					(int)hdr->dwBytesRecorded);
+			}
+			// Requeue the buffer so further SysEx messages keep being received.
+			if (hdr)
+				midiInAddBuffer(hMidiIn, hdr, sizeof(MIDIHDR));
+		}
 		return;
+	}
 
 	// Stamp the per-slot activity timestamp so the assignment window can
 	// show a live signal indicator for each assigned input.
@@ -3967,6 +4326,22 @@ void CALLBACK MidiInProc(
 	uint8_t status = msg & 0xFF;
 	uint8_t data1 = (msg >> 8) & 0xFF;
 	uint8_t data2 = (msg >> 16) & 0xFF;
+
+	// --- Altiverb knob control ---
+	// Translate mapped Control Change messages into normalized OSC floats for Bidule.
+	if ((status & 0xF0) == 0xB0 && data1 == kAltiverbRvrbTimeCC)
+	{
+		int channel = (status & 0x0F) + 1;
+		for (const auto& m : kAltiverbRvrbTimeMap)
+		{
+			if (m.channel == channel)
+			{
+				float knobValue = (static_cast<float>(data2) / 127.0f) * kAltiverbRvrbTimeScale;
+				SendBiduleOscFloatCommand(m.oscAddress, knobValue);
+				break;
+			}
+		}
+	}
 
 	if (g_midiRouterEnabled.load())
 	{

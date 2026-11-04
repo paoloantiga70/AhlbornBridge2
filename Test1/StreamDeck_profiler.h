@@ -70,6 +70,8 @@ struct KeyAction
     std::string fontFamily = "Arial";
     int fontSize = 11;
     int organIndex = 0;         // 1-based organ index (for com.ahlbornbridge.organ.load)
+    std::string oscAddress;     // OSC address for com.ahlbornbridge.dsp
+    std::string oscValue;       // OSC float value (as string) for com.ahlbornbridge.dsp
     MidiSettings midi;
 };
 
@@ -121,5 +123,15 @@ bool CreateStreamDeckProfileFromSettings();
 
 // Creates (or updates) the Stream Deck profile with one button per AhlbornSwitch.
 bool CreateStreamDeckSwitchesProfile();
+
+// Creates (or updates) the "OrganLoaded" profile: the organ key plus
+// configurable DSP command keys. Activated automatically when an organ loads.
+bool CreateStreamDeckOrganLoadedProfile();
+
+// Builds the profile structure and packages it as a plugin-bundled
+// <profileName>.streamDeckProfile inside the installed plugin folder. This is
+// the only profile format the Stream Deck switchToProfile API can activate.
+bool CreateStreamDeckPluginProfile(const std::string& profileName,
+    const std::map<int, KeyAction>& keys);
 
 

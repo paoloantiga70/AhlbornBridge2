@@ -9,6 +9,7 @@ bool SendBiduleOscOpenProfile(const std::wstring& profilePath, unsigned short po
 bool SendBiduleOscFileSaveAs(const std::wstring& profilePath, unsigned short port = 3210);
 bool SendBiduleOscPlay(bool play, unsigned short port = 3210);
 bool SendBiduleOscStringCommand(const std::wstring& address, const std::wstring& value, unsigned short port = 3210);
+bool SendBiduleOscFloatCommand(const std::wstring& address, float value, unsigned short port = 3210);
 void CloseBiduleProcess();
 std::wstring DetectBiduleExePath();
 bool IsBiduleWindowVisible();

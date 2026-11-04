@@ -99,9 +99,12 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="AhlbornBridgeSD.iss" />
+    <None Include="build-organloaded-profile.ps1" />
     <None Include="com.ahlbornbridge.organ.sdPlugin\manifest.json" />
     <None Include="com.ahlbornbridge.organ.sdPlugin\property_inspector.html" />
+    <None Include="extract-churches.ps1" />
     <None Include="packages.config" />
+    <None Include="patch-imported-organloaded.ps1" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

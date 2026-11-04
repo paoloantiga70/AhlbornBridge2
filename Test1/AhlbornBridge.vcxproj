@@ -146,6 +146,7 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="MidiAssignmentWindow.cpp" />
+    <ClCompile Include="CachePresetWindow.cpp" />
     <ClCompile Include="Qt.cpp" />
     <ClCompile Include="StreamDeck.cpp" />
     <ClCompile Include="StreamDeck_profiler.cpp" />
@@ -159,6 +160,7 @@
     <ClInclude Include="Midi.h" />
     <ClInclude Include="Midi2Endpoint.h" />
     <ClInclude Include="MidiAssignmentWindow.h" />
+    <ClInclude Include="CachePresetWindow.h" />
     <ClInclude Include="Qt.h" />
     <ClInclude Include="StreamDeck.h" />
     <ClInclude Include="StreamDeck_profiler.h" />

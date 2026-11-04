@@ -132,6 +132,8 @@ extern std::atomic<int> g_currentLoadedInstalledOrganIndex;
 extern std::atomic<int> g_streamDeckLoadingInstalledOrganIndex;
 extern std::atomic<int> g_streamDeckLoadingProgress;
 extern std::atomic<bool> g_streamDeckBiduleSplashActive;
+// Audio level clipping from Hauptwerk display SysEx: 0 green, 1 orange, 2 red (clipping).
+extern std::atomic<int> g_hwAudioLevelClipping;
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;

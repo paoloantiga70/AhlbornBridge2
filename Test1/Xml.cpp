@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <algorithm>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <mmsystem.h>
@@ -113,8 +114,14 @@ namespace
     // Cached <OrganStopMappings> XML fragment (built on organ load, persisted to Settings.xml).
     std::wstring s_cachedOrganStopMappings;
 
+    // Cached <HauptwerkCachePresets> XML fragment (preset metadata: descriptive name + date,
+    // keyed by uniqueOrganId and preset number; persisted to Settings.xml).
+    std::wstring s_cachedHauptwerkCachePresets;
+    bool s_hauptwerkCachePresetsCacheValid = false;
+
     std::wstring s_cachedBidulePath;
     bool s_cachedBiduleCloseOnUnload = true;
+    bool s_cachedBiduleHideHauptwerkOnAltiverbUi = true;
     bool s_cachedAutoAssignSwitchOutputs = true;
     bool s_cachedRestoreOrganSwitchStates = true;
     std::wstring s_cachedLastSeenAppVersion;
@@ -968,128 +975,93 @@ namespace
 									TryGetTagStringValue(hwXml, L"<Identification_Name>", L"</Identification_Name>", displayName);
 									TryGetTagStringValue(hwXml, L"<Identification_UniqueOrganID>", L"</Identification_UniqueOrganID>", uniqueOrganID);
 
-                                    // Compute Number_Channels from Stop + Rank:
-                                    // 1) read the first <b> of the first <o> inside ObjectList ObjectType="Stop"
-                                    // 2) count Rank child nodes whose <b> is either exactly the same string
-                                    //    or ends with " - <stopName>"
-                                    // 3) channels = matchCount * 2
-                                    auto extractObjectListSection = [&](const std::wstring& objectType, std::wstring& section) -> bool
-                                    {
-                                        const std::wstring openTag = L"<ObjectList ObjectType=\"" + objectType + L"\">";
-                                        size_t start = hwXml.find(openTag);
-                                        if (start == std::wstring::npos)
-                                            return false;
-                                        start += openTag.size();
-                                        size_t end = hwXml.find(L"</ObjectList>", start);
-                                        if (end == std::wstring::npos)
-                                            return false;
-                                        section = hwXml.substr(start, end - start);
-                                        return true;
-                                    };
+									// Compute Number_Channels from Stop + StopRank:
+									// 1) read the <a> (object id) of the first <o> inside ObjectList ObjectType="Stop"
+									// 2) in ObjectList ObjectType="StopRank", find every <o> whose <a> matches that id
+									//    AND whose <g> value is 1 (a real stop/rank pairing; other <g> values are
+									//    engage/disengage effects and must be ignored)
+									// 3) channels = matchCount * 2 (each matched pairing is a stereo perspective)
+									auto extractObjectListSection = [&](const std::wstring& objectType, std::wstring& section) -> bool
+									{
+										const std::wstring openTag = L"<ObjectList ObjectType=\"" + objectType + L"\">";
+										size_t start = hwXml.find(openTag);
+										if (start == std::wstring::npos)
+											return false;
+										start += openTag.size();
+										size_t end = hwXml.find(L"</ObjectList>", start);
+										if (end == std::wstring::npos)
+											return false;
+										section = hwXml.substr(start, end - start);
+										return true;
+									};
 
-                                    std::wstring stopSection;
-                                    std::wstring rankSection;
-                                    if (extractObjectListSection(L"Stop", stopSection) && extractObjectListSection(L"Rank", rankSection))
-                                    {
-                                        auto normalizeForRankMatch = [](const std::wstring& text) -> std::wstring
-                                        {
-                                            std::wstring noParens;
-                                            bool inParens = false;
-                                            for (wchar_t ch : text)
-                                            {
-                                                if (ch == L'(')
-                                                {
-                                                    inParens = true;
-                                                    continue;
-                                                }
-                                                if (ch == L')')
-                                                {
-                                                    inParens = false;
-                                                    continue;
-                                                }
-                                                if (!inParens)
-                                                    noParens.push_back(ch);
-                                            }
+									std::wstring stopSection;
+									std::wstring stopRankSection;
+									if (extractObjectListSection(L"Stop", stopSection) && extractObjectListSection(L"StopRank", stopRankSection))
+									{
+										// Object id (<a>) of the first Stop node.
+										std::wstring targetStopId;
+										size_t firstO = stopSection.find(L"<o>");
+										if (firstO != std::wstring::npos)
+										{
+											size_t firstOEnd = stopSection.find(L"</o>", firstO);
+											if (firstOEnd != std::wstring::npos)
+											{
+												std::wstring firstStopNode = stopSection.substr(firstO + 3, firstOEnd - firstO - 3);
+												TryGetTagStringValue(firstStopNode, L"<a>", L"</a>", targetStopId);
+											}
+										}
 
-                                            std::wstring normalized;
-                                            bool lastWasSpace = true;
-                                            for (wchar_t ch : noParens)
-                                            {
-                                                wchar_t lower = static_cast<wchar_t>(towlower(ch));
-                                                if ((lower >= L'a' && lower <= L'z') || (lower >= L'0' && lower <= L'9'))
-                                                {
-                                                    normalized.push_back(lower);
-                                                    lastWasSpace = false;
-                                                }
-                                                else if (!lastWasSpace)
-                                                {
-                                                    normalized.push_back(L' ');
-                                                    lastWasSpace = true;
-                                                }
-                                            }
+										if (!targetStopId.empty())
+										{
+											int matchCount = 0;
+											size_t pos2 = 0;
+											while (true)
+											{
+												size_t oPos = stopRankSection.find(L"<o>", pos2);
+												if (oPos == std::wstring::npos)
+													break;
+												size_t oEnd = stopRankSection.find(L"</o>", oPos);
+												if (oEnd == std::wstring::npos)
+													break;
 
-                                            while (!normalized.empty() && normalized.back() == L' ')
-                                                normalized.pop_back();
-                                            return normalized;
-                                        };
+												std::wstring node = stopRankSection.substr(oPos + 3, oEnd - oPos - 3);
+												std::wstring nodeA, nodeG;
+												if (TryGetTagStringValue(node, L"<a>", L"</a>", nodeA) &&
+													nodeA == targetStopId &&
+													TryGetTagStringValue(node, L"<g>", L"</g>", nodeG) &&
+													nodeG == L"1")
+												{
+													++matchCount;
+													std::wstring nodeName;
+													TryGetTagStringValue(node, L"<b>", L"</b>", nodeName);
+													printf("ReadHauptwerkInstalledOrgans: StopRank match a=%S g=1 '%S'\n",
+														targetStopId.c_str(), nodeName.c_str());
+												}
 
-                                        std::wstring targetStopName;
-                                        size_t firstO = stopSection.find(L"<o>");
-                                        if (firstO != std::wstring::npos)
-                                        {
-                                            size_t firstOEnd = stopSection.find(L"</o>", firstO);
-                                            if (firstOEnd != std::wstring::npos)
-                                            {
-                                                std::wstring firstStopNode = stopSection.substr(firstO + 3, firstOEnd - firstO - 3);
-                                                TryGetTagStringValue(firstStopNode, L"<b>", L"</b>", targetStopName);
-                                            }
-                                        }
+												pos2 = oEnd + 4;
+											}
 
-                                        if (!targetStopName.empty())
-                                        {
-                                            int matchCount = 0;
-                                            std::wstring normalizedTargetStopName = normalizeForRankMatch(targetStopName);
-                                            const std::wstring suffix = L" - " + targetStopName;
-                                            size_t pos2 = 0;
-                                            while (true)
-                                            {
-                                                size_t oPos = rankSection.find(L"<o>", pos2);
-                                                if (oPos == std::wstring::npos)
-                                                    break;
-                                                size_t oEnd = rankSection.find(L"</o>", oPos);
-                                                if (oEnd == std::wstring::npos)
-                                                    break;
-
-                                                std::wstring rankNode = rankSection.substr(oPos + 3, oEnd - oPos - 3);
-                                                std::wstring rankName;
-                                                if (TryGetTagStringValue(rankNode, L"<b>", L"</b>", rankName))
-                                                {
-                                                    std::wstring normalizedRankName = normalizeForRankMatch(rankName);
-                                                    if (rankName == targetStopName ||
-                                                        (rankName.size() > suffix.size() &&
-                                                        rankName.compare(rankName.size() - suffix.size(), suffix.size(), suffix) == 0) ||
-                                                        (!normalizedTargetStopName.empty() &&
-                                                         normalizedRankName.find(normalizedTargetStopName) != std::wstring::npos))
-                                                    {
-                                                        ++matchCount;
-                                                        printf("ReadHauptwerkInstalledOrgans: rank match '%S' for stop '%S'\n",
-                                                            rankName.c_str(), targetStopName.c_str());
-                                                    }
-                                                }
-
-                                                pos2 = oEnd + 4;
-                                            }
-
-                                            numberChannels = matchCount * 2;
-                                            printf("ReadHauptwerkInstalledOrgans: stop '%S' -> %d rank match(es) -> %d channel(s)\n",
-                                                targetStopName.c_str(), matchCount, numberChannels);
-                                        }
-                                    }
+											numberChannels = matchCount * 2;
+											printf("ReadHauptwerkInstalledOrgans: stop id=%S -> %d StopRank match(es) -> %d channel(s)\n",
+												targetStopId.c_str(), matchCount, numberChannels);
+										}
+									}
 								}
 							}
 						}
 						CloseHandle(fh);
 					}
+				}
+
+				// Fallback: if channel detection found nothing (e.g. extended organs
+				// whose first stop name carries a numeric prefix that does not appear
+				// in any rank name), treat the organ as standard stereo (2 channels).
+				if (numberChannels <= 0)
+				{
+					numberChannels = 2;
+					printf("ReadHauptwerkInstalledOrgans: no channels detected for %S -> defaulting to 2\n",
+						name.c_str());
 				}
 
                 auto existingIt = existingOutputDeviceByUniqueId.find(uniqueOrganID);
@@ -1099,10 +1071,13 @@ namespace
                 }
                 else
                 {
-                    if (numberChannels == 2)
-                        outputDevice = hauptwerkVstLinkDeviceId;
-                    else if (numberChannels > 2)
+                    // Default/fallback: organs with 2 or fewer detected channels (including
+                    // 0 when detection found no matching ranks) are treated as standard
+                    // stereo and routed to VST Link. Only multi-channel organs (>2) use ASIO.
+                    if (numberChannels > 2)
                         outputDevice = s_cachedAsioDevId;
+                    else
+                        outputDevice = hauptwerkVstLinkDeviceId;
                 }
 
 				std::wstring idStr = (id < 10 ? L"0" : L"") + std::to_wstring(id);
@@ -1167,7 +1142,26 @@ namespace
 			std::wstring stopMappingsSection;
 			if (TryGetSection(section, L"OrganStopMappings", stopMappingsSection))
 			{
-                s_cachedOrganStopMappings = NormalizeOrganStopMappingsSection(stopMappingsSection);
+				s_cachedOrganStopMappings = NormalizeOrganStopMappingsSection(stopMappingsSection);
+			}
+		}
+		// Preserve <HauptwerkCachePresets> metadata (descriptive names + dates) across saves.
+		if (!s_hauptwerkCachePresetsCacheValid)
+		{
+			std::wstring cachePresetsSection;
+			if (TryGetSection(section, L"HauptwerkCachePresets", cachePresetsSection))
+			{
+				size_t first = cachePresetsSection.find_first_not_of(L" \t\r\n");
+				if (first == std::wstring::npos)
+				{
+					s_cachedHauptwerkCachePresets.clear();
+				}
+				else
+				{
+					size_t last = cachePresetsSection.find_last_not_of(L" \t\r\n");
+					s_cachedHauptwerkCachePresets = cachePresetsSection.substr(first, last - first + 1) + L"\r\n";
+				}
+				s_hauptwerkCachePresetsCacheValid = true;
 			}
 		}
 	}
@@ -1541,6 +1535,7 @@ namespace
 			L"    <HauptwerkLoadedPriority>" + s_cachedHauptwerkLoadedPriority + L"</HauptwerkLoadedPriority>\r\n"
 			L"    <BidulePath>" + s_cachedBidulePath + L"</BidulePath>\r\n"
 			L"    <BiduleCloseOnUnload>" + std::to_wstring(s_cachedBiduleCloseOnUnload ? 1 : 0) + L"</BiduleCloseOnUnload>\r\n"
+			L"    <BiduleHideHauptwerkOnAltiverbUi>" + std::to_wstring(s_cachedBiduleHideHauptwerkOnAltiverbUi ? 1 : 0) + L"</BiduleHideHauptwerkOnAltiverbUi>\r\n"
 			L"    <AutoAssignSwitchOutputs>" + std::to_wstring(s_cachedAutoAssignSwitchOutputs ? 1 : 0) + L"</AutoAssignSwitchOutputs>\r\n"
 			L"    <RestoreOrganSwitchStatesOnLoad>" + std::to_wstring(s_cachedRestoreOrganSwitchStates ? 1 : 0) + L"</RestoreOrganSwitchStatesOnLoad>\r\n"
 			L"    <ActiveSensingEnabled>" + std::to_wstring(g_activeSensingEnabled.load() ? 1 : 0) + L"</ActiveSensingEnabled>\r\n"
@@ -1568,6 +1563,8 @@ namespace
 			L"    </OrganSwitchStates>\r\n"
 			L"    <OrganStopMappings>\r\n" + s_cachedOrganStopMappings +
 			L"    </OrganStopMappings>\r\n"
+			L"    <HauptwerkCachePresets>\r\n" + s_cachedHauptwerkCachePresets +
+			L"    </HauptwerkCachePresets>\r\n"
 			L"  </StreamDeck>\r\n"
 			L"  <Audio>\r\n"
 			L"    <AsioDevId>" + s_cachedAsioDevId + L"</AsioDevId>\r\n"
@@ -2873,6 +2870,33 @@ bool LoadBidulePath(std::wstring& path)
     return true;
 }
 
+std::wstring GetRankOptionsDialogTitle()
+{
+    // Title of the Hauptwerk dialog that appears when the user chooses to load an
+    // organ while adjusting rank/audio/memory options. When this dialog is shown,
+    // the active cache has not yet been overwritten, so it is the right moment to
+    // preserve the current cache as a preset. The title is language dependent, so
+    // it can be overridden in Settings.xml (Options/RankOptionsDialogTitle).
+    const std::wstring kDefault = L"Rank Audio/Memory Options and Routing";
+
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return kDefault;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return kDefault;
+
+    std::wstring title;
+    if (!TryGetTagStringValue(optionsSection, L"<RankOptionsDialogTitle>", L"</RankOptionsDialogTitle>", title) ||
+        title.empty())
+    {
+        return kDefault;
+    }
+
+    return title;
+}
+
 bool SaveBidulePath(const std::wstring& path)
 {
     s_cachedBidulePath = path;
@@ -2931,6 +2955,61 @@ bool LoadBiduleCloseOnUnload(bool& enabled)
 bool SaveBiduleCloseOnUnload(bool enabled)
 {
     s_cachedBiduleCloseOnUnload = enabled;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadBiduleHideHauptwerkOnAltiverbUi(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    UINT value = 1;
+    if (!TryGetTagValue(optionsSection, L"<BiduleHideHauptwerkOnAltiverbUi>", L"</BiduleHideHauptwerkOnAltiverbUi>", value))
+    {
+        enabled = true;
+        return true;
+    }
+
+    enabled = value != 0;
+    s_cachedBiduleHideHauptwerkOnAltiverbUi = enabled;
+    return true;
+}
+
+bool SaveBiduleHideHauptwerkOnAltiverbUi(bool enabled)
+{
+    s_cachedBiduleHideHauptwerkOnAltiverbUi = enabled;
 
     std::wstring inputName, input2Name, outputName, output2Name;
     DeviceEnabledStates devEnabled;
@@ -4805,6 +4884,843 @@ std::map<int, bool> LoadOrganSwitchStates(const std::wstring& uniqueOrganId)
     }
 
     return result;
+}
+
+// ===================== Hauptwerk cache presets =====================
+// Cache files live in {RootFolder_HauptwerkInternalWorkingFiles}\Config0-OrganCaches.
+// Active cache file:  OrganIDnnnnnn.Cache_Hauptwerk_hbb
+// Preset cache files: OrganIDnnnnnn.PresetNN.Cache_Hauptwerk_hbb
+// Because cache files are several GB we only ever rename/move them, never copy.
+
+namespace
+{
+    const wchar_t* const kCacheSuffix = L".Cache_Hauptwerk_hbb";
+
+    std::wstring GetOrganCacheFolderPath()
+    {
+        std::wstring root = s_rootHauptwerkWorkingFiles;
+        if (root.empty())
+        {
+            std::wstring xml;
+            if (TryReadSettingsXml(xml))
+            {
+                std::wstring opts;
+                if (TryGetSection(xml, L"Options", opts))
+                    TryGetTagStringValue(opts, L"<RootFolder_HauptwerkInternalWorkingFiles>",
+                                         L"</RootFolder_HauptwerkInternalWorkingFiles>", root);
+            }
+        }
+        if (root.empty())
+            return {};
+
+        if (root.back() == L'\\' || root.back() == L'/')
+            root.pop_back();
+        return root + L"\\Config0-OrganCaches";
+    }
+
+    // Builds "OrganIDnnnnnn" (6-digit zero-padded) from the numeric uniqueOrganId ("2223").
+    std::wstring MakeOrganCacheId(const std::wstring& uniqueOrganId)
+    {
+        std::wstring digits;
+        for (wchar_t c : uniqueOrganId)
+            if (c >= L'0' && c <= L'9')
+                digits.push_back(c);
+        if (digits.empty())
+            return {};
+        int value = _wtoi(digits.c_str());
+        wchar_t buf[32] = {};
+        swprintf_s(buf, L"OrganID%06d", value);
+        return buf;
+    }
+
+    std::wstring GetActiveCacheFilePath(const std::wstring& uniqueOrganId)
+    {
+        std::wstring folder = GetOrganCacheFolderPath();
+        std::wstring cacheId = MakeOrganCacheId(uniqueOrganId);
+        if (folder.empty() || cacheId.empty())
+            return {};
+        return folder + L"\\" + cacheId + kCacheSuffix;
+    }
+
+    std::wstring GetPresetCacheFilePath(const std::wstring& uniqueOrganId, int presetNumber)
+    {
+        std::wstring folder = GetOrganCacheFolderPath();
+        std::wstring cacheId = MakeOrganCacheId(uniqueOrganId);
+        if (folder.empty() || cacheId.empty())
+            return {};
+        wchar_t num[16] = {};
+        swprintf_s(num, L"Preset%02d", presetNumber);
+        return folder + L"\\" + cacheId + L"." + num + kCacheSuffix;
+    }
+
+    bool CachePresetFileExists(const std::wstring& path)
+    {
+        if (path.empty())
+            return false;
+        DWORD attrs = GetFileAttributesW(path.c_str());
+        return (attrs != INVALID_FILE_ATTRIBUTES) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    // Scan on-disk preset files for a given organ and return the preset numbers present.
+    std::vector<int> ScanPresetNumbersOnDisk(const std::wstring& uniqueOrganId)
+    {
+        std::vector<int> numbers;
+        std::wstring folder = GetOrganCacheFolderPath();
+        std::wstring cacheId = MakeOrganCacheId(uniqueOrganId);
+        if (folder.empty() || cacheId.empty())
+            return numbers;
+
+        std::wstring pattern = folder + L"\\" + cacheId + L".Preset*" + kCacheSuffix;
+        WIN32_FIND_DATAW fd = {};
+        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+        if (hFind == INVALID_HANDLE_VALUE)
+            return numbers;
+        do
+        {
+            std::wstring name = fd.cFileName;
+            size_t p = name.find(L".Preset");
+            if (p == std::wstring::npos)
+                continue;
+            size_t digitStart = p + 7;
+            std::wstring digits;
+            while (digitStart < name.size() && name[digitStart] >= L'0' && name[digitStart] <= L'9')
+                digits.push_back(name[digitStart++]);
+            if (!digits.empty())
+                numbers.push_back(_wtoi(digits.c_str()));
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+        std::sort(numbers.begin(), numbers.end());
+        return numbers;
+    }
+
+    // ----- Preset metadata (descriptive name + date) persisted in Settings.xml -----
+    // Serialized form inside <HauptwerkCachePresets>:
+    //   <Organ id="2223">
+    //     <p n="1" nam="..." date="..."/>
+    //   </Organ>
+
+    std::wstring CachePresetXmlEscapeAttr(const std::wstring& in)
+    {
+        std::wstring out;
+        for (wchar_t c : in)
+        {
+            switch (c)
+            {
+            case L'&':  out += L"&amp;"; break;
+            case L'<':  out += L"&lt;"; break;
+            case L'>':  out += L"&gt;"; break;
+            case L'"':  out += L"&quot;"; break;
+            default:    out.push_back(c); break;
+            }
+        }
+        return out;
+    }
+
+    std::wstring CachePresetXmlUnescapeAttr(const std::wstring& in)
+    {
+        std::wstring out;
+        size_t i = 0;
+        while (i < in.size())
+        {
+            if (in.compare(i, 5, L"&amp;") == 0) { out.push_back(L'&'); i += 5; }
+            else if (in.compare(i, 4, L"&lt;") == 0) { out.push_back(L'<'); i += 4; }
+            else if (in.compare(i, 4, L"&gt;") == 0) { out.push_back(L'>'); i += 4; }
+            else if (in.compare(i, 6, L"&quot;") == 0) { out.push_back(L'"'); i += 6; }
+            else { out.push_back(in[i]); ++i; }
+        }
+        return out;
+    }
+
+    struct CachePresetMeta { std::wstring name; std::wstring date; };
+
+    // Parse the whole cached section into map<organId, map<number, meta>>.
+    std::map<std::wstring, std::map<int, CachePresetMeta>> ParseAllPresetMeta()
+    {
+        EnsureStreamDeckSettingsLoaded();
+        std::map<std::wstring, std::map<int, CachePresetMeta>> all;
+        const std::wstring& section = s_cachedHauptwerkCachePresets;
+        size_t pos = 0;
+        while (true)
+        {
+            size_t start = section.find(L"<Organ", pos);
+            if (start == std::wstring::npos)
+                break;
+            size_t openEnd = section.find(L'>', start);
+            size_t close = section.find(L"</Organ>", openEnd);
+            if (openEnd == std::wstring::npos || close == std::wstring::npos)
+                break;
+
+            std::wstring openTag = section.substr(start, openEnd - start + 1);
+            std::wstring body = section.substr(openEnd + 1, close - openEnd - 1);
+
+            std::wstring oid;
+            size_t idPos = openTag.find(L"id=\"");
+            if (idPos != std::wstring::npos)
+            {
+                idPos += 4;
+                size_t idEnd = openTag.find(L'"', idPos);
+                if (idEnd != std::wstring::npos)
+                    oid = openTag.substr(idPos, idEnd - idPos);
+            }
+
+            if (!oid.empty())
+            {
+                std::map<int, CachePresetMeta> metaMap;
+                size_t ppos = 0;
+                while (true)
+                {
+                    size_t pstart = body.find(L"<p ", ppos);
+                    if (pstart == std::wstring::npos)
+                        break;
+                    size_t pend = body.find(L"/>", pstart);
+                    if (pend == std::wstring::npos)
+                        break;
+                    std::wstring node = body.substr(pstart, pend - pstart + 2);
+
+                    auto readAttr = [&node](const wchar_t* key) -> std::wstring
+                    {
+                        std::wstring k = key;
+                        size_t kp = node.find(k);
+                        if (kp == std::wstring::npos)
+                            return {};
+                        kp += k.size();
+                        size_t ke = node.find(L'"', kp);
+                        if (ke == std::wstring::npos)
+                            return {};
+                        return node.substr(kp, ke - kp);
+                    };
+
+                    std::wstring nStr = readAttr(L"n=\"");
+                    if (!nStr.empty())
+                    {
+                        int n = _wtoi(nStr.c_str());
+                        CachePresetMeta m;
+                        m.name = CachePresetXmlUnescapeAttr(readAttr(L"nam=\""));
+                        m.date = CachePresetXmlUnescapeAttr(readAttr(L"date=\""));
+                        metaMap[n] = m;
+                    }
+                    ppos = pend + 2;
+                }
+                all[oid] = metaMap;
+            }
+            pos = close + 8;
+        }
+        return all;
+    }
+
+    void SerializeAndPersistPresetMeta(const std::map<std::wstring, std::map<int, CachePresetMeta>>& all)
+    {
+        std::wstring serialized;
+        for (const auto& [oid, metaMap] : all)
+        {
+            std::wstring body;
+            for (const auto& [n, m] : metaMap)
+            {
+                body += L"        <p n=\"" + std::to_wstring(n) + L"\" nam=\"" + CachePresetXmlEscapeAttr(m.name)
+                     + L"\" date=\"" + CachePresetXmlEscapeAttr(m.date) + L"\"/>\r\n";
+            }
+            if (!body.empty())
+                serialized += L"      <Organ id=\"" + oid + L"\">\r\n" + body + L"      </Organ>\r\n";
+        }
+        s_cachedHauptwerkCachePresets = serialized;
+        s_hauptwerkCachePresetsCacheValid = true;
+        RefreshSettingsFile();
+    }
+
+    std::wstring CachePresetTimestampString()
+    {
+        SYSTEMTIME st = {};
+        GetLocalTime(&st);
+        wchar_t buf[32] = {};
+        swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d",
+                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+        return buf;
+    }
+
+    std::wstring NormalizeOrganKey(const std::wstring& uniqueOrganId)
+    {
+        std::wstring digits;
+        for (wchar_t c : uniqueOrganId)
+            if (c >= L'0' && c <= L'9')
+                digits.push_back(c);
+        if (digits.empty())
+            return uniqueOrganId;
+        return std::to_wstring(_wtoi(digits.c_str()));
+    }
+
+    // ----- Bidule profiles associated with cache presets -----
+    // Each cache preset can carry a matching Bidule profile snapshot so that
+    // restoring a preset also restores its audio/routing configuration. The
+    // snapshot files live next to the organ's active Bidule profile and follow
+    // the same slot scheme as the cache files:
+    //   <settings>\BiduleProfiles\OrganIDnnnnnn.PresetNN.bidule
+
+    // Resolves the full path of the organ's currently active Bidule profile.
+    // Returns an empty string when no profile is assigned to the organ.
+    std::wstring ResolveActiveBiduleProfilePath(const std::wstring& uniqueOrganId)
+    {
+        std::wstring key = NormalizeOrganKey(uniqueOrganId);
+        std::vector<InstalledOrganInfo> organs = LoadInstalledOrganInfos();
+        std::wstring profile;
+        for (const auto& o : organs)
+        {
+            if (NormalizeOrganKey(o.uniqueOrganId) == key)
+            {
+                profile = o.biduleProfile;
+                break;
+            }
+        }
+        if (profile.empty())
+            return {};
+
+        bool rooted = (profile.size() > 2 && profile[1] == L':' &&
+                       (profile[2] == L'\\' || profile[2] == L'/'));
+        bool unc = (profile.size() > 1 && profile[0] == L'\\' && profile[1] == L'\\');
+        if (rooted || unc)
+            return profile;
+
+        return GetSettingsDirPath() + L"\\BiduleProfiles\\" + profile;
+    }
+
+    // Builds the per-preset Bidule profile snapshot path for the given slot.
+    std::wstring GetPresetBiduleProfilePath(const std::wstring& uniqueOrganId, int presetNumber)
+    {
+        std::wstring cacheId = MakeOrganCacheId(uniqueOrganId);
+        if (cacheId.empty())
+            return {};
+        wchar_t num[16] = {};
+        swprintf_s(num, L"Preset%02d", presetNumber);
+        return GetSettingsDirPath() + L"\\BiduleProfiles\\" + cacheId + L"." + num + L".bidule";
+    }
+
+    bool BiduleProfileFileExists(const std::wstring& path)
+    {
+        if (path.empty())
+            return false;
+        DWORD attrs = GetFileAttributesW(path.c_str());
+        return (attrs != INVALID_FILE_ATTRIBUTES) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    // Returns the organ's display name (falls back to internal name) for a given id.
+    std::wstring GetOrganDisplayNameById(const std::wstring& uniqueOrganId)
+    {
+        std::wstring key = NormalizeOrganKey(uniqueOrganId);
+        for (const auto& o : LoadInstalledOrganInfos())
+        {
+            if (NormalizeOrganKey(o.uniqueOrganId) == key)
+                return o.displayName.empty() ? o.name : o.displayName;
+        }
+        return {};
+    }
+
+    // Returns the organ's internal name (used to build the profile file name).
+    std::wstring GetOrganInternalNameById(const std::wstring& uniqueOrganId)
+    {
+        std::wstring key = NormalizeOrganKey(uniqueOrganId);
+        for (const auto& o : LoadInstalledOrganInfos())
+        {
+            if (NormalizeOrganKey(o.uniqueOrganId) == key)
+                return o.name.empty() ? o.displayName : o.name;
+        }
+        return {};
+    }
+
+    // True when the path refers to the shared Default template, which must never
+    // be archived or treated as a real per-organ configured profile.
+    bool IsDefaultBiduleProfilePath(const std::wstring& path)
+    {
+        if (path.empty())
+            return false;
+        size_t sep = path.find_last_of(L"\\/");
+        std::wstring name = (sep == std::wstring::npos) ? path : path.substr(sep + 1);
+        return _wcsicmp(name.c_str(), L"Default.bidule") == 0 ||
+               _wcsicmp(name.c_str(), L"DefaultActive.bidule") == 0;
+    }
+
+    std::string BiduleUtf8FromWide(const std::wstring& w)
+    {
+        std::string s;
+        int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (n > 1)
+        {
+            s.resize(n - 1);
+            WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr, nullptr);
+        }
+        return s;
+    }
+
+    bool ReadBiduleProfileBytes(const std::wstring& filePath, std::string& content)
+    {
+        content.clear();
+        HANDLE h = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+            return false;
+        LARGE_INTEGER sz{};
+        bool ok = false;
+        if (GetFileSizeEx(h, &sz) && sz.QuadPart > 0 && sz.QuadPart < (100 * 1024 * 1024))
+        {
+            content.resize(static_cast<size_t>(sz.QuadPart));
+            DWORD read = 0;
+            if (ReadFile(h, &content[0], static_cast<DWORD>(content.size()), &read, nullptr))
+            {
+                content.resize(read);
+                ok = !content.empty();
+            }
+            else
+            {
+                content.clear();
+            }
+        }
+        CloseHandle(h);
+        return ok;
+    }
+
+    bool WriteBiduleProfileBytes(const std::wstring& filePath, const std::string& content)
+    {
+        HANDLE h = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0,
+                               nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+            return false;
+        DWORD written = 0;
+        bool ok = WriteFile(h, content.data(), static_cast<DWORD>(content.size()), &written, nullptr) &&
+                  written == content.size();
+        CloseHandle(h);
+        return ok;
+    }
+
+    // Rewrites the internal comment-box displayName inside a .bidule snapshot so it
+    // reads "<organ name> - PresetNN". Works whether the current label is the plain
+    // organ name or already carries a (possibly different) " - PresetNN" suffix.
+    void SetBiduleProfilePresetLabel(const std::wstring& filePath, const std::wstring& organDisplayName,
+                                     int presetNumber)
+    {
+        if (filePath.empty() || organDisplayName.empty() || presetNumber <= 0)
+            return;
+
+        std::string content;
+        if (!ReadBiduleProfileBytes(filePath, content))
+            return;
+
+        std::string nameUtf8 = BiduleUtf8FromWide(CachePresetXmlEscapeAttr(organDisplayName));
+        wchar_t num[16] = {};
+        swprintf_s(num, L"Preset%02d", presetNumber);
+        std::string suffixUtf8 = BiduleUtf8FromWide(std::wstring(L" - ") + num);
+
+        // Locate the displayName attribute that starts with the organ name.
+        const std::string prefix = "displayName=\"" + nameUtf8;
+        size_t pos = content.find(prefix);
+        if (pos == std::string::npos)
+            return;
+        size_t valueStart = pos + std::string("displayName=\"").size();
+        size_t closeQuote = content.find('"', valueStart);
+        if (closeQuote == std::string::npos)
+            return;
+
+        std::string desired = nameUtf8 + suffixUtf8;
+        std::string current = content.substr(valueStart, closeQuote - valueStart);
+        if (current == desired)
+            return; // already correct
+        content.replace(valueStart, closeQuote - valueStart, desired);
+        WriteBiduleProfileBytes(filePath, content);
+    }
+}
+
+int FindNextFreeCachePresetNumber(const std::wstring& uniqueOrganId)
+{
+    std::vector<int> used = ScanPresetNumbersOnDisk(uniqueOrganId);
+    std::set<int> s(used.begin(), used.end());
+    int n = 1;
+    while (s.count(n))
+        ++n;
+    return n;
+}
+
+std::vector<HauptwerkCachePreset> EnumerateCachePresets(const std::wstring& uniqueOrganId, bool& activeCacheExists)
+{
+    std::vector<HauptwerkCachePreset> result;
+    activeCacheExists = CachePresetFileExists(GetActiveCacheFilePath(uniqueOrganId));
+
+    std::vector<int> numbers = ScanPresetNumbersOnDisk(uniqueOrganId);
+    if (numbers.empty())
+        return result;
+
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+    const std::map<int, CachePresetMeta>* metaMap = nullptr;
+    auto it = all.find(key);
+    if (it != all.end())
+        metaMap = &it->second;
+
+    for (int n : numbers)
+    {
+        HauptwerkCachePreset p;
+        p.number = n;
+        p.filePath = GetPresetCacheFilePath(uniqueOrganId, n);
+        if (metaMap)
+        {
+            auto mi = metaMap->find(n);
+            if (mi != metaMap->end())
+            {
+                p.name = mi->second.name;
+                p.date = mi->second.date;
+            }
+        }
+        result.push_back(p);
+    }
+    return result;
+}
+
+bool SaveActiveCacheAsPreset(const std::wstring& uniqueOrganId, const std::wstring& descriptiveName,
+                             int& outPresetNumber, std::wstring& errorMessage)
+{
+    outPresetNumber = 0;
+    std::wstring activePath = GetActiveCacheFilePath(uniqueOrganId);
+    if (activePath.empty())
+    {
+        errorMessage = L"Cache folder or organ ID could not be resolved.";
+        return false;
+    }
+    if (!CachePresetFileExists(activePath))
+    {
+        errorMessage = L"The active cache file does not exist for this organ.";
+        return false;
+    }
+
+    int number = FindNextFreeCachePresetNumber(uniqueOrganId);
+    std::wstring presetPath = GetPresetCacheFilePath(uniqueOrganId, number);
+    if (presetPath.empty())
+    {
+        errorMessage = L"Could not build the preset file path.";
+        return false;
+    }
+
+    if (!MoveFileW(activePath.c_str(), presetPath.c_str()))
+    {
+        wchar_t buf[128] = {};
+        swprintf_s(buf, L"Rename failed (error %lu). The organ may still be loaded.", GetLastError());
+        errorMessage = buf;
+        return false;
+    }
+
+    // Persist metadata.
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+    CachePresetMeta m;
+    m.name = descriptiveName.empty() ? (L"Preset " + std::to_wstring(number)) : descriptiveName;
+    m.date = CachePresetTimestampString();
+    all[key][number] = m;
+    // The active cache has become a preset; clear its remembered name (slot 0).
+    {
+        auto kit = all.find(key);
+        if (kit != all.end())
+            kit->second.erase(0);
+    }
+    SerializeAndPersistPresetMeta(all);
+
+    // Snapshot the organ's current Bidule profile into the preset so that
+    // restoring this preset later also restores its audio/routing setup.
+    // Copy (not move): the active profile must remain in use for the organ.
+    {
+        std::wstring activeProfile = ResolveActiveBiduleProfilePath(uniqueOrganId);
+        if (BiduleProfileFileExists(activeProfile))
+        {
+            std::wstring presetProfile = GetPresetBiduleProfilePath(uniqueOrganId, number);
+            if (!presetProfile.empty())
+            {
+                if (CopyFileW(activeProfile.c_str(), presetProfile.c_str(), FALSE))
+                    SetBiduleProfilePresetLabel(presetProfile, GetOrganDisplayNameById(uniqueOrganId), number);
+            }
+        }
+    }
+
+    outPresetNumber = number;
+    return true;
+}
+
+bool RollbackPreservedCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage)
+{
+    // Reverse of SaveActiveCacheAsPreset: rename the preset file back to the
+    // active (unsuffixed) cache name. Used when the user cancels the Hauptwerk
+    // "Rank Audio/Memory Options and Routing" dialog, so no overwrite occurred
+    // and the original active cache must be restored.
+    if (presetNumber <= 0)
+    {
+        errorMessage = L"Invalid preset number for rollback.";
+        return false;
+    }
+
+    std::wstring presetPath = GetPresetCacheFilePath(uniqueOrganId, presetNumber);
+    if (presetPath.empty() || !CachePresetFileExists(presetPath))
+    {
+        errorMessage = L"The preserved preset file no longer exists.";
+        return false;
+    }
+
+    std::wstring activePath = GetActiveCacheFilePath(uniqueOrganId);
+    if (activePath.empty())
+    {
+        errorMessage = L"Cache folder or organ ID could not be resolved.";
+        return false;
+    }
+
+    // If Hauptwerk already recreated an active cache, do not overwrite it.
+    if (CachePresetFileExists(activePath))
+    {
+        errorMessage = L"An active cache already exists; rollback skipped.";
+        return false;
+    }
+
+    if (!MoveFileW(presetPath.c_str(), activePath.c_str()))
+    {
+        wchar_t buf[128] = {};
+        swprintf_s(buf, L"Rollback rename failed (error %lu).", GetLastError());
+        errorMessage = buf;
+        return false;
+    }
+
+    // Reverse the Bidule profile snapshot taken during preservation: the snapshot
+    // simply becomes obsolete, so drop it (the organ's active profile was never
+    // changed during preservation, only copied).
+    {
+        std::wstring presetProfile = GetPresetBiduleProfilePath(uniqueOrganId, presetNumber);
+        if (BiduleProfileFileExists(presetProfile))
+            DeleteFileW(presetProfile.c_str());
+    }
+
+    // Restore metadata: move the preset's name back to the active slot (0) and
+    // drop the preset slot that no longer has a file.
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+    auto kit = all.find(key);
+    if (kit != all.end())
+    {
+        auto mi = kit->second.find(presetNumber);
+        if (mi != kit->second.end())
+        {
+            // Only restore a real (user) name, not the auto-generated placeholder.
+            if (!mi->second.name.empty() &&
+                mi->second.name.compare(0, 10, L"Auto-saved") != 0)
+            {
+                CachePresetMeta activeMeta;
+                activeMeta.name = mi->second.name;
+                activeMeta.date = mi->second.date;
+                kit->second[0] = activeMeta;
+            }
+            kit->second.erase(presetNumber);
+        }
+    }
+    SerializeAndPersistPresetMeta(all);
+
+    return true;
+}
+
+bool RestoreCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage)
+{
+    bool ignored = false;
+    return RestoreCachePreset(uniqueOrganId, presetNumber, errorMessage, ignored);
+}
+
+bool RestoreCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage,
+                        bool& outBiduleProfileRestored)
+{
+    outBiduleProfileRestored = false;
+    std::wstring presetPath = GetPresetCacheFilePath(uniqueOrganId, presetNumber);
+    if (presetPath.empty() || !CachePresetFileExists(presetPath))
+    {
+        errorMessage = L"The selected preset file does not exist.";
+        return false;
+    }
+    std::wstring activePath = GetActiveCacheFilePath(uniqueOrganId);
+    if (activePath.empty())
+    {
+        errorMessage = L"Cache folder or organ ID could not be resolved.";
+        return false;
+    }
+
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+
+    // The descriptive name of the preset we are about to promote; it will become
+    // the active cache's name so the name follows the content, not the slot number.
+    std::wstring promotedName;
+    std::wstring promotedDate;
+    {
+        auto kit = all.find(key);
+        if (kit != all.end())
+        {
+            auto mi = kit->second.find(presetNumber);
+            if (mi != kit->second.end())
+            {
+                promotedName = mi->second.name;
+                promotedDate = mi->second.date;
+            }
+        }
+    }
+
+    // Step 1: archive the current active cache (if any) into a new free preset slot so nothing is lost.
+    int archivedActiveNumber = 0;
+    if (CachePresetFileExists(activePath))
+    {
+        int archiveNumber = FindNextFreeCachePresetNumber(uniqueOrganId);
+        std::wstring archivePath = GetPresetCacheFilePath(uniqueOrganId, archiveNumber);
+        if (archivePath.empty() || !MoveFileW(activePath.c_str(), archivePath.c_str()))
+        {
+            wchar_t buf[128] = {};
+            swprintf_s(buf, L"Failed to archive the active cache (error %lu).", GetLastError());
+            errorMessage = buf;
+            return false;
+        }
+        archivedActiveNumber = archiveNumber;
+        // Preserve the active cache's own remembered name (slot 0) if present,
+        // so renaming a loaded preset is not lost when it is later archived.
+        CachePresetMeta m;
+        std::wstring activeName;
+        auto kit = all.find(key);
+        if (kit != all.end())
+        {
+            auto ai = kit->second.find(0);
+            if (ai != kit->second.end() && !ai->second.name.empty())
+                activeName = ai->second.name;
+        }
+        m.name = activeName.empty() ? (L"Auto-archived " + CachePresetTimestampString()) : activeName;
+        m.date = CachePresetTimestampString();
+        all[key][archiveNumber] = m;
+    }
+
+    // Step 2: promote the selected preset to the active (unsuffixed) cache name.
+    if (!MoveFileW(presetPath.c_str(), activePath.c_str()))
+    {
+        wchar_t buf[128] = {};
+        swprintf_s(buf, L"Failed to promote the preset to the active cache (error %lu).", GetLastError());
+        errorMessage = buf;
+        return false;
+    }
+
+    // The promoted preset slot is now gone; drop its metadata, and record its name
+    // as the active cache's name (slot 0) so it follows the content.
+    auto it = all.find(key);
+    if (it != all.end())
+        it->second.erase(presetNumber);
+    if (!promotedName.empty())
+    {
+        CachePresetMeta activeMeta;
+        activeMeta.name = promotedName;
+        activeMeta.date = promotedDate.empty() ? CachePresetTimestampString() : promotedDate;
+        all[key][0] = activeMeta;
+    }
+    else
+    {
+        // No name known; clear any stale active-cache name.
+        auto kit = all.find(key);
+        if (kit != all.end())
+            kit->second.erase(0);
+    }
+    SerializeAndPersistPresetMeta(all);
+
+    // Step 3: swap the Bidule profiles in parallel with the cache files so the
+    // audio/routing configuration follows the restored preset. Each preset is
+    // independent: if the restored preset has no associated profile, we clear the
+    // organ's profile association so the next load behaves like an organ without a
+    // profile (balloon + Default.bidule + rename + save-on-close).
+    {
+        std::wstring activeProfile = ResolveActiveBiduleProfilePath(uniqueOrganId);
+        std::wstring presetProfile = GetPresetBiduleProfilePath(uniqueOrganId, presetNumber);
+        std::wstring organName = GetOrganDisplayNameById(uniqueOrganId);
+
+        // Archive the current active profile alongside the archived active cache,
+        // but never archive the shared Default template (it is not a real profile).
+        if (archivedActiveNumber > 0 && BiduleProfileFileExists(activeProfile) &&
+            !IsDefaultBiduleProfilePath(activeProfile))
+        {
+            std::wstring archiveProfile = GetPresetBiduleProfilePath(uniqueOrganId, archivedActiveNumber);
+            if (!archiveProfile.empty())
+            {
+                if (CopyFileW(activeProfile.c_str(), archiveProfile.c_str(), FALSE))
+                    SetBiduleProfilePresetLabel(archiveProfile, organName, archivedActiveNumber);
+            }
+        }
+
+        if (BiduleProfileFileExists(presetProfile) && !activeProfile.empty())
+        {
+            // The preset has an associated profile: promote it onto the organ's
+            // active profile and strip the "- PresetNN" suffix.
+            if (CopyFileW(presetProfile.c_str(), activeProfile.c_str(), FALSE))
+            {
+                // Keep the "- PresetNN" label on the now-active profile so Bidule
+                // shows which preset is currently loaded.
+                SetBiduleProfilePresetLabel(activeProfile, organName, presetNumber);
+                DeleteFileW(presetProfile.c_str());
+                outBiduleProfileRestored = true;
+            }
+        }
+        else
+        {
+            // No profile associated with this preset. Clear the organ's profile
+            // association so the next organ load uses Default.bidule (with balloon,
+            // internal rename, and save-on-close), exactly like an unconfigured organ.
+            SaveInstalledOrganBiduleProfile(uniqueOrganId, L"");
+            outBiduleProfileRestored = false;
+        }
+    }
+
+    return true;
+}
+
+bool DeleteCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage)
+{
+    std::wstring presetPath = GetPresetCacheFilePath(uniqueOrganId, presetNumber);
+    if (presetPath.empty() || !CachePresetFileExists(presetPath))
+    {
+        errorMessage = L"The selected preset file does not exist.";
+        return false;
+    }
+    if (!DeleteFileW(presetPath.c_str()))
+    {
+        wchar_t buf[128] = {};
+        swprintf_s(buf, L"Failed to delete the preset file (error %lu).", GetLastError());
+        errorMessage = buf;
+        return false;
+    }
+    // Delete the matching Bidule profile snapshot, if any.
+    {
+        std::wstring presetProfile = GetPresetBiduleProfilePath(uniqueOrganId, presetNumber);
+        if (BiduleProfileFileExists(presetProfile))
+            DeleteFileW(presetProfile.c_str());
+    }
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+    auto it = all.find(key);
+    if (it != all.end())
+        it->second.erase(presetNumber);
+    SerializeAndPersistPresetMeta(all);
+    return true;
+}
+
+bool RenameCachePreset(const std::wstring& uniqueOrganId, int presetNumber, const std::wstring& newName)
+{
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+    CachePresetMeta& m = all[key][presetNumber];
+    m.name = newName;
+    if (m.date.empty())
+        m.date = CachePresetTimestampString();
+    SerializeAndPersistPresetMeta(all);
+    return true;
+}
+
+std::wstring GetActiveCacheName(const std::wstring& uniqueOrganId)
+{
+    auto all = ParseAllPresetMeta();
+    std::wstring key = NormalizeOrganKey(uniqueOrganId);
+    auto kit = all.find(key);
+    if (kit != all.end())
+    {
+        auto ai = kit->second.find(0);
+        if (ai != kit->second.end())
+            return ai->second.name;
+    }
+    return {};
 }
 
 bool LoadHauptwerkAppPath(std::wstring& path)

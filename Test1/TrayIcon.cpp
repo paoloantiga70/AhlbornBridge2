@@ -1,5 +1,6 @@
 #include "TrayIcon.h"
 #include "MidiAssignmentWindow.h"
+#include "CachePresetWindow.h"
 #include "Midi.h"
 #include "Xml.h"
 #include "Hauptwerk.h"
@@ -45,6 +46,7 @@ static HWND g_hauptwerkStopListHwnd = nullptr;
 static HWND g_hauptwerkResetStopsButtonHwnd = nullptr;
 static HWND g_bidulePathEditHwnd = nullptr;
 static HWND g_biduleCloseOnUnloadCheckHwnd = nullptr;
+static HWND g_biduleHideHwOnAltiverbUiCheckHwnd = nullptr;
 static HWND g_biduleOscAddressEditHwnd = nullptr;
 static HWND g_biduleOscValueEditHwnd = nullptr;
 static HWND g_biduleOscPortEditHwnd = nullptr;
@@ -73,6 +75,7 @@ constexpr int kSdSendButtonId = 304;
 constexpr int kSdPluginUpdateButtonId = 305;
 constexpr int kSdSwitchesProfileButtonId = 306;
 constexpr int kSdPipeServerCheckId = 307;
+constexpr int kSdOrganLoadedProfileButtonId = 308;
 constexpr int kMainWindowBehaviorComboId = 401;
 constexpr int kMainDebugConsoleComboId = 402;
 constexpr int kActiveSensingCheckId = 403;
@@ -87,10 +90,12 @@ constexpr int kHauptwerkAutoAssignSwitchOutputsCheckId = 505;
 constexpr int kHauptwerkRestoreOrganSwitchStatesCheckId = 508;
 constexpr int kHauptwerkStopListId = 506;
 constexpr int kHauptwerkResetStopsButtonId = 507;
+constexpr int kHauptwerkCachePresetsButtonId = 509;
 constexpr int kBiduleBrowseButtonId = 601;
 constexpr int kBiduleAutoDetectButtonId = 602;
 constexpr int kBiduleCloseOnUnloadCheckId = 603;
 constexpr int kBiduleOscSendButtonId = 604;
+constexpr int kBiduleHideHwOnAltiverbUiCheckId = 605;
 constexpr int kProcessMgrStartButtonId   = 701;
 constexpr int kProcessMgrStopButtonId    = 702;
 constexpr int kProcessMgrUninstallButtonId = 703;
@@ -352,6 +357,14 @@ namespace
             LoadBiduleCloseOnUnload(closeOnUnload);
             SendMessageW(g_biduleCloseOnUnloadCheckHwnd, BM_SETCHECK,
                 closeOnUnload ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        if (g_biduleHideHwOnAltiverbUiCheckHwnd)
+        {
+            bool hideHw = true;
+            LoadBiduleHideHauptwerkOnAltiverbUi(hideHw);
+            SendMessageW(g_biduleHideHwOnAltiverbUiCheckHwnd, BM_SETCHECK,
+                hideHw ? BST_CHECKED : BST_UNCHECKED, 0);
         }
     }
 
@@ -1030,6 +1043,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 332, 76, 160, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdSwitchesProfileButtonId, nullptr, nullptr);
 
+            CreateWindowW(L"BUTTON", L"Create OrganLoaded Profile",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                332, 108, 200, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdOrganLoadedProfileButtonId, nullptr, nullptr);
+
             CreateWindowW(L"BUTTON", L"Plugin Update", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 10, 116, 300, 80, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
 
@@ -1116,6 +1133,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             g_biduleOscStatusTextHwnd = CreateWindowW(L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE,
                 342, 240, 224, 20, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleHideHwOnAltiverbUiCheckHwnd = CreateWindowW(L"BUTTON",
+                L"Hide Hauptwerk window while Altiverb plugin UI is open",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 272, 430, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleHideHwOnAltiverbUiCheckId, nullptr, nullptr);
 
             RefreshBiduleSettingsUI();
         }
@@ -1224,6 +1246,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             g_hauptwerkResetStopsButtonHwnd = CreateWindowW(L"BUTTON", L"Reset stop assignments",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 544, 222, 180, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkResetStopsButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Cache Presets...",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                354, 222, 180, 24, g_settingsHauptwerkPageHwnd, (HMENU)kHauptwerkCachePresetsButtonId, nullptr, nullptr);
 
             g_hauptwerkStopListHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
                 WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -1584,6 +1610,24 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 MessageBoxW(hWnd, L"Failed to create Switches profile.\nCheck that switches are configured in Settings.xml.", L"Stream Deck", MB_OK | MB_ICONERROR);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdOrganLoadedProfileButtonId)
+        {
+            system("taskkill /f /im StreamDeck.exe >nul 2>&1");
+            Sleep(2000);
+
+            bool ok = CreateStreamDeckOrganLoadedProfile();
+
+            Sleep(1000);
+            ShellExecuteW(nullptr, L"open",
+                L"C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe",
+                nullptr, nullptr, SW_HIDE);
+
+            if (ok)
+                MessageBoxW(hWnd, L"OrganLoaded profile created!\nStream Deck has been restarted.", L"Stream Deck", MB_OK | MB_ICONINFORMATION);
+            else
+                MessageBoxW(hWnd, L"Failed to create OrganLoaded profile.", L"Stream Deck", MB_OK | MB_ICONERROR);
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdPluginUpdateButtonId)
         {
             CheckForPluginUpdateInteractive(hWnd);
@@ -1600,6 +1644,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             else
                 StopStreamDeckPipeServer();
 
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkCachePresetsButtonId)
+        {
+            ShowCachePresetWindow((HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE), hWnd);
             return 0;
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHauptwerkSaveAudioAssignmentButtonId)
@@ -1801,6 +1850,15 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 hCheck = g_biduleCloseOnUnloadCheckHwnd;
             bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             SaveBiduleCloseOnUnload(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleHideHwOnAltiverbUiCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = g_biduleHideHwOnAltiverbUiCheckHwnd;
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveBiduleHideHauptwerkOnAltiverbUi(enabled);
             return 0;
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleOscSendButtonId)
@@ -2214,6 +2272,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_hauptwerkResetStopsButtonHwnd = nullptr;
         g_bidulePathEditHwnd = nullptr;
         g_biduleCloseOnUnloadCheckHwnd = nullptr;
+        g_biduleHideHwOnAltiverbUiCheckHwnd = nullptr;
         g_sdPipeServerCheckHwnd = nullptr;
         g_biduleOscAddressEditHwnd = nullptr;
         g_biduleOscValueEditHwnd = nullptr;

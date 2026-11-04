@@ -68,6 +68,21 @@ function Copy-PluginPackage {
     Copy-Item (Join-Path $SourceBase 'manifest.json') $DestinationRoot -Force
     Copy-Item (Join-Path $SourceBase 'property_inspector.html') $DestinationRoot -Force
     Copy-Item (Join-Path $SourceBase 'images') (Join-Path $DestinationRoot 'images') -Recurse -Force
+
+    # Copy the Altiverb IR church thumbnails so the IR Church action can load
+    # them at runtime from <plugin dir>\IR_thumbnails. Stream Deck reinstalls
+    # the plugin from this package, so the images must live here to survive.
+    $irThumbs = Join-Path $SourceBase 'IR_thumbnails'
+    if (Test-Path $irThumbs) {
+        Copy-Item $irThumbs (Join-Path $DestinationRoot 'IR_thumbnails') -Recurse -Force
+    }
+
+    # Copy any bundled .streamDeckProfile packages (e.g. OrganLoaded) so the
+    # switchToProfile API can activate them. These are exported from the Stream
+    # Deck app to guarantee the exact format Stream Deck expects.
+    Get-ChildItem -Path $SourceBase -Filter '*.streamDeckProfile' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item $_.FullName $DestinationRoot -Force
+    }
 }
 
 $versionFile = Join-Path $ProjectDir 'PluginVersion.h'

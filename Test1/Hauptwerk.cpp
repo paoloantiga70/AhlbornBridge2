@@ -19,6 +19,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <winsvc.h>
+#include <cstring>
+#include <cstdint>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -873,6 +875,68 @@ bool SendBiduleOscStringCommand(const std::wstring& address, const std::wstring&
     bool ok = SendBiduleOscSingleStringCommand(addressUtf8.c_str(), value, port);
     if (ok)
         printf("[BiduleOSC] Sent %S %S to 127.0.0.1:%u\n", address.c_str(), value.c_str(), static_cast<unsigned>(port));
+    return ok;
+}
+
+// Sends an OSC message with a single float32 argument (tag ",f"). Bidule knob/slider
+// parameters expect a normalized float value (typically 0.0-1.0).
+bool SendBiduleOscFloatCommand(const std::wstring& address, float value, unsigned short port)
+{
+    if (address.empty())
+        return false;
+
+    int utf8AddrLen = WideCharToMultiByte(CP_UTF8, 0, address.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8AddrLen <= 1)
+        return false;
+
+    std::string addressUtf8(static_cast<size_t>(utf8AddrLen - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, address.c_str(), -1, addressUtf8.data(), utf8AddrLen, nullptr, nullptr);
+
+    auto appendOscString = [](std::vector<char>& buffer, const std::string& text)
+    {
+        buffer.insert(buffer.end(), text.begin(), text.end());
+        buffer.push_back('\0');
+        while (buffer.size() % 4 != 0)
+            buffer.push_back('\0');
+    };
+
+    std::vector<char> packet;
+    appendOscString(packet, addressUtf8);
+    appendOscString(packet, ",f");
+
+    // OSC float32 argument is big-endian (network byte order).
+    uint32_t bits = 0;
+    static_assert(sizeof(float) == sizeof(uint32_t), "float must be 32-bit");
+    std::memcpy(&bits, &value, sizeof(bits));
+    uint32_t be = htonl(bits);
+    const char* p = reinterpret_cast<const char*>(&be);
+    packet.insert(packet.end(), p, p + sizeof(be));
+
+    WSADATA wsa = {};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+        return false;
+
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return false;
+    }
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    int sent = sendto(sock, packet.data(), static_cast<int>(packet.size()), 0,
+        reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+
+    closesocket(sock);
+    WSACleanup();
+
+    bool ok = (sent == static_cast<int>(packet.size()));
+    if (ok)
+        printf("[BiduleOSC] Sent %S %.5f to 127.0.0.1:%u\n", address.c_str(), value, static_cast<unsigned>(port));
     return ok;
 }
 

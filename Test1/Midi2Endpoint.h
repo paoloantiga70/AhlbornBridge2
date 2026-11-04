@@ -32,6 +32,12 @@ bool IsMidi2ServiceInstalled();
 // Returns true if the virtual MIDI 2.0 endpoint was successfully created.
 bool EnableMidi2Endpoint();
 
+// Ensures the "Display Port (A)" / "Display Port (B)" loopback pair exists,
+// creating it if necessary. Safe to call even when the main virtual ports
+// already exist from a previous session (in which case EnableMidi2Endpoint is
+// skipped at startup). Returns true if the pair exists or was created.
+bool EnsureDisplayPortEndpoint();
+
 // Publishes a legacy WinMM short message (packed DWORD) as a 32-bit UMP
 // MIDI 1.0 Channel Voice message on the virtual endpoint.
 // Safe to call from any thread; internally lock-free.
@@ -56,3 +62,9 @@ DWORD GetMidi2EndpointLastMsgTime();
 // been created (e.g. Windows MIDI Services not installed).
 std::wstring GetHauptwerkVirtualBDeviceName();
 
+// Returns the WinMM device name of the "Display Port (B)" loopback side, which
+// the bridge opens as an additional MIDI input to receive the hardware-display
+// SysEx messages Hauptwerk sends to "Display Port (A)" (organ loading status,
+// progress percentage, and ready state).  Returns an empty string if the
+// endpoint has not been created (e.g. Windows MIDI Services not installed).
+std::wstring GetDisplayPortBDeviceName();

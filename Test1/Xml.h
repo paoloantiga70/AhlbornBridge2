@@ -32,6 +32,15 @@ struct AhlbornSwitchInfo
     bool momentary = false;
 };
 
+// A single saved Hauptwerk cache preset (a renamed cache file plus metadata).
+struct HauptwerkCachePreset
+{
+    int number = 0;            // preset number (1..N)
+    std::wstring name;         // descriptive name
+    std::wstring date;         // creation timestamp "YYYY-MM-DD HH:MM"
+    std::wstring filePath;     // full path to the preset cache file on disk
+};
+
 // ---------- Dynamic multi-device assignment (new API) ----------
 // Load/save ordered lists of assigned device names for inputs and outputs.
 std::vector<std::wstring> LoadAssignedMidiInputNames();
@@ -86,11 +95,38 @@ bool SaveBidulePath(const std::wstring& path);
 bool LoadBidulePath(std::wstring& path);
 bool SaveBiduleCloseOnUnload(bool enabled);
 bool LoadBiduleCloseOnUnload(bool& enabled);
+bool SaveBiduleHideHauptwerkOnAltiverbUi(bool enabled);
+bool LoadBiduleHideHauptwerkOnAltiverbUi(bool& enabled);
 bool SaveActiveSensingEnabled(bool enabled);
 bool LoadActiveSensingEnabled(bool& enabled);
 bool SaveActiveSensingOutputName(const std::wstring& name);
 bool LoadActiveSensingOutputName(std::wstring& name);
 void RefreshSettingsFile();
+
+// ---------- Hauptwerk cache presets ----------
+// Cache files are several GB, so these operations only rename/move files, never copy.
+// All operations require the organ to be unloaded (Hauptwerk must not hold the cache file).
+int FindNextFreeCachePresetNumber(const std::wstring& uniqueOrganId);
+std::vector<HauptwerkCachePreset> EnumerateCachePresets(const std::wstring& uniqueOrganId, bool& activeCacheExists);
+bool SaveActiveCacheAsPreset(const std::wstring& uniqueOrganId, const std::wstring& descriptiveName,
+                             int& outPresetNumber, std::wstring& errorMessage);
+bool RestoreCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage);
+// Overload that also reports whether the restored preset had a matching Bidule
+// profile snapshot. When false, the caller should warn the user that the audio/
+// routing profile was left unchanged.
+bool RestoreCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage,
+                        bool& outBiduleProfileRestored);
+// Reverses SaveActiveCacheAsPreset: renames a preserved preset back to the active
+// cache. Used to roll back when the user cancels the Hauptwerk rank-options dialog.
+bool RollbackPreservedCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage);
+bool DeleteCachePreset(const std::wstring& uniqueOrganId, int presetNumber, std::wstring& errorMessage);
+bool RenameCachePreset(const std::wstring& uniqueOrganId, int presetNumber, const std::wstring& newName);
+// Returns the remembered descriptive name of the active cache (empty if none).
+std::wstring GetActiveCacheName(const std::wstring& uniqueOrganId);
+// Returns the (configurable) title of the Hauptwerk "Rank Audio/Memory Options
+// and Routing" dialog. Default is the English title; override via
+// Options/RankOptionsDialogTitle in Settings.xml for localized Hauptwerk.
+std::wstring GetRankOptionsDialogTitle();
 
 // Force a re-read of the standby organ names from the Hauptwerk config.
 // Call this when Hauptwerk is launched or detected running so the cache

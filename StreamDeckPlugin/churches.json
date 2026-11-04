@@ -1,0 +1,186 @@
+[
+    {
+        "id":  1,
+        "name":  "CHAPEL (Castle de Haar)",
+        "front":  "8.0737889999999996E-3",
+        "side":  "1.4378899000000001E-2",
+        "rear":  "1.4378899000000001E-2",
+        "thumbnail":  "CHAPEL (Castle de Haar).png"
+    },
+    {
+        "id":  2,
+        "name":  "CHAPEL (conservatory Ultrecht)",
+        "front":  "1.0819205E-2",
+        "side":  "1.0819205E-2",
+        "rear":  "1.0819205E-2",
+        "thumbnail":  "CHAPEL (conservatory Ultrecht).png"
+    },
+    {
+        "id":  3,
+        "name":  "CHAPEL Trakai (castle)",
+        "front":  "9.9700259999999999E-3",
+        "side":  "1.0114527E-2",
+        "rear":  "9.819688E-3",
+        "thumbnail":  "CHAPEL Trakai (castle).png"
+    },
+    {
+        "id":  4,
+        "name":  "DOME CHAPEL (Renswoude)",
+        "front":  "1.2168329E-2",
+        "side":  "1.2253276E-2",
+        "rear":  "1.2253276E-2",
+        "thumbnail":  "DOME CHAPEL (Renswoude).png"
+    },
+    {
+        "id":  5,
+        "name":  "FRYKERUDS (Kyrka)",
+        "front":  "9.4762739999999998E-3",
+        "side":  "1.3333121999999999E-2",
+        "rear":  "1.3333121999999999E-2",
+        "thumbnail":  "FRYKERUDS (Kyrka).png"
+    },
+    {
+        "id":  6,
+        "name":  "GOL STAVE (wooden chapel)",
+        "front":  "1.2939572999999999E-2",
+        "side":  "1.2226468000000001E-2",
+        "rear":  "1.2226468000000001E-2",
+        "thumbnail":  "GOL STAVE (wooden chapel).png"
+    },
+    {
+        "id":  7,
+        "name":  "GRYTHYTTANS (wooden church)",
+        "front":  "1.0677127999999999E-2",
+        "side":  "0.0092250705",
+        "rear":  "0.0092250705",
+        "thumbnail":  "GRYTHYTTANS (wooden church).png"
+    },
+    {
+        "id":  8,
+        "name":  "HALLGRIMSKIRKJA (Reykjavik)",
+        "front":  "0.010282084",
+        "side":  "0.00915303",
+        "rear":  "0.00915303",
+        "thumbnail":  "HALLGRIMSKIRKJA (Reykjavik).png"
+    },
+    {
+        "id":  9,
+        "name":  "KING\u0027S COLLEGE CHAPEL (Cambridge, UK)",
+        "front":  "0.012397959",
+        "side":  "0.009593568",
+        "rear":  "0.007843017",
+        "thumbnail":  "KING\u0027S COLLEGE CHAPEL (Cambridge, UK).png"
+    },
+    {
+        "id":  10,
+        "name":  "MARGERETA (Kirkan, Oslo)",
+        "front":  "0.013659579",
+        "side":  "0.013659579",
+        "rear":  "0.013659579",
+        "thumbnail":  "MARGERETA (Kirkan, Oslo).png"
+    },
+    {
+        "id":  11,
+        "name":  "NOTRE DAME (Chartres)",
+        "front":  "0.007959305",
+        "side":  "0.015572236",
+        "rear":  "0.015572236",
+        "thumbnail":  "NOTRE DAME (Chartres).png"
+    },
+    {
+        "id":  12,
+        "name":  "PALACE CHAPEL (Schloss Esterhazy)",
+        "front":  "0.012607955",
+        "side":  "0.013846628",
+        "rear":  "0.013846628",
+        "thumbnail":  "PALACE CHAPEL (Schloss Esterhazy).png"
+    },
+    {
+        "id":  13,
+        "name":  "SAINT ALAIN (de Lavaur)",
+        "front":  "0.010716579",
+        "side":  "0.009142352",
+        "rear":  "0.015212145",
+        "thumbnail":  "SAINT ALAIN (de Lavaur).png"
+    },
+    {
+        "id":  14,
+        "name":  "SAINT ETIENNE (Caen)",
+        "front":  "0.015610188",
+        "side":  "0.012541146",
+        "rear":  "0.012541146",
+        "thumbnail":  "SAINT ETIENNE (Caen).png"
+    },
+    {
+        "id":  15,
+        "name":  "SAINT JOSEPH (Ultrecht)",
+        "front":  "0.009276146",
+        "side":  "0.009322307",
+        "rear":  "0.009281805",
+        "thumbnail":  "SAINT JOSEPH (Ultrecht).png"
+    },
+    {
+        "id":  16,
+        "name":  "SAINT OUEN (Rouen)",
+        "front":  "0.010766133",
+        "side":  "0.012777781",
+        "rear":  "0.012777781",
+        "thumbnail":  "SAINT OUEN (Rouen).png"
+    },
+    {
+        "id":  17,
+        "name":  "SAN MIGUEL (Iglesia, Cuenca)",
+        "front":  "0.010607292",
+        "side":  "0.015250732",
+        "rear":  "0.015250732",
+        "thumbnail":  "SAN MIGUEL (Iglesia, Cuenca).png"
+    },
+    {
+        "id":  18,
+        "name":  "SELIMIYE MOSQUE (Edirne, Turkey)",
+        "front":  "0.008675051",
+        "side":  "0.00931224",
+        "rear":  "0.00931224",
+        "thumbnail":  "SELIMIYE MOSQUE (Edirne, Turkey).png"
+    },
+    {
+        "id":  19,
+        "name":  "SINGELKERK (Amsterdam)",
+        "front":  "0.008347919",
+        "side":  "0.008347919",
+        "rear":  "0.008347919",
+        "thumbnail":  "SINGELKERK (Amsterdam).png"
+    },
+    {
+        "id":  20,
+        "name":  "ST J BAPTISTE (Chapel)",
+        "front":  "0.010237855",
+        "side":  "0.013554298",
+        "rear":  "0.009421161",
+        "thumbnail":  "ST J BAPTISTE (Chapel).png"
+    },
+    {
+        "id":  21,
+        "name":  "ST MARY\u0027S CHURCH (Coddenham, England)",
+        "front":  "0.013244056",
+        "side":  "0.013244056",
+        "rear":  "0.013244056",
+        "thumbnail":  "ST MARY\u0027S CHURCH (Coddenham, England).png"
+    },
+    {
+        "id":  22,
+        "name":  "URANIENBORG (Oslo)",
+        "front":  "0.013888575",
+        "side":  "0.014133811",
+        "rear":  "0.014133811",
+        "thumbnail":  "URANIENBORG (Oslo).png"
+    },
+    {
+        "id":  23,
+        "name":  "WOODEN CHURCH (Zuidervvermaning)",
+        "front":  "0.010290464",
+        "side":  "0.008204945",
+        "rear":  "0.008204945",
+        "thumbnail":  "WOODEN CHURCH (Zuidervvermaning).png"
+    }
+]

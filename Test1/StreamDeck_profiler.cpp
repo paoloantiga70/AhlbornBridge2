@@ -80,17 +80,20 @@ int DeviceTypeFromModel(const std::string& model)
 {
     std::string lower = model;
     for (auto& c : lower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    if (lower.find("mini") != std::string::npos) return 3;
-    if (lower.find("xl") != std::string::npos) return 4;
+    // Stream Deck SDK device types: 0=Standard, 1=Mini, 2=XL, 3=Mobile.
+    if (lower.find("mini") != std::string::npos) return 1;
+    if (lower.find("xl") != std::string::npos) return 2;
+    // Stream Deck Mobile reports its model as "VSD2/WiFi".
+    if (lower.find("vsd") != std::string::npos || lower.find("mobile") != std::string::npos) return 3;
     return 0;
 }
 
 // Returns the number of keys per page for the given device type
 int GetKeysPerPage(int deviceType)
 {
-    if (deviceType == 3) return 6;   // Mini 2x3
-    if (deviceType == 4) return 32;  // XL 4x8
-    return 15;                        // Standard 3x5
+    if (deviceType == 1) return 6;   // Mini 2x3
+    if (deviceType == 2) return 32;  // XL 4x8
+    return 15;                        // Standard / Mobile 3x5
 }
 
 // MIDI action settings for the "se.trevligaspel.midi" plugin
@@ -311,6 +314,13 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
         actionDisplayName = "Console Power";
         pluginVersion = GetInstalledPluginVersion(pluginUUID);
     }
+    else if (action.actionUUID == "com.ahlbornbridge.dsp")
+    {
+        pluginUUID = "com.ahlbornbridge.organ";
+        pluginName = "AhlbornBridge";
+        actionDisplayName = "DSP Command";
+        pluginVersion = GetInstalledPluginVersion(pluginUUID);
+    }
     else
     {
         pluginName = action.actionUUID;
@@ -352,6 +362,21 @@ std::string BuildActionJson(const KeyAction& action, const std::string& imageRef
     else if (action.actionUUID == "com.ahlbornbridge.activesensing")
     {
         settings = "{}";
+    }
+    else if (action.actionUUID == "com.ahlbornbridge.dsp")
+    {
+        auto escapeJson = [](const std::string& in) {
+            std::string out;
+            for (char c : in)
+            {
+                if (c == '"') out += "\\\"";
+                else if (c == '\\') out += "\\\\";
+                else out += c;
+            }
+            return out;
+        };
+        settings = "{\"oscAddress\":\"" + escapeJson(action.oscAddress)
+            + "\",\"oscValue\":\"" + escapeJson(action.oscValue) + "\"}";
     }
     else
         settings = "{}";
@@ -564,6 +589,109 @@ std::wstring FindExistingProfile(const std::wstring& rootPath, const std::string
     return {};
 }
 
+// Writes the page folders (with images + page manifests) and the top-level
+// device profile manifest into the given .sdProfile folder. Shared by the
+// ProfilesV3 generator and the plugin-packaged .streamDeckProfile generator.
+bool WriteProfileContents(const std::wstring& profileFolder,
+    const std::wstring& profilesDir,
+    const std::string& profileName,
+    const DeviceInfo& device,
+    int deviceType,
+    const std::map<int, KeyAction>& keys,
+    const std::string& firstPageGuidReuse)
+{
+    int keysPerPage = GetKeysPerPage(deviceType);
+    int maxKeyIdx = keys.empty() ? 0 : (keys.rbegin()->first + 1);
+    int numPages = (maxKeyIdx > 0) ? ((maxKeyIdx + keysPerPage - 1) / keysPerPage) : 1;
+    if (numPages < 1) numPages = 1;
+
+    // Generate GUIDs for all pages
+    std::vector<std::string> pageGuidsUpper(numPages);
+    std::vector<std::string> pageGuidsLower(numPages);
+    for (int p = 0; p < numPages; ++p)
+    {
+        if (p == 0 && !firstPageGuidReuse.empty())
+        {
+            pageGuidsLower[p] = GuidToLower(firstPageGuidReuse);
+            pageGuidsUpper[p] = firstPageGuidReuse;
+            for (auto& c : pageGuidsUpper[p]) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+        }
+        else
+        {
+            pageGuidsUpper[p] = GenerateGuid();
+            pageGuidsLower[p] = GuidToLower(pageGuidsUpper[p]);
+        }
+    }
+
+    // Create each page folder, copy images, write page manifest
+    for (int p = 0; p < numPages; ++p)
+    {
+        std::wstring pageFolder = profilesDir + L"\\"
+            + std::wstring(pageGuidsUpper[p].begin(), pageGuidsUpper[p].end());
+
+        std::error_code ec;
+        fs::create_directories(pageFolder + L"\\Images", ec);
+        if (ec)
+        {
+            std::cerr << "Failed to create page " << (p + 1) << " directories: " << ec.message() << "\n";
+            return false;
+        }
+
+        int startIdx = p * keysPerPage;
+        std::map<int, KeyAction> pageKeys;
+        std::map<int, std::string> pageImageRefs, pageImageRefsOn;
+
+        auto copyImage = [&](const std::string& srcPath) -> std::string
+            {
+                if (srcPath.empty()) return {};
+                std::string rawGuid = GenerateGuid();
+                std::string filename;
+                for (char c : rawGuid)
+                    if (c != '-') filename += c;
+                filename += ".png";
+                std::wstring src(srcPath.begin(), srcPath.end());
+                std::wstring dst = pageFolder + L"\\Images\\" + std::wstring(filename.begin(), filename.end());
+                std::error_code copyEc;
+                fs::copy_file(src, dst, fs::copy_options::overwrite_existing, copyEc);
+                if (copyEc) std::cerr << "  copy_file error: " << copyEc.message() << " (" << srcPath << ")\n";
+                return copyEc ? std::string{} : "Images/" + filename;
+            };
+
+        for (const auto& [idx, keyAction] : keys)
+        {
+            if (idx < startIdx || idx >= startIdx + keysPerPage) continue;
+            int localIdx = idx - startIdx;
+            pageKeys[localIdx] = keyAction;
+
+            std::string ref = copyImage(keyAction.imagePath);
+            if (!ref.empty()) pageImageRefs[localIdx] = ref;
+            else if (!keyAction.imagePath.empty())
+                std::cerr << "Warning: could not copy image for key " << idx << "\n";
+
+            std::string refOn = copyImage(keyAction.imagePathOn);
+            if (!refOn.empty()) pageImageRefsOn[localIdx] = refOn;
+            else if (!keyAction.imagePathOn.empty())
+                std::cerr << "Warning: could not copy imageOn for key " << idx << "\n";
+        }
+
+        std::string pageName = "Page " + std::to_string(p + 1);
+        {
+            std::ofstream f(pageFolder + L"\\manifest.json");
+            if (!f.is_open()) { std::cerr << "Failed to create page manifest.json for " << pageName << "\n"; return false; }
+            f << BuildPageManifest(pageName, deviceType, pageKeys, pageImageRefs, pageImageRefsOn);
+        }
+    }
+
+    // Write device profile manifest (always rewrite — page count may have changed)
+    {
+        std::ofstream f(profileFolder + L"\\manifest.json");
+        if (!f.is_open()) { std::cerr << "Failed to create device manifest.json\n"; return false; }
+        f << BuildDeviceManifest(profileName, device, pageGuidsLower);
+    }
+
+    return true;
+}
+
 bool CreateStreamDeckProfile(const std::string& profileName, int deviceType,
     const std::map<int, KeyAction>& keys)
 {
@@ -644,92 +772,8 @@ bool CreateStreamDeckProfile(const std::string& profileName, int deviceType,
         std::cout << "Creating new profile.\n";
     }
 
-    // Generate GUIDs for all pages
-    std::vector<std::string> pageGuidsUpper(numPages);
-    std::vector<std::string> pageGuidsLower(numPages);
-    for (int p = 0; p < numPages; ++p)
-    {
-        if (p == 0 && !firstPageGuidReuse.empty())
-        {
-            // Reuse the existing first-page GUID when updating
-            pageGuidsLower[p] = GuidToLower(firstPageGuidReuse);
-            pageGuidsUpper[p] = firstPageGuidReuse;
-            for (auto& c : pageGuidsUpper[p]) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-        }
-        else
-        {
-            pageGuidsUpper[p] = GenerateGuid();
-            pageGuidsLower[p] = GuidToLower(pageGuidsUpper[p]);
-        }
-    }
-
-    // Create each page folder, copy images, write page manifest
-    for (int p = 0; p < numPages; ++p)
-    {
-        std::wstring pageFolder = profilesDir + L"\\"
-            + std::wstring(pageGuidsUpper[p].begin(), pageGuidsUpper[p].end());
-
-        std::error_code ec;
-        fs::create_directories(pageFolder + L"\\Images", ec);
-        if (ec)
-        {
-            std::cerr << "Failed to create page " << (p + 1) << " directories: " << ec.message() << "\n";
-            return false;
-        }
-
-        // Determine which keys belong to this page and re-index to 0..keysPerPage-1
-        int startIdx = p * keysPerPage;
-        std::map<int, KeyAction> pageKeys;
-        std::map<int, std::string> pageImageRefs, pageImageRefsOn;
-
-        auto copyImage = [&](const std::string& srcPath) -> std::string
-            {
-                if (srcPath.empty()) return {};
-                std::string rawGuid = GenerateGuid();
-                std::string filename;
-                for (char c : rawGuid)
-                    if (c != '-') filename += c;
-                filename += ".png";
-                std::wstring src(srcPath.begin(), srcPath.end());
-                std::wstring dst = pageFolder + L"\\Images\\" + std::wstring(filename.begin(), filename.end());
-                std::error_code copyEc;
-                fs::copy_file(src, dst, fs::copy_options::overwrite_existing, copyEc);
-                if (copyEc) std::cerr << "  copy_file error: " << copyEc.message() << " (" << srcPath << ")\n";
-                return copyEc ? std::string{} : "Images/" + filename;
-            };
-
-        for (const auto& [idx, keyAction] : keys)
-        {
-            if (idx < startIdx || idx >= startIdx + keysPerPage) continue;
-            int localIdx = idx - startIdx;
-            pageKeys[localIdx] = keyAction;
-
-            std::string ref = copyImage(keyAction.imagePath);
-            if (!ref.empty()) pageImageRefs[localIdx] = ref;
-            else if (!keyAction.imagePath.empty())
-                std::cerr << "Warning: could not copy image for key " << idx << "\n";
-
-            std::string refOn = copyImage(keyAction.imagePathOn);
-            if (!refOn.empty()) pageImageRefsOn[localIdx] = refOn;
-            else if (!keyAction.imagePathOn.empty())
-                std::cerr << "Warning: could not copy imageOn for key " << idx << "\n";
-        }
-
-        // Write page manifest
-        std::string pageName = "Page " + std::to_string(p + 1);
-        {
-            std::ofstream f(pageFolder + L"\\manifest.json");
-            if (!f.is_open()) { std::cerr << "Failed to create page manifest.json for " << pageName << "\n"; return false; }
-            f << BuildPageManifest(pageName, deviceType, pageKeys, pageImageRefs, pageImageRefsOn);
-        }
-    }
-
-    // Write device profile manifest (always rewrite — page count may have changed)
-    {
-        std::ofstream f(profileFolder + L"\\manifest.json");
-        if (!f.is_open()) { std::cerr << "Failed to create device manifest.json\n"; return false; }
-        f << BuildDeviceManifest(profileName, device, pageGuidsLower);
-    }
+    if (!WriteProfileContents(profileFolder, profilesDir, profileName, device, deviceType, keys, firstPageGuidReuse))
+        return false;
 
     std::wcout << L"Profile \"" << std::wstring(profileName.begin(), profileName.end())
         << (updating ? L"\" updated at:\n  " : L"\" created at:\n  ")
@@ -835,6 +879,202 @@ bool CreateStreamDeckSwitchesProfile()
 
     return CreateStreamDeckProfile("AhlbornBridge Switches", -1, keys);
 }
+
+// Zips the CONTENTS of 'srcDir' (its files/subfolders at the archive root, not
+// srcDir itself) into 'zipPath' using PowerShell's Compress-Archive, which is
+// far more reliable than the async Shell "Compressed Folder" automation.
+static bool ZipFolderContents(const std::wstring& srcDir, const std::wstring& zipPath)
+{
+    std::error_code ec;
+    fs::remove(zipPath, ec);
+
+    // Build the ZIP manually so that entry paths use forward slashes. .NET's
+    // CreateFromDirectory writes backslash separators on Windows, which Stream
+    // Deck (and the ZIP spec) do not accept for nested folders, so the profile
+    // would not be recognized. We open a ZipArchive and add each file with a
+    // normalized relative name. The script is written to a temp .ps1 file to
+    // avoid command-line escaping issues.
+    wchar_t appData[MAX_PATH] = {};
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData);
+    std::wstring scriptPath = std::wstring(appData) + L"\\AhlbornBridge2\\_zipprofile.ps1";
+
+    {
+        std::wofstream s(scriptPath);
+        if (!s.is_open())
+        {
+            std::cerr << "ZipFolderContents: cannot write temp script.\n";
+            return false;
+        }
+        s << L"$ErrorActionPreference='Stop'\n";
+        s << L"Add-Type -AssemblyName System.IO.Compression\n";
+        s << L"Add-Type -AssemblyName System.IO.Compression.FileSystem\n";
+        s << L"$src='" << srcDir << L"'\n";
+        s << L"$zip='" << zipPath << L"'\n";
+        s << L"if (Test-Path $zip) { Remove-Item $zip -Force }\n";
+        s << L"$fs=[System.IO.File]::Open($zip,'Create')\n";
+        s << L"$archive=New-Object System.IO.Compression.ZipArchive($fs,'Create')\n";
+        s << L"Get-ChildItem -Path $src -Recurse -File | ForEach-Object {\n";
+        s << L"  $rel=$_.FullName.Substring($src.Length).TrimStart('\\').Replace('\\','/')\n";
+        s << L"  $entry=$archive.CreateEntry($rel)\n";
+        s << L"  $es=$entry.Open()\n";
+        s << L"  $bytes=[System.IO.File]::ReadAllBytes($_.FullName)\n";
+        s << L"  $es.Write($bytes,0,$bytes.Length)\n";
+        s << L"  $es.Close()\n";
+        s << L"}\n";
+        s << L"$archive.Dispose()\n";
+        s << L"$fs.Close()\n";
+    }
+
+    std::wstring cmd =
+        L"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \""
+        + scriptPath + L"\"";
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+
+    if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+    {
+        std::cerr << "ZipFolderContents: failed to launch PowerShell.\n";
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, 60000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    fs::remove(scriptPath, ec);
+
+    if (exitCode != 0)
+    {
+        std::cerr << "ZipFolderContents: zip script exited with code " << exitCode << "\n";
+        return false;
+    }
+
+    // Verify the archive exists and is non-trivial.
+    return fs::exists(zipPath, ec) && fs::file_size(zipPath, ec) > 100;
+}
+
+// Builds the profile structure into a temp folder and packages it as a
+// plugin-bundled <profileName>.streamDeckProfile inside the installed plugin
+// folder. This is the ONLY profile format the switchToProfile API can activate.
+bool CreateStreamDeckPluginProfile(const std::string& profileName,
+    const std::map<int, KeyAction>& keys)
+{
+    CoInitialize(nullptr);
+
+    std::wstring rootPath = GetProfilesRootPath();
+    if (rootPath.empty())
+    {
+        std::cerr << "CreateStreamDeckPluginProfile: cannot find AppData path.\n";
+        return false;
+    }
+
+    // Device info is still required so the bundled profile's manifest carries a
+    // valid Model/UUID; switchToProfile matches by profile Name + DeviceType.
+    DeviceInfo device = FindFirstDevice(rootPath);
+    if (device.model.empty())
+    {
+        std::cerr << "CreateStreamDeckPluginProfile: no Stream Deck device found.\n";
+        return false;
+    }
+    int deviceType = DeviceTypeFromModel(device.model);
+
+    wchar_t appData[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+        return false;
+
+    const std::wstring pluginDir = std::wstring(appData)
+        + L"\\Elgato\\StreamDeck\\Plugins\\com.ahlbornbridge.organ.sdPlugin";
+    if (!fs::exists(pluginDir))
+    {
+        std::wcerr << L"CreateStreamDeckPluginProfile: plugin folder not found: " << pluginDir << L"\n";
+        return false;
+    }
+
+    // Build the profile into a temp staging folder: <temp>\<GUID>.sdProfile
+    std::string stageGuid = GenerateGuid();
+    std::wstring tempBase = std::wstring(appData) + L"\\AhlbornBridge2\\_sdprofile_stage";
+    std::error_code ec;
+    fs::remove_all(tempBase, ec);
+    std::wstring sdProfileFolder = tempBase + L"\\"
+        + std::wstring(stageGuid.begin(), stageGuid.end()) + L".sdProfile";
+    std::wstring profilesDir = sdProfileFolder + L"\\Profiles";
+    fs::create_directories(profilesDir, ec);
+    if (ec)
+    {
+        std::wcerr << L"CreateStreamDeckPluginProfile: cannot create staging dir.\n";
+        return false;
+    }
+
+    if (!WriteProfileContents(sdProfileFolder, profilesDir, profileName, device, deviceType, keys, ""))
+    {
+        std::cerr << "CreateStreamDeckPluginProfile: failed to write profile contents.\n";
+        return false;
+    }
+
+    // Package the .sdProfile contents into <profileName>.streamDeckProfile (a ZIP)
+    // placed directly inside the installed plugin folder.
+    std::wstring wProfileName(profileName.begin(), profileName.end());
+    std::wstring packagePath = pluginDir + L"\\" + wProfileName + L".streamDeckProfile";
+    fs::remove(packagePath, ec);
+
+    if (!ZipFolderContents(sdProfileFolder, packagePath))
+    {
+        std::cerr << "CreateStreamDeckPluginProfile: failed to zip profile package.\n";
+        return false;
+    }
+
+    fs::remove_all(tempBase, ec);
+
+    std::wcout << L"Plugin profile package created at:\n  " << packagePath << L"\n";
+    return true;
+}
+
+// Installs the "OrganLoaded" profile by copying the profile package that was
+// exported from the Stream Deck app and bundled with the plugin. Dynamically
+// generated packages are NOT accepted by Stream Deck (the real export format has
+// an outer package.json + nested Profiles/<GUID>.sdProfile layout and a
+// Controllers/Actions page format), so we ship the known-good exported file and
+// just copy it into the installed plugin folder.
+bool CreateStreamDeckOrganLoadedProfile()
+{
+    wchar_t appData[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+        return false;
+
+    const std::wstring pluginDir = std::wstring(appData)
+        + L"\\Elgato\\StreamDeck\\Plugins\\com.ahlbornbridge.organ.sdPlugin";
+    if (!fs::exists(pluginDir))
+    {
+        std::wcerr << L"CreateStreamDeckOrganLoadedProfile: plugin folder not found: " << pluginDir << L"\n";
+        return false;
+    }
+
+    const std::wstring dst = pluginDir + L"\\OrganLoaded.streamDeckProfile";
+
+    // The bundled source already lives in the installed plugin folder (deployed
+    // by deploy-sd-plugin.ps1). If it is present, the profile is already
+    // installed and there is nothing more to do.
+    std::error_code ec;
+    if (fs::exists(dst, ec) && fs::file_size(dst, ec) > 100)
+    {
+        std::wcout << L"OrganLoaded profile already installed at:\n  " << dst << L"\n";
+        return true;
+    }
+
+    std::wcerr << L"CreateStreamDeckOrganLoadedProfile: bundled OrganLoaded.streamDeckProfile "
+                  L"not found in plugin folder. Re-deploy the plugin to install it.\n";
+    return false;
+}
+
 
 /*
 int main()

@@ -59,6 +59,34 @@
             "SupportedInMultiActions": false,
             "Tooltip": "Toggle Active Sensing sender (console power simulation)",
             "UUID": "com.ahlbornbridge.activesensing"
+        },
+        {
+            "Icon": "images/organ-off",
+            "Name": "DSP Command",
+            "States": [
+                {
+                    "Image": "images/organ-off",
+                    "TitleAlignment": "middle",
+                    "FontSize": "11"
+                }
+            ],
+            "SupportedInMultiActions": false,
+            "Tooltip": "Send an OSC command to Bidule (DSP control)",
+            "UUID": "com.ahlbornbridge.dsp"
+        },
+        {
+            "Icon": "images/organ-off",
+            "Name": "IR Church",
+            "States": [
+                {
+                    "Image": "images/organ-off",
+                    "TitleAlignment": "bottom",
+                    "FontSize": "9"
+                }
+            ],
+            "SupportedInMultiActions": false,
+            "Tooltip": "Select an Altiverb IR (church) by sending FRONT/SIDE/REAR OSC to Bidule",
+            "UUID": "com.ahlbornbridge.ir"
         }
     ],
     "Author": "Paolo Antiga",
@@ -68,6 +96,12 @@
     "Description": "Control Hauptwerk organs via AhlbornBridge",
     "Icon": "images/plugin-icon",
     "Name": "AhlbornBridge",
+    "Profiles": [
+        {
+            "Name": "OrganLoaded",
+            "DeviceType": 3
+        }
+    ],
     "OS": [
         {
             "MinimumVersion": "10",
@@ -79,5 +113,5 @@
         "MinimumVersion": "6.0"
     },
     "UUID": "com.ahlbornbridge.organ",
-    "Version": "1.0.299"
+    "Version": "1.0.411"
 }

@@ -32,6 +32,9 @@ static std::atomic<DWORD> g_lastForwardedTick{ 0 };
 // Known constant name for the Hauptwerk monitoring port.
 static constexpr wchar_t kHwVirtualBNameConst[] = L"Hauptwerk Virtual (B)";
 
+// Known constant name for the Hauptwerk hardware-display SysEx monitoring port.
+static constexpr wchar_t kDisplayPortBNameConst[] = L"Display Port (B)";
+
 namespace
 {
 	std::atomic<bool> g_enabled{ false };
@@ -44,11 +47,18 @@ namespace
 	std::wstring g_pairBAssocId;
 	std::wstring g_hwVirtualBName;
 
+	// Pair C: Display Port (Hauptwerk hardware-display SysEx -> Bridge monitoring)
+	std::wstring g_pairCAssocId;
+	std::wstring g_displayPortBName;
+
 	constexpr wchar_t kEndpointNameA[] = L"AhlbornBridge Virtual Port";
 	constexpr wchar_t kEndpointNameB[] = L"AhlbornBridge Virtual Port (B)";
 
 	constexpr wchar_t kHwVirtualAName[] = L"Hauptwerk Virtual (A)";
 	constexpr wchar_t kHwVirtualBName[] = L"Hauptwerk Virtual (B)";
+
+	constexpr wchar_t kDisplayPortAName[] = L"Display Port (A)";
+	constexpr wchar_t kDisplayPortBName[] = L"Display Port (B)";
 
 	std::wstring FindMidiCli()
 	{
@@ -298,7 +308,65 @@ bool EnableMidi2Endpoint()
 			kHwVirtualAName, kHwVirtualBNameConst);
 	}
 
+	// 4. Create Pair C: "Display Port (A)" / "Display Port (B)"
+	//    Hauptwerk outputs hardware-display SysEx to (A); the bridge reads (B).
+	if (!CreateLoopbackPair(kDisplayPortAName, kDisplayPortBName, g_pairCAssocId))
+	{
+		printf("[Midi2] Failed to create Display Port loopback endpoint pair.\n");
+		// Pairs A/B are still valid; continue without the display monitoring port.
+	}
+	else
+	{
+		g_displayPortBName = kDisplayPortBName;
+		printf("[Midi2] Display Port endpoints created (HW outputs to '%ls', bridge reads '%ls').\n",
+			kDisplayPortAName, kDisplayPortBNameConst);
+	}
+
 	g_enabled = true;
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// EnsureDisplayPortEndpoint
+// ---------------------------------------------------------------------------
+// Creates the "Display Port (A)" / "Display Port (B)" loopback pair if it is
+// not already present. This is needed because the main virtual ports persist
+// across app sessions (until the MIDI service restarts); on those sessions the
+// startup code skips EnableMidi2Endpoint() entirely, which would otherwise
+// leave the newer Display Port pair uncreated.
+// ---------------------------------------------------------------------------
+bool EnsureDisplayPortEndpoint()
+{
+	// Already created in this session.
+	if (!g_displayPortBName.empty())
+		return true;
+
+	// Already registered in WinMM (created in a previous session).
+	UINT n = midiInGetNumDevs();
+	for (UINT i = 0; i < n; ++i)
+	{
+		MIDIINCAPSW caps{};
+		if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+			std::wstring(caps.szPname) == kDisplayPortBNameConst)
+		{
+			g_displayPortBName = kDisplayPortBNameConst;
+			printf("[Midi2] Display Port (B) already present in WinMM — reusing.\n");
+			return true;
+		}
+	}
+
+	if (!IsMidi2EndpointOptInEnabled())
+		return false;
+
+	if (!CreateLoopbackPair(kDisplayPortAName, kDisplayPortBName, g_pairCAssocId))
+	{
+		printf("[Midi2] Failed to create Display Port loopback endpoint pair.\n");
+		return false;
+	}
+
+	g_displayPortBName = kDisplayPortBName;
+	printf("[Midi2] Display Port endpoints created (HW outputs to '%ls', bridge reads '%ls').\n",
+		kDisplayPortAName, kDisplayPortBNameConst);
 	return true;
 }
 
@@ -348,6 +416,13 @@ void DisableMidi2Endpoint()
 		RemoveLoopbackPair(g_pairBAssocId);
 		g_pairBAssocId.clear();
 		g_hwVirtualBName.clear();
+	}
+
+	if (!g_pairCAssocId.empty())
+	{
+		RemoveLoopbackPair(g_pairCAssocId);
+		g_pairCAssocId.clear();
+		g_displayPortBName.clear();
 	}
 
 	printf("[Midi2] Virtual endpoints closed.\n");
@@ -431,6 +506,32 @@ std::wstring GetHauptwerkVirtualBDeviceName()
 			std::wstring(caps.szPname) == kHwVirtualBNameConst)
 		{
 			return kHwVirtualBNameConst;
+		}
+	}
+	return {};
+}
+
+// ---------------------------------------------------------------------------
+// GetDisplayPortBDeviceName
+// ---------------------------------------------------------------------------
+// Returns the WinMM name for the "Display Port (B)" monitoring input, which
+// the bridge opens to receive the hardware-display SysEx messages Hauptwerk
+// sends to "Display Port (A)".  Falls back to the known constant name if the
+// endpoint was created in a previous session and is still registered.
+// ---------------------------------------------------------------------------
+std::wstring GetDisplayPortBDeviceName()
+{
+	if (!g_displayPortBName.empty())
+		return g_displayPortBName;
+
+	UINT n = midiInGetNumDevs();
+	for (UINT i = 0; i < n; ++i)
+	{
+		MIDIINCAPS caps{};
+		if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+			std::wstring(caps.szPname) == kDisplayPortBNameConst)
+		{
+			return kDisplayPortBNameConst;
 		}
 	}
 	return {};

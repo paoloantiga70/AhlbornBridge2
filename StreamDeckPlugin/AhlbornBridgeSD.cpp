@@ -18,9 +18,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -81,12 +83,23 @@ static std::atomic<bool> g_running{ true };
 static std::mutex  g_deviceMutex;
 static std::string g_currentDeviceId;
 
+// Stream Deck profile (packaged in the plugin) activated when an organ is loaded.
+static const char* kOrganLoadedProfile = "OrganLoaded";
+
+// Pending profile switch requested before the device id was known.
+// hasPending=true means a switch is queued; pendingProfile is the target
+// profile name ("" means return to the previous profile).
+static std::mutex  g_pendingProfileMutex;
+static bool        g_pendingProfileSwitch = false;
+static std::string g_pendingProfileName;
+
 // Track visible buttons for both actions
 struct ButtonInfo
 {
     std::string context;
     std::string action;
     int organIndex = 0;
+    bool currentOrgan = false;  // true => button tracks whatever organ is loaded now
     std::string organName;
     int switchIndex = 0;
     bool switchIsOn = false;
@@ -105,6 +118,14 @@ static bool g_altiverbUiOpen = false;
 static bool g_consoleConnected = false;
 static bool g_hauptwerkRunning = false;
 static bool g_biduleSplashActive = false;
+// Audio level clipping of the loaded organ: 0 green, 1 orange, 2 red (clipping).
+static std::atomic<int> g_audioClipping{ 0 };
+// Persistent "clip latch": organ indices that have experienced a red clip
+// (AudioLevelClipping == 2) since the last user acknowledgement. The red marker
+// stays visible even after clipping clears, so the user notices it after
+// playing. Cleared when the user presses the organ key.
+static std::mutex g_clipLatchMutex;
+static std::set<int> g_clipLatchedOrgans;
 static std::atomic<bool> g_activeSensingEnabledState{ true };
 
 // Organ and switch lists from AhlbornBridge
@@ -150,6 +171,7 @@ static std::map<int, int> g_loadingProgressByOrgan;
 static std::map<int, ULONGLONG> g_requestByOrgan;
 static std::atomic<bool> g_loadingWorkerRunning{ false };
 static std::atomic<bool> g_requestWorkerRunning{ false };
+static std::atomic<bool> g_clipBlinkWorkerRunning{ false };
 static std::atomic<int> g_realLoadingIndex{ 0 };
 static std::atomic<int> g_realLoadingProgress{ -1 };
 static std::atomic<bool> g_realLoadingVisible{ false };
@@ -345,7 +367,14 @@ static bool SdSwitchToProfile(const std::string& profileName, const std::string&
 
     if (deviceId.empty())
     {
-        Log("[SD] SdSwitchToProfile FAILED: deviceId unknown");
+        // Device not known yet (pipe state can arrive before willAppear).
+        // Queue the switch so it is retried once a device id is available.
+        {
+            std::lock_guard<std::mutex> pl(g_pendingProfileMutex);
+            g_pendingProfileSwitch = true;
+            g_pendingProfileName = profileName;
+        }
+        Log("[SD] SdSwitchToProfile deferred: deviceId unknown, queued profile='%s'", profileName.c_str());
         return false;
     }
 
@@ -632,7 +661,7 @@ static std::string BuildConsolePowerButtonSvg(const std::string& title, bool isO
 // Build an SVG image for a button with improved visual states and title layout
 static std::string BuildButtonSvg(const std::string& title, bool loaded, bool vstLink, bool consoleConnected, bool hauptwerkRunning,
                                   bool loadingActive = false, int loadingProgress = 0, bool requestActive = false, bool requestBlinkOn = true,
-                                  bool altiverbUiOpen = false)
+                                  bool altiverbUiOpen = false, int audioClipping = 0, bool clipBlinkOn = false, bool clipLatched = false)
 {
     const bool isEmpty = (title == "Empty");
     const bool isOffline = (title == "Disconnected.");
@@ -721,7 +750,31 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded, bool vs
         consoleDotStroke = consoleConnected ? "#ff4d4f" : "#dcffe4";
         consoleDotStrokeWidth = consoleConnected ? "2.5" : "1.5";
     }
-    svg += "<circle cx='123' cy='122' r='7' fill='" + consoleDotFill + "' stroke='" + consoleDotStroke + "' stroke-width='" + consoleDotStrokeWidth + "'/>";
+    svg += "<circle cx='120' cy='120' r='10' fill='" + consoleDotFill + "' stroke='" + consoleDotStroke + "' stroke-width='" + consoleDotStrokeWidth + "'/>";
+
+    // Audio clipping indicator: when the loaded organ reports a red clip level
+    // (AudioLevelClipping == 2), blink the status dot red to warn the user that
+    // the organ volume is set too high (audio distortion). Orange (1) shows a
+    // steady warning tint. A latched clip (clipLatched) keeps a persistent red
+    // marker visible after clipping clears, until the user acknowledges it.
+    if (loaded && audioClipping >= 2)
+    {
+        // Red clipping: blink between bright red and dark to draw attention.
+        std::string clipFill = clipBlinkOn ? "#ff1f1f" : "#5a0000";
+        svg += "<circle cx='120' cy='120' r='10' fill='" + clipFill + "' stroke='#ffffff' stroke-width='2.5'/>";
+    }
+    else if (loaded && clipLatched)
+    {
+        // Persistent clip history: steady red dot with a white '!' so the user
+        // notices distortion occurred during the session even after it stopped.
+        svg += "<circle cx='120' cy='120' r='10' fill='#c21f1f' stroke='#ffffff' stroke-width='2.5'/>";
+        svg += "<text x='120' y='125' font-family='Arial' font-size='14' fill='#ffffff' text-anchor='middle' font-weight='bold'>!</text>";
+    }
+    else if (loaded && audioClipping == 1)
+    {
+        // Orange near-clip warning: steady.
+        svg += "<circle cx='120' cy='120' r='10' fill='#ff9b1f' stroke='#ffe0b3' stroke-width='2'/>";
+    }
 
     svg += "</svg>";
     return svg;
@@ -759,7 +812,101 @@ static void SdSetImage(const std::string& context, const std::string& svg, int s
     WsSend(json);
 }
 
-// ─── Resolve display title for a button ─────────────────────────────────
+// Sends a raw PNG (base64, no SVG wrapper) as the key image.
+static void SdSetImagePng(const std::string& context, const std::string& pngBase64, int state = -1)
+{
+    std::string payload = "data:image/png;base64," + pngBase64;
+    std::string json = "{\"event\":\"setImage\",\"context\":\"" + context +
+        "\",\"payload\":{\"image\":\"" + payload + "\",\"target\":0";
+    if (state >= 0)
+        json += ",\"state\":" + std::to_string(state);
+    json += "}}";
+    WsSend(json);
+}
+
+// Loads (and caches) a church thumbnail PNG from the plugin's IR_thumbnails folder.
+static std::mutex g_irThumbMutex;
+static std::map<std::string, std::string> g_irThumbCache;  // filename -> base64 PNG
+
+static std::string GetChurchThumbnailBase64(const std::string& fileName)
+{
+    if (fileName.empty()) return "";
+    {
+        std::lock_guard<std::mutex> lk(g_irThumbMutex);
+        auto it = g_irThumbCache.find(fileName);
+        if (it != g_irThumbCache.end()) return it->second;
+    }
+    // Convert UTF-8 filename to wide for the Win32 file API.
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, fileName.c_str(), -1, nullptr, 0);
+    std::wstring wname(wlen > 0 ? wlen - 1 : 0, L'\0');
+    if (wlen > 0)
+        MultiByteToWideChar(CP_UTF8, 0, fileName.c_str(), -1, &wname[0], wlen);
+    std::wstring path = GetPluginDir() + L"IR_thumbnails\\" + wname;
+    std::string b64 = LoadFileAsBase64(path);
+    {
+        // Log the exact path searched so missing/renamed thumbnails are diagnosable.
+        int ulen = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string upath(ulen > 0 ? ulen - 1 : 0, '\0');
+        if (ulen > 0)
+            WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, &upath[0], ulen, nullptr, nullptr);
+        Log("[SD] IR thumbnail %s: '%s'", b64.empty() ? "MISS" : "OK", upath.c_str());
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_irThumbMutex);
+        g_irThumbCache[fileName] = b64;
+    }
+    return b64;
+}
+
+// Builds a 144x144 SVG that shows the church thumbnail (embedded PNG) with a
+// small readable caption in a translucent band at the bottom. The caption text
+// is wrapped to fit the key width using an approximate character budget.
+static std::string BuildIrButtonSvg(const std::string& pngBase64, const std::string& caption)
+{
+    const int CANVAS = 144;
+    const int fontSize = 15;
+    const int maxCharsPerLine = 15;  // approximate budget for 144px at this size
+    const int maxLines = 3;
+
+    // Word-wrap the caption into at most maxLines lines.
+    std::vector<std::string> lines;
+    {
+        std::istringstream iss(caption);
+        std::string word, cur;
+        while (iss >> word)
+        {
+            if (cur.empty()) { cur = word; }
+            else if ((int)(cur.size() + 1 + word.size()) <= maxCharsPerLine) { cur += " " + word; }
+            else { lines.push_back(cur); cur = word; }
+            if ((int)lines.size() >= maxLines) break;
+        }
+        if (!cur.empty() && (int)lines.size() < maxLines) lines.push_back(cur);
+        // Truncate an overly long single word so it never overflows.
+        for (auto& ln : lines)
+            if ((int)ln.size() > maxCharsPerLine + 2)
+                ln = ln.substr(0, maxCharsPerLine) + "...";
+    }
+
+    const int lineHeight = fontSize + 3;
+    const int bandHeight = (int)lines.size() * lineHeight + 8;
+    const int bandTop = CANVAS - bandHeight;
+
+    std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>";
+    svg += "<image x='0' y='0' width='144' height='144' preserveAspectRatio='xMidYMid slice' xlink:href='data:image/png;base64," + pngBase64 + "'/>";
+    if (!lines.empty())
+    {
+        svg += "<rect x='0' y='" + std::to_string(bandTop) + "' width='144' height='" + std::to_string(bandHeight) + "' fill='#000000' fill-opacity='0.6'/>";
+        int y = bandTop + lineHeight;
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            svg += "<text x='72' y='" + std::to_string(y) + "' font-family='Arial' font-size='" + std::to_string(fontSize) +
+                   "' fill='#ffffff' text-anchor='middle' font-weight='bold'>" + XmlEscape(lines[i]) + "</text>";
+            y += lineHeight;
+        }
+    }
+    svg += "</svg>";
+    return svg;
+}
 
 static bool IsOrganLoading(int organIndex, int* progressOut)
 {
@@ -778,11 +925,10 @@ static bool IsOrganLoading(int organIndex, int* progressOut)
     const ULONGLONG now = GetTickCount64();
     if (organIndex > 0 && realIdx == organIndex && realProgress >= 0 && realVisible && (now - realTick) <= 3000)
     {
-        int merged = realProgress;
-        if (simProgress > merged)
-            merged = simProgress;
+        // Real host-reported progress (authoritative, driven by Hauptwerk display
+        // SysEx) takes precedence over the simulated fallback progress.
         if (progressOut)
-            *progressOut = merged;
+            *progressOut = realProgress;
         return true;
     }
 
@@ -820,6 +966,58 @@ static void RequestBlinkThread()
         UpdateAllButtons();
     }
     g_requestWorkerRunning = false;
+}
+
+// Blinks the status dot while a loaded organ reports a red audio clipping level
+// (AudioLevelClipping == 2), to warn the user the volume is too high. Stops
+// automatically when clipping clears or no organ is loaded.
+static void ClipBlinkThread()
+{
+    while (g_running)
+    {
+        Sleep(350);
+        bool active;
+        {
+            std::lock_guard<std::mutex> sl(g_stateMutex);
+            active = (g_loadedOrganIndex > 0) && (g_audioClipping.load() >= 2);
+        }
+        if (!active)
+        {
+            g_clipBlinkWorkerRunning = false;
+            UpdateAllButtons();
+            return;
+        }
+        UpdateAllButtons();
+    }
+    g_clipBlinkWorkerRunning = false;
+}
+
+static void StartClipBlinkIfNeeded()
+{
+    bool expected = false;
+    if (g_clipBlinkWorkerRunning.compare_exchange_strong(expected, true))
+        std::thread(ClipBlinkThread).detach();
+}
+
+// Returns true if the given organ has a latched (unacknowledged) red clip.
+static bool IsClipLatched(int organIndex)
+{
+    if (organIndex <= 0)
+        return false;
+    std::lock_guard<std::mutex> cl(g_clipLatchMutex);
+    return g_clipLatchedOrgans.count(organIndex) != 0;
+}
+
+// Clears the latched red clip marker for the given organ (user acknowledgement).
+static void ClearClipLatch(int organIndex)
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> cl(g_clipLatchMutex);
+        changed = (g_clipLatchedOrgans.erase(organIndex) != 0);
+    }
+    if (changed)
+        UpdateAllButtons();
 }
 
 static void StartOrganRequest(int organIndex)
@@ -994,8 +1192,13 @@ static void UpdateAllButtons()
 
     for (auto& [ctx, info] : g_visibleButtons)
     {
+        // IR church buttons render a static thumbnail set in willAppear; skip them.
+        if (info.action == "com.ahlbornbridge.ir")
+            continue;
         bool isSwitchAction = (info.action == "com.ahlbornbridge.switch");
         bool isActiveSensingAction = (info.action == "com.ahlbornbridge.activesensing");
+        // For a "current organ" button, resolve to whatever organ is loaded now.
+        int effectiveOrganIndex = info.currentOrgan ? loaded : info.organIndex;
         int switchChannel = 0;
         if (isSwitchAction)
         {
@@ -1012,9 +1215,9 @@ static void UpdateAllButtons()
         std::string title = isActiveSensingAction
             ? ResolveActiveSensingTitle()
             : (isSwitchAction ? ResolveSwitchTitle(info.switchIndex, info.organName)
-                              : ResolveButtonTitle(info.organIndex, info.organName));
+                              : ResolveButtonTitle(effectiveOrganIndex, info.organName));
 
-        if (!isActiveSensingAction && title != info.organName && title != "Empty" && title != "Disconnected."
+        if (!isActiveSensingAction && !info.currentOrgan && title != info.organName && title != "Empty" && title != "Disconnected."
             && title.rfind(isSwitchAction ? "SWITCH " : "ORGAN ", 0) != 0)
         {
             info.organName = title;
@@ -1028,20 +1231,20 @@ static void UpdateAllButtons()
             ? (g_activeSensingEnabledState.load() ? 1 : 0)
             : (isSwitchAction
                 ? (info.switchIsOn ? 1 : 0)
-                : ((info.organIndex == loaded && loaded > 0) ? 1 : 0));
+                : ((effectiveOrganIndex == loaded && loaded > 0) ? 1 : 0));
         int loadingProgress = 0;
-        bool isLoading = (!isSwitchAction && !isActiveSensingAction) && (st == 0) && IsOrganLoading(info.organIndex, &loadingProgress);
-        bool isRequest = (!isSwitchAction && !isActiveSensingAction) && (st == 0) && !isLoading && IsOrganRequesting(info.organIndex);
+        bool isLoading = (!isSwitchAction && !isActiveSensingAction) && (st == 0) && IsOrganLoading(effectiveOrganIndex, &loadingProgress);
+        bool isRequest = (!isSwitchAction && !isActiveSensingAction) && (st == 0) && !isLoading && IsOrganRequesting(effectiveOrganIndex);
         bool requestBlinkOn = ((GetTickCount64() / 350ULL) % 2ULL) == 0ULL;
         bool biduleBlinkPhase = ((GetTickCount64() / 350ULL) % 2ULL) == 0ULL;
         bool forceRequestVisual = (!isSwitchAction && !isActiveSensingAction) && (st == 1) && loadedUsesVstLink && g_biduleSplashActive && biduleBlinkPhase;
         Log("  button ctx=%.30s organIndex=%d title=%s state=%d request=%d loading=%d progress=%d biduleSplash=%d",
-            ctx.c_str(), info.organIndex, title.c_str(), st, (int)isRequest, (int)isLoading, loadingProgress, (int)g_biduleSplashActive);
+            ctx.c_str(), effectiveOrganIndex, title.c_str(), st, (int)isRequest, (int)isLoading, loadingProgress, (int)g_biduleSplashActive);
         std::string svg = isActiveSensingAction
             ? BuildConsolePowerButtonSvg(title, st == 1)
             : (isSwitchAction
                 ? BuildSwitchButtonSvg(title, st == 1, switchChannel)
-                : BuildButtonSvg(title, st == 1, st == 1 && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkOn, (st == 1 && loadedUsesVstLink && altiverbUiOpen)));
+                : BuildButtonSvg(title, st == 1, st == 1 && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkOn, (st == 1 && loadedUsesVstLink && altiverbUiOpen), g_audioClipping.load(), requestBlinkOn, IsClipLatched(effectiveOrganIndex)));
         if (svg != info.lastSvg)
         {
             SdSetImage(ctx, svg, 0);
@@ -1066,6 +1269,7 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
     std::string action;
     int switchIndex = 0;
     bool switchIsOn = false;
+    bool currentOrgan = false;
     {
         std::lock_guard<std::mutex> lk(g_buttonsMutex);
         auto it = g_visibleButtons.find(context);
@@ -1075,6 +1279,7 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
             action = it->second.action;
             switchIndex = it->second.switchIndex;
             switchIsOn = it->second.switchIsOn;
+            currentOrgan = it->second.currentOrgan;
         }
     }
     bool isSwitchAction = (action == "com.ahlbornbridge.switch");
@@ -1117,6 +1322,13 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
         consoleConnected = g_consoleConnected;
         hauptwerkRunning = g_hauptwerkRunning;
     }
+    // For a "current organ" button, resolve to whatever organ is loaded now.
+    if (currentOrgan)
+    {
+        organIndex = loaded;
+        if (!isSwitchAction && !isActiveSensingAction)
+            title = ResolveButtonTitle(organIndex, cachedName);
+    }
     bool isLoaded = isActiveSensingAction
         ? g_activeSensingEnabledState.load()
         : (isSwitchAction ? switchIsOn : (organIndex == loaded && loaded > 0));
@@ -1131,7 +1343,7 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
         ? BuildConsolePowerButtonSvg(title, isLoaded)
         : (isSwitchAction
             ? BuildSwitchButtonSvg(title, isLoaded, switchChannel)
-            : BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkState, (isLoaded && loadedUsesVstLink && altiverbUiOpen)));
+            : BuildButtonSvg(title, isLoaded, isLoaded && loadedUsesVstLink, consoleConnected, hauptwerkRunning, isLoading, loadingProgress, isRequest || forceRequestVisual, requestBlinkState, (isLoaded && loadedUsesVstLink && altiverbUiOpen), g_audioClipping.load(), requestBlinkState, IsClipLatched(organIndex)));
     int newState = isLoaded ? 1 : 0;
     {
         std::lock_guard<std::mutex> lk(g_buttonsMutex);
@@ -1453,6 +1665,21 @@ static void HandlePipeMessage(const std::string& msg)
         bool consoleConnected = (msg.find("\"consoleConnected\":true") != std::string::npos);
         bool hauptwerkRunning = (msg.find("\"hauptwerkRunning\":true") != std::string::npos);
         bool biduleSplashActive = (msg.find("\"biduleSplashActive\":true") != std::string::npos);
+        int audioClipping = JsonExtractInt(msg, "audioClipping");
+        if (audioClipping < 0) audioClipping = 0;
+        if (audioClipping > 2) audioClipping = 2;
+        g_audioClipping.store(audioClipping);
+        if (audioClipping >= 2)
+        {
+            StartClipBlinkIfNeeded();
+            // Latch the red clip on the currently loaded organ so it stays
+            // visible after the user stops playing, until acknowledged.
+            if (loaded > 0)
+            {
+                std::lock_guard<std::mutex> cl(g_clipLatchMutex);
+                g_clipLatchedOrgans.insert(loaded);
+            }
+        }
         int previousLoaded = 0;
         {
             std::lock_guard<std::mutex> lk(g_stateMutex);
@@ -1482,14 +1709,13 @@ static void HandlePipeMessage(const std::string& msg)
             g_realLoadingLastTick = GetTickCount64();
             StopOrganRequest(loadingIndex);
 
-            // Keep the latest real progress so the loading bar is visible immediately.
+            // Real host progress is authoritative (driven by Hauptwerk display
+            // SysEx). Store the exact value as fallback but do NOT start the
+            // simulated increment worker, so the bar reflects real progress only.
             {
                 std::lock_guard<std::mutex> lk(g_loadingMutex);
-                auto& slot = g_loadingProgressByOrgan[loadingIndex];
-                if (loadingProgress > slot)
-                    slot = loadingProgress;
+                g_loadingProgressByOrgan[loadingIndex] = loadingProgress;
             }
-            StartOrganLoadingProgress(loadingIndex);
         }
         else
         {
@@ -1503,6 +1729,18 @@ static void HandlePipeMessage(const std::string& msg)
 
         if (previousLoaded > 0 && previousLoaded != loaded)
             CompleteOrganLoadingProgress(previousLoaded);
+
+        // Switch the Stream Deck profile on organ load/unload transitions.
+        if (loaded > 0 && previousLoaded <= 0)
+        {
+            Log("[SD] Organ loaded (index=%d) -> switching to profile '%s'", loaded, kOrganLoadedProfile);
+            SdSwitchToProfile(kOrganLoadedProfile);
+        }
+        else if (loaded <= 0 && previousLoaded > 0)
+        {
+            Log("[SD] Organ unloaded (prev=%d) -> returning to previous profile", previousLoaded);
+            SdSwitchToProfile("");
+        }
 
         if (loaded > 0 && previousLoaded != loaded)
             UpdateAllButtons();
@@ -1855,6 +2093,7 @@ static void HandleSdEvent(const std::string& json)
         std::string payload = JsonExtractObject(json, "payload");
         std::string settings = JsonExtractObject(payload, "settings");
         int organIndex = JsonExtractInt(settings, "organIndex");
+        bool currentOrgan = JsonExtractBool(settings, "currentOrgan", false);
         std::string organName = JsonExtractString(settings, "organName");
         std::string device = JsonExtractString(json, "device");
 
@@ -1869,11 +2108,66 @@ static void HandleSdEvent(const std::string& json)
         }
         if (!device.empty())
         {
-            std::lock_guard<std::mutex> dl(g_deviceMutex);
-            g_currentDeviceId = device;
+            {
+                std::lock_guard<std::mutex> dl(g_deviceMutex);
+                g_currentDeviceId = device;
+            }
+            // If a profile switch was queued before the device was known, run it now.
+            bool runPending = false;
+            std::string pendingName;
+            {
+                std::lock_guard<std::mutex> pl(g_pendingProfileMutex);
+                if (g_pendingProfileSwitch)
+                {
+                    runPending = true;
+                    pendingName = g_pendingProfileName;
+                    g_pendingProfileSwitch = false;
+                }
+            }
+            if (runPending)
+            {
+                Log("[SD] Executing deferred profile switch -> '%s'", pendingName.c_str());
+                SdSwitchToProfile(pendingName, device);
+            }
         }
         Log("[SD] willAppear: context=%.40s organIndex=%d switchIndex=%d organName=%s device=%.60s action=%s",
             context.c_str(), organIndex, switchIndex, organName.c_str(), device.c_str(), action.c_str());
+
+        if (action == "com.ahlbornbridge.ir")
+        {
+            // IR church button: store its settings and show the thumbnail image.
+            std::string churchName = JsonExtractString(settings, "churchName");
+            std::string thumbnail = JsonExtractString(settings, "thumbnail");
+            {
+                std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                ButtonInfo info;
+                info.context = context;
+                info.action = action;
+                info.organName = churchName;
+                g_visibleButtons[context] = info;
+            }
+            std::string png = GetChurchThumbnailBase64(thumbnail);
+            if (!png.empty())
+            {
+                // Compose the thumbnail with a small caption band so the church
+                // name stays readable without the oversized native title.
+                std::string svg = BuildIrButtonSvg(png, churchName);
+                SdSetImage(context, svg, 0);
+                Log("[SD] willAppear: IR church '%s' thumbnail '%s' set", churchName.c_str(), thumbnail.c_str());
+            }
+            else
+            {
+                // Filler/empty slot or missing thumbnail: paint a solid black key
+                // so no ghost image from another page lingers underneath.
+                std::string blank = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg'>"
+                                    "<rect x='0' y='0' width='144' height='144' fill='#000000'/></svg>";
+                SdSetImage(context, blank, 0);
+                Log("[SD] willAppear: IR church '%s' thumbnail '%s' NOT found (blank)", churchName.c_str(), thumbnail.c_str());
+            }
+            // Native title is drawn inside the image; clear the SD title layer.
+            SdSetTitle(context, "", 0);
+            return;
+        }
 
         {
             std::lock_guard<std::mutex> lk(g_buttonsMutex);
@@ -1881,15 +2175,12 @@ static void HandleSdEvent(const std::string& json)
             info.context = context;
             info.action = action;
             info.organIndex = organIndex;
+            info.currentOrgan = currentOrgan;
             info.organName = (action == "com.ahlbornbridge.switch") ? switchName : organName;
             info.switchIndex = switchIndex;
             info.switchIsOn = switchIsOn;
             g_visibleButtons[context] = info;
         }
-
-        std::string title = (action == "com.ahlbornbridge.activesensing") ? ResolveActiveSensingTitle()
-                           : ((action == "com.ahlbornbridge.switch") ? ResolveSwitchTitle(switchIndex, switchName)
-                                                                       : ResolveButtonTitle(organIndex, organName));
 
         int loaded;
         bool loadedUsesVstLink;
@@ -1902,6 +2193,13 @@ static void HandleSdEvent(const std::string& json)
             consoleConnected = g_consoleConnected;
             hauptwerkRunning = g_hauptwerkRunning;
         }
+        // For a "current organ" button, resolve to whatever organ is loaded now.
+        int effectiveOrganIndex = currentOrgan ? loaded : organIndex;
+
+        std::string title = (action == "com.ahlbornbridge.activesensing") ? ResolveActiveSensingTitle()
+                           : ((action == "com.ahlbornbridge.switch") ? ResolveSwitchTitle(switchIndex, switchName)
+                                                                       : ResolveButtonTitle(effectiveOrganIndex, organName));
+
         bool isSwitchAction = (action == "com.ahlbornbridge.switch");
         bool isActiveSensingAction = (action == "com.ahlbornbridge.activesensing");
         int switchChannel = 0;
@@ -1913,7 +2211,7 @@ static void HandleSdEvent(const std::string& json)
         }
         bool isLoaded = isActiveSensingAction
             ? g_activeSensingEnabledState.load()
-            : (isSwitchAction ? switchIsOn : (organIndex == loaded && loaded > 0));
+            : (isSwitchAction ? switchIsOn : (effectiveOrganIndex == loaded && loaded > 0));
         std::string svg = isActiveSensingAction
             ? BuildConsolePowerButtonSvg(title, isLoaded)
             : (isSwitchAction
@@ -1968,6 +2266,7 @@ static void HandleSdEvent(const std::string& json)
         std::string payload = JsonExtractObject(json, "payload");
         std::string settings = JsonExtractObject(payload, "settings");
         int organIndex = JsonExtractInt(settings, "organIndex");
+        bool currentOrgan = JsonExtractBool(settings, "currentOrgan", false);
 
         int loaded;
         {
@@ -1975,7 +2274,45 @@ static void HandleSdEvent(const std::string& json)
             loaded = g_loadedOrganIndex;
         }
 
-        Log("[SD] keyDown: organIndex=%d loadedOrganIndex=%d", organIndex, loaded);
+        // A "current organ" button always targets whatever organ is loaded now.
+        if (currentOrgan)
+            organIndex = loaded;
+
+        Log("[SD] keyDown: organIndex=%d loadedOrganIndex=%d currentOrgan=%d", organIndex, loaded, (int)currentOrgan);
+
+        if (action == "com.ahlbornbridge.dsp")
+        {
+            // DSP command: send an OSC float message to Bidule via the host.
+            // Address/value come from the key settings so each key can differ.
+            std::string oscAddress = JsonExtractString(settings, "oscAddress");
+            std::string oscValue = JsonExtractString(settings, "oscValue");
+            if (oscAddress.empty()) oscAddress = "/DSP_FRONT/IR_Autom";
+            if (oscValue.empty()) oscValue = "0.010716579";
+            Log("[SD] keyDown: DSP action -> OSC %s %s", oscAddress.c_str(), oscValue.c_str());
+            PipeSend(std::string("{\"type\":\"biduleOscFloat\",\"address\":\"") + oscAddress +
+                "\",\"value\":" + oscValue + "}");
+            return;
+        }
+
+        if (action == "com.ahlbornbridge.ir")
+        {
+            // IR church: send FRONT/SIDE/REAR IR_Autom values to Bidule.
+            std::string front = JsonExtractString(settings, "oscFront");
+            std::string side  = JsonExtractString(settings, "oscSide");
+            std::string rear  = JsonExtractString(settings, "oscRear");
+            std::string churchName = JsonExtractString(settings, "churchName");
+            if (side.empty())  side = rear.empty() ? front : rear;
+            if (rear.empty())  rear = front;
+            Log("[SD] keyDown: IR church '%s' -> FRONT=%s SIDE=%s REAR=%s",
+                churchName.c_str(), front.c_str(), side.c_str(), rear.c_str());
+            if (!front.empty())
+                PipeSend(std::string("{\"type\":\"biduleOscFloat\",\"address\":\"/DSP_FRONT/IR_Autom\",\"value\":") + front + "}");
+            if (!side.empty())
+                PipeSend(std::string("{\"type\":\"biduleOscFloat\",\"address\":\"/DSP_SIDE/IR_Autom\",\"value\":") + side + "}");
+            if (!rear.empty())
+                PipeSend(std::string("{\"type\":\"biduleOscFloat\",\"address\":\"/DSP_REAR/IR_Autom\",\"value\":") + rear + "}");
+            return;
+        }
 
         if (action == "com.ahlbornbridge.switch")
         {
@@ -2118,6 +2455,22 @@ static void HandleSdEvent(const std::string& json)
         }
         else if (organIndex > 0)
         {
+            // If a latched red clip marker is present, the first press only
+            // acknowledges/clears it and is consumed here: it must not toggle
+            // Altiverb (short press) nor unload (hold). We mark longTriggered so
+            // both the keyUp handler and the hold thread skip their actions.
+            if (IsClipLatched(organIndex))
+            {
+                ClearClipLatch(organIndex);
+                ULONGLONG downTick = GetTickCount64();
+                {
+                    std::lock_guard<std::mutex> kl(g_keyDownMutex);
+                    g_keyDownTickByContext[context] = { downTick, organIndex, true };
+                }
+                Log("[SD] keyDown: organ %d had latched clip -> acknowledged, press consumed (no Altiverb/unload)", organIndex);
+            }
+            else
+            {
             ULONGLONG downTick = GetTickCount64();
             {
                 std::lock_guard<std::mutex> kl(g_keyDownMutex);
@@ -2166,6 +2519,7 @@ static void HandleSdEvent(const std::string& json)
                     PipeSend("{\"type\":\"load\",\"index\":" + std::to_string(organIndex) + "}");
                 }
             }).detach();
+            }
         }
         else
         {
@@ -2177,6 +2531,12 @@ static void HandleSdEvent(const std::string& json)
         std::string payload = JsonExtractObject(json, "payload");
         std::string settings = JsonExtractObject(payload, "settings");
         int organIndex = JsonExtractInt(settings, "organIndex");
+        bool currentOrgan = JsonExtractBool(settings, "currentOrgan", false);
+        if (currentOrgan)
+        {
+            std::lock_guard<std::mutex> sl(g_stateMutex);
+            organIndex = g_loadedOrganIndex;
+        }
 
         // Gestione momentary per switch
         if (action == "com.ahlbornbridge.switch")
@@ -2414,6 +2774,7 @@ static void HandleSdEvent(const std::string& json)
         std::string payload = JsonExtractObject(json, "payload");
         std::string settings = JsonExtractObject(payload, "settings");
         int organIndex = JsonExtractInt(settings, "organIndex");
+        bool currentOrgan = JsonExtractBool(settings, "currentOrgan", false);
         int switchIndex = JsonExtractInt(settings, "switchIndex");
         bool switchIsOn = false;
         {
@@ -2436,6 +2797,7 @@ static void HandleSdEvent(const std::string& json)
             {
                 actionName = it->second.action;
                 it->second.organIndex = organIndex;
+                it->second.currentOrgan = currentOrgan;
                 it->second.switchIndex = switchIndex;
                 it->second.switchIsOn = switchIsOn;
                 if (!organName.empty())
@@ -2460,6 +2822,10 @@ static void HandleSdEvent(const std::string& json)
             consoleConnected = g_consoleConnected;
             hauptwerkRunning = g_hauptwerkRunning;
         }
+        // For a "current organ" button, resolve to whatever organ is loaded now.
+        int effectiveOrganIndex = currentOrgan ? loaded : organIndex;
+        if (currentOrgan)
+            title = (actionName == "com.ahlbornbridge.switch") ? title : ResolveButtonTitle(effectiveOrganIndex, organName);
         bool isSwitchAction = (actionName == "com.ahlbornbridge.switch");
         bool isActiveSensingAction = (actionName == "com.ahlbornbridge.activesensing");
         int switchChannel = 0;
@@ -2471,7 +2837,7 @@ static void HandleSdEvent(const std::string& json)
         }
         bool isLoaded = isActiveSensingAction
             ? g_activeSensingEnabledState.load()
-            : (isSwitchAction ? switchIsOn : (organIndex == loaded && loaded > 0));
+            : (isSwitchAction ? switchIsOn : (effectiveOrganIndex == loaded && loaded > 0));
         std::string svg = isActiveSensingAction
             ? BuildConsolePowerButtonSvg(title, isLoaded)
             : (isSwitchAction
