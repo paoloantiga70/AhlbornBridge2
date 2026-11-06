@@ -35,6 +35,11 @@ void NotifyStreamDeckSwitchesForOrgan(int loadedIndex);
 void NotifyStreamDeckActiveSensingState(bool enabled);
 void NotifyStreamDeckAltiverbUiState(bool isOpen);
 
+// Highlights the Stream Deck button of a church (empty string clears the highlight).
+void NotifyStreamDeckChurchHighlight(const std::string& churchName);
+// Pushes a DSP parameter value to a Stream Deck LCD display.
+void NotifyStreamDeckDspValue(const std::string& dspTarget, const std::string& param, float value);
+
 struct AhlbornSwitchInfo;
 
 // Updates organ titles in the existing SD profile files and restarts Stream Deck.

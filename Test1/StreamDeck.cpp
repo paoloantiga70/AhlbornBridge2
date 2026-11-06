@@ -1282,6 +1282,8 @@ void NotifyStreamDeckOrganUnloaded(bool resetSwitches)
     }
 
     g_altiverbUiOpen.store(false);
+    // Clear any church highlight so the cyan border does not persist after unload.
+    NotifyStreamDeckChurchHighlight("");
     PipeSend(BuildStateJson(0));
 }
 
@@ -1292,6 +1294,70 @@ void NotifyStreamDeckAltiverbUiState(bool isOpen)
     std::string msg = std::string("{\"type\":\"altiverbUiState\",\"open\":") +
              (isOpen ? "true" : "false") + "}";
     printf("[NotifyStreamDeckAltiverbUiState] Sending: %s\n", msg.c_str());
+    PipeSend(msg);
+}
+
+// Highlights (or clears) the Stream Deck button for a given church. Triggered by
+// an incoming OSC /DSP_xxx/IR_Autom message that selects a church via the IR table.
+// Passing an empty churchName clears the highlight.
+//
+// The message also carries the 0-based page index where the church button lives
+// in the OrganLoaded profile, so the plugin can jump straight to that page.
+// Page layout mirrors CreateStreamDeckOrganLoadedProfile: slot 0 of every page
+// is the organ button, so each page holds (keysPerPage - 1) churches, listed in
+// the same alphabetical order as LoadChurches().
+static int ComputeChurchPageIndex(const std::string& churchName)
+{
+    if (churchName.empty())
+        return -1;
+
+    std::vector<ChurchInfo> churches = LoadChurches();
+    int churchPos = -1;
+    for (size_t i = 0; i < churches.size(); ++i)
+    {
+        if (_stricmp(churches[i].name.c_str(), churchName.c_str()) == 0)
+        {
+            churchPos = static_cast<int>(i);
+            break;
+        }
+    }
+    if (churchPos < 0)
+        return -1;
+
+    DeviceInfo device = FindFirstDevice(GetProfilesRootPath());
+    int keysPerPage = GetKeysPerPage(DeviceTypeFromModel(device.model));
+    if (keysPerPage < 2)
+        keysPerPage = 15;
+    int churchesPerPage = keysPerPage - 1;       // slot 0 is the organ button
+    if (churchesPerPage < 1)
+        churchesPerPage = 1;
+
+    return churchPos / churchesPerPage;
+}
+
+void NotifyStreamDeckChurchHighlight(const std::string& churchName)
+{
+    if (!g_pipeConnected)
+        return;
+    int page = ComputeChurchPageIndex(churchName);
+    std::string msg = std::string("{\"type\":\"churchHighlight\",\"church\":\"") +
+             EscapeJsonString(churchName) + "\",\"page\":" + std::to_string(page) + "}";
+    printf("[NotifyStreamDeckChurchHighlight] Sending: %s\n", msg.c_str());
+    PipeSend(msg);
+}
+
+// Updates a DSP parameter display (LCD) on the Stream Deck with a raw value coming
+// from an incoming OSC /DSP_xxx/<param> message. The plugin decides how to render it.
+void NotifyStreamDeckDspValue(const std::string& dspTarget, const std::string& param, float value)
+{
+    if (!g_pipeConnected)
+        return;
+    char valueBuf[32] = {};
+    snprintf(valueBuf, sizeof(valueBuf), "%.5f", value);
+    std::string msg = std::string("{\"type\":\"dspValue\",\"dsp\":\"") +
+             EscapeJsonString(dspTarget) + "\",\"param\":\"" +
+             EscapeJsonString(param) + "\",\"value\":" + valueBuf + "}";
+    printf("[NotifyStreamDeckDspValue] Sending: %s\n", msg.c_str());
     PipeSend(msg);
 }
 

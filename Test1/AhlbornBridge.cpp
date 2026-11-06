@@ -235,6 +235,9 @@ if (FAILED(hr))
 	startsWithFe();  // Start the MIDI processing thread
 	printf("[Startup] MIDI processing thread started.\n");
 
+	// Start the incoming OSC listeners (DSP params on 5000, audio levels on 5001).
+	StartOscListeners();
+
 	const wchar_t className[] = L"AhlbornBridgeTrayWindow";
 	WNDCLASSW wc = {};
 	wc.lpfnWndProc = TrayIconWndProc;

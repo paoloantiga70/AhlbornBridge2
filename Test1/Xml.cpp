@@ -126,6 +126,7 @@ namespace
     bool s_cachedRestoreOrganSwitchStates = true;
     bool s_cachedStreamDeckAppAutoStart = true;
     bool s_cachedHideHauptwerkOnConsolePowerOn = true;
+    bool s_optionTogglesLoaded = false;
     std::wstring s_cachedLastSeenAppVersion;
 
     std::wstring s_cachedHauptwerkIdlePriority   = L"HIGH";
@@ -1461,18 +1462,25 @@ namespace
 						// Preserve the new toggle options so WriteSettingsXml calls that
 						// happen before the respective Load*/Save* populate the cache do
 						// not overwrite the on-disk value with the default (true).
-						UINT optVal = 1;
-						if (TryGetTagValue(optionsSection, L"<StreamDeckAppAutoStart>", L"</StreamDeckAppAutoStart>", optVal))
-							s_cachedStreamDeckAppAutoStart = (optVal != 0);
-						optVal = 1;
-						if (TryGetTagValue(optionsSection, L"<HideHauptwerkOnConsolePowerOn>", L"</HideHauptwerkOnConsolePowerOn>", optVal))
-							s_cachedHideHauptwerkOnConsolePowerOn = (optVal != 0);
-						optVal = 1;
-						if (TryGetTagValue(optionsSection, L"<AutoAssignSwitchOutputs>", L"</AutoAssignSwitchOutputs>", optVal))
-							s_cachedAutoAssignSwitchOutputs = (optVal != 0);
-						optVal = 1;
-						if (TryGetTagValue(optionsSection, L"<RestoreOrganSwitchStatesOnLoad>", L"</RestoreOrganSwitchStatesOnLoad>", optVal))
-							s_cachedRestoreOrganSwitchStates = (optVal != 0);
+						// Only seed the cache from disk ONCE; afterwards the cache is the
+						// authoritative source (updated by the Save* functions). Re-reading
+						// on every write would revert values the user just changed.
+						if (!s_optionTogglesLoaded)
+						{
+							s_optionTogglesLoaded = true;
+							UINT optVal = 1;
+							if (TryGetTagValue(optionsSection, L"<StreamDeckAppAutoStart>", L"</StreamDeckAppAutoStart>", optVal))
+								s_cachedStreamDeckAppAutoStart = (optVal != 0);
+							optVal = 1;
+							if (TryGetTagValue(optionsSection, L"<HideHauptwerkOnConsolePowerOn>", L"</HideHauptwerkOnConsolePowerOn>", optVal))
+								s_cachedHideHauptwerkOnConsolePowerOn = (optVal != 0);
+							optVal = 1;
+							if (TryGetTagValue(optionsSection, L"<AutoAssignSwitchOutputs>", L"</AutoAssignSwitchOutputs>", optVal))
+								s_cachedAutoAssignSwitchOutputs = (optVal != 0);
+							optVal = 1;
+							if (TryGetTagValue(optionsSection, L"<RestoreOrganSwitchStatesOnLoad>", L"</RestoreOrganSwitchStatesOnLoad>", optVal))
+								s_cachedRestoreOrganSwitchStates = (optVal != 0);
+						}
 					}
 
 				// Preserve the existing AhlbornSwitches table if it is already present in Settings.xml.
@@ -3116,12 +3124,14 @@ bool LoadAutoAssignSwitchOutputs(bool& enabled)
 
     enabled = value != 0;
     s_cachedAutoAssignSwitchOutputs = enabled;
+    s_optionTogglesLoaded = true;
     return true;
 }
 
 bool SaveAutoAssignSwitchOutputs(bool enabled)
 {
     s_cachedAutoAssignSwitchOutputs = enabled;
+    s_optionTogglesLoaded = true;
 
     std::wstring inputName, input2Name, outputName, output2Name;
     DeviceEnabledStates devEnabled;
@@ -3177,6 +3187,7 @@ bool LoadRestoreOrganSwitchStates(bool& enabled)
 bool SaveRestoreOrganSwitchStates(bool enabled)
 {
     s_cachedRestoreOrganSwitchStates = enabled;
+    s_optionTogglesLoaded = true;
 
     std::wstring inputName, input2Name, outputName, output2Name;
     DeviceEnabledStates devEnabled;
@@ -3226,12 +3237,14 @@ bool LoadStreamDeckAppAutoStart(bool& enabled)
 
     enabled = value != 0;
     s_cachedStreamDeckAppAutoStart = enabled;
+    s_optionTogglesLoaded = true;
     return true;
 }
 
 bool SaveStreamDeckAppAutoStart(bool enabled)
 {
     s_cachedStreamDeckAppAutoStart = enabled;
+    s_optionTogglesLoaded = true;
 
     std::wstring inputName, input2Name, outputName, output2Name;
     DeviceEnabledStates devEnabled;
@@ -3281,12 +3294,14 @@ bool LoadHideHauptwerkOnConsolePowerOn(bool& enabled)
 
     enabled = value != 0;
     s_cachedHideHauptwerkOnConsolePowerOn = enabled;
+    s_optionTogglesLoaded = true;
     return true;
 }
 
 bool SaveHideHauptwerkOnConsolePowerOn(bool enabled)
 {
     s_cachedHideHauptwerkOnConsolePowerOn = enabled;
+    s_optionTogglesLoaded = true;
 
     std::wstring inputName, input2Name, outputName, output2Name;
     DeviceEnabledStates devEnabled;

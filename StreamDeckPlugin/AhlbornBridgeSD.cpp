@@ -103,6 +103,7 @@ struct ButtonInfo
     std::string organName;
     int switchIndex = 0;
     bool switchIsOn = false;
+    std::string thumbnail;       // IR church thumbnail filename (action com.ahlbornbridge.ir)
     // Cache to avoid redundant WS messages
     std::string lastSvg;
     int lastState = -1;
@@ -356,7 +357,7 @@ static void SdGetSettings(const std::string& context)
     WsSend(json);
 }
 
-static bool SdSwitchToProfile(const std::string& profileName, const std::string& explicitDeviceId = "")
+static bool SdSwitchToProfile(const std::string& profileName, const std::string& explicitDeviceId = "", int page = -1)
 {
     std::string deviceId = explicitDeviceId;
     if (deviceId.empty())
@@ -378,10 +379,17 @@ static bool SdSwitchToProfile(const std::string& profileName, const std::string&
         return false;
     }
 
+    // The optional "page" field (Stream Deck SDK) selects which page of a
+    // multi-page profile to show. Omitted when page < 0.
+    std::string payload = "{\"profile\":\"" + EscapeJson(profileName) + "\"";
+    if (page >= 0)
+        payload += ",\"page\":" + std::to_string(page);
+    payload += "}";
+
     std::string json = "{\"event\":\"switchToProfile\",\"context\":\"" + g_pluginUUID +
         "\",\"device\":\"" + deviceId +
-        "\",\"payload\":{\"profile\":\"" + EscapeJson(profileName) + "\"}}";
-    Log("[SD] SdSwitchToProfile: device=%s profile=%s", deviceId.c_str(), profileName.c_str());
+        "\",\"payload\":" + payload + "}";
+    Log("[SD] SdSwitchToProfile: device=%s profile=%s page=%d", deviceId.c_str(), profileName.c_str(), page);
     return WsSend(json);
 }
 
@@ -828,6 +836,11 @@ static void SdSetImagePng(const std::string& context, const std::string& pngBase
 static std::mutex g_irThumbMutex;
 static std::map<std::string, std::string> g_irThumbCache;  // filename -> base64 PNG
 
+// Currently highlighted church (set by an incoming "churchHighlight" pipe message).
+// Empty string means no church is highlighted. Compared case-insensitively.
+static std::mutex g_highlightedChurchMutex;
+static std::string g_highlightedChurch;
+
 static std::string GetChurchThumbnailBase64(const std::string& fileName)
 {
     if (fileName.empty()) return "";
@@ -861,7 +874,7 @@ static std::string GetChurchThumbnailBase64(const std::string& fileName)
 // Builds a 144x144 SVG that shows the church thumbnail (embedded PNG) with a
 // small readable caption in a translucent band at the bottom. The caption text
 // is wrapped to fit the key width using an approximate character budget.
-static std::string BuildIrButtonSvg(const std::string& pngBase64, const std::string& caption)
+static std::string BuildIrButtonSvg(const std::string& pngBase64, const std::string& caption, bool highlighted = false)
 {
     const int CANVAS = 144;
     const int fontSize = 15;
@@ -903,6 +916,12 @@ static std::string BuildIrButtonSvg(const std::string& pngBase64, const std::str
                    "' fill='#ffffff' text-anchor='middle' font-weight='bold'>" + XmlEscape(lines[i]) + "</text>";
             y += lineHeight;
         }
+    }
+    if (highlighted)
+    {
+        // Draw a thick colored border to mark the active church selection.
+        svg += "<rect x='3' y='3' width='138' height='138' fill='none' "
+               "stroke='#00e0ff' stroke-width='6' rx='8' ry='8'/>";
     }
     svg += "</svg>";
     return svg;
@@ -1581,12 +1600,66 @@ static void ParseSwitchList(const std::string& json)
     }
 }
 
+// Re-renders every visible IR church button, applying the current highlight.
+static void RefreshIrChurchHighlights()
+{
+    std::string current;
+    {
+        std::lock_guard<std::mutex> hl(g_highlightedChurchMutex);
+        current = g_highlightedChurch;
+    }
+
+    // Snapshot the visible IR buttons so we don't hold g_buttonsMutex during I/O.
+    std::vector<std::pair<std::string, ButtonInfo>> irButtons;
+    {
+        std::lock_guard<std::mutex> lk(g_buttonsMutex);
+        for (const auto& [ctx, info] : g_visibleButtons)
+        {
+            if (info.action == "com.ahlbornbridge.ir")
+                irButtons.push_back({ ctx, info });
+        }
+    }
+
+    for (const auto& [ctx, info] : irButtons)
+    {
+        bool highlighted = !current.empty() &&
+                           _stricmp(current.c_str(), info.organName.c_str()) == 0;
+        std::string png = GetChurchThumbnailBase64(info.thumbnail);
+        std::string svg;
+        if (!png.empty())
+            svg = BuildIrButtonSvg(png, info.organName, highlighted);
+        else
+            svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg'>"
+                  "<rect x='0' y='0' width='144' height='144' fill='#000000'/></svg>";
+        SdSetImage(ctx, svg, 0);
+        SdSetTitle(ctx, "", 0);
+    }
+    Log("[SD] RefreshIrChurchHighlights: church='%s' buttons=%d", current.c_str(), (int)irButtons.size());
+}
+
 static void HandlePipeMessage(const std::string& msg)
 {
     Log("[Pipe] HandlePipeMessage: %.200s", msg.c_str());
     if (msg.find("\"organs\"") != std::string::npos && msg.find("\"list\"") != std::string::npos)
     {
         ParseOrganList(msg);
+    }
+    else if (msg.find("\"churchHighlight\"") != std::string::npos)
+    {
+        // Highlight the IR church button matching "church" (empty = clear all).
+        std::string church = JsonExtractString(msg, "church");
+        int page = JsonExtractInt(msg, "page");
+        {
+            std::lock_guard<std::mutex> hl(g_highlightedChurchMutex);
+            g_highlightedChurch = church;
+        }
+        Log("[Pipe] churchHighlight: '%s' page=%d", church.c_str(), page);
+        // If the church lives on a different page of the OrganLoaded profile,
+        // jump straight to it so the highlighted button is visible. willAppear
+        // on the new page will render it already highlighted.
+        if (!church.empty() && page >= 0)
+            SdSwitchToProfile(kOrganLoadedProfile, "", page);
+        RefreshIrChurchHighlights();
     }
     else if (msg.find("\"switches\"") != std::string::npos)
     {
@@ -1739,6 +1812,11 @@ static void HandlePipeMessage(const std::string& msg)
         else if (loaded <= 0 && previousLoaded > 0)
         {
             Log("[SD] Organ unloaded (prev=%d) -> returning to previous profile", previousLoaded);
+            // Clear any church highlight so a stale cyan border does not linger.
+            {
+                std::lock_guard<std::mutex> hl(g_highlightedChurchMutex);
+                g_highlightedChurch.clear();
+            }
             SdSwitchToProfile("");
         }
 
@@ -2144,14 +2222,22 @@ static void HandleSdEvent(const std::string& json)
                 info.context = context;
                 info.action = action;
                 info.organName = churchName;
+                info.thumbnail = thumbnail;
                 g_visibleButtons[context] = info;
+            }
+            // Determine whether this church is the currently highlighted one.
+            bool highlighted = false;
+            {
+                std::lock_guard<std::mutex> hl(g_highlightedChurchMutex);
+                highlighted = !g_highlightedChurch.empty() &&
+                              _stricmp(g_highlightedChurch.c_str(), churchName.c_str()) == 0;
             }
             std::string png = GetChurchThumbnailBase64(thumbnail);
             if (!png.empty())
             {
                 // Compose the thumbnail with a small caption band so the church
                 // name stays readable without the oversized native title.
-                std::string svg = BuildIrButtonSvg(png, churchName);
+                std::string svg = BuildIrButtonSvg(png, churchName, highlighted);
                 SdSetImage(context, svg, 0);
                 Log("[SD] willAppear: IR church '%s' thumbnail '%s' set", churchName.c_str(), thumbnail.c_str());
             }
@@ -2311,6 +2397,14 @@ static void HandleSdEvent(const std::string& json)
                 PipeSend(std::string("{\"type\":\"biduleOscFloat\",\"address\":\"/DSP_SIDE/IR_Autom\",\"value\":") + side + "}");
             if (!rear.empty())
                 PipeSend(std::string("{\"type\":\"biduleOscFloat\",\"address\":\"/DSP_REAR/IR_Autom\",\"value\":") + rear + "}");
+
+            // Highlight this church immediately for instant visual feedback,
+            // without waiting for the OSC echo from Altiverb.
+            {
+                std::lock_guard<std::mutex> hl(g_highlightedChurchMutex);
+                g_highlightedChurch = churchName;
+            }
+            RefreshIrChurchHighlights();
             return;
         }
 

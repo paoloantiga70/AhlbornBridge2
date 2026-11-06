@@ -659,8 +659,63 @@ std::vector<ChurchInfo> LoadChurches()
             for (size_t i = q1 + 1; i < obj.size(); ++i)
             {
                 char c = obj[i];
-                if (c == '\\' && i + 1 < obj.size()) { out += obj[++i]; continue; }
                 if (c == '"') break;
+                if (c == '\\' && i + 1 < obj.size())
+                {
+                    char esc = obj[++i];
+                    switch (esc)
+                    {
+                    case 'n': out += '\n'; break;
+                    case 'r': out += '\r'; break;
+                    case 't': out += '\t'; break;
+                    case 'b': out += '\b'; break;
+                    case 'f': out += '\f'; break;
+                    case '/': out += '/'; break;
+                    case '"': out += '"'; break;
+                    case '\\': out += '\\'; break;
+                    case 'u':
+                    {
+                        // Decode \uXXXX; emit UTF-8. ASCII (< 0x80) is the common
+                        // case here (e.g. \u0027 apostrophe in church names).
+                        if (i + 4 < obj.size())
+                        {
+                            std::string hex = obj.substr(i + 1, 4);
+                            unsigned code = 0;
+                            bool ok = true;
+                            for (char h : hex)
+                            {
+                                code <<= 4;
+                                if (h >= '0' && h <= '9') code |= (h - '0');
+                                else if (h >= 'a' && h <= 'f') code |= (h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') code |= (h - 'A' + 10);
+                                else { ok = false; break; }
+                            }
+                            if (ok)
+                            {
+                                i += 4;
+                                if (code < 0x80)
+                                    out += static_cast<char>(code);
+                                else if (code < 0x800)
+                                {
+                                    out += static_cast<char>(0xC0 | (code >> 6));
+                                    out += static_cast<char>(0x80 | (code & 0x3F));
+                                }
+                                else
+                                {
+                                    out += static_cast<char>(0xE0 | (code >> 12));
+                                    out += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+                                    out += static_cast<char>(0x80 | (code & 0x3F));
+                                }
+                                break;
+                            }
+                        }
+                        out += esc;   // malformed \u — keep literally
+                        break;
+                    }
+                    default: out += esc; break;
+                    }
+                    continue;
+                }
                 out += c;
             }
             return out;

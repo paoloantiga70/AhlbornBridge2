@@ -2736,6 +2736,7 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		running = false;
 		StopOrganFolderWatcher();
 		StopStreamDeckPipeServer();
+		StopOscListeners();
 		{
 			bool streamDeckAutoStart = true;
 			LoadStreamDeckAppAutoStart(streamDeckAutoStart);

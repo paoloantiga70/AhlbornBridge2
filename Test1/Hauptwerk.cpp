@@ -3,6 +3,7 @@
 #include "Qt.h"
 #include "Xml.h"
 #include "TrayIcon.h"
+#include "StreamDeck_profiler.h"
 #include <windows.h>
 #include <cstdio>
 #include <cwchar>
@@ -13,7 +14,11 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
-#include <shlobj.h>
+#include <functional>
+#include <map>
+#include <chrono>
+#include <mutex>
+#include <cmath>
 #include <knownfolders.h>
 #include <shellapi.h>
 #include <winsock2.h>
@@ -1318,4 +1323,413 @@ bool LaunchHauptwerkAndDismissWelcome()
 
 
     return true;
+}
+
+// ===========================================================================
+// Incoming OSC listeners (DSP parameters on 5000, audio levels on 5001)
+// ===========================================================================
+//
+// Design:
+//   * Two UDP listeners, one per port, each in its own thread (blocking recvfrom).
+//   * Incoming addresses look like "/DSP_FRONT/RvrbTime" where the first path
+//     segment is the DSP target (DSP_FRONT / DSP_SIDE / DSP_REAR) and the second
+//     is the parameter name. We split the two and look the parameter up in a
+//     dispatch table, so a single table row serves all three DSPs.
+//   * Two SEPARATE tables: g_dspCommands (port 5000) and g_levelCommands (5001),
+//     keeping the high-rate meter traffic isolated from parameter commands.
+//   * Audio level updates are throttled to one push to the Stream Deck every 50 ms
+//     per DSP target, to avoid flooding the plugin pipe.
+//
+// To add a new command: append a row to the relevant table. Unknown parameters
+// are logged and ignored, so the tables can grow incrementally.
+
+namespace
+{
+    constexpr unsigned short kOscDspPort = 5000;
+    constexpr unsigned short kOscLevelPort = 5001;
+    constexpr int kLevelThrottleMs = 50;
+
+    // Parsed OSC message: address plus (optionally) one float and/or one string arg.
+    struct OscMessage
+    {
+        std::string address;     // e.g. "/DSP_FRONT/RvrbTime"
+        bool        hasFloat = false;
+        float       floatArg = 0.0f;
+        bool        hasString = false;
+        std::string stringArg;
+    };
+
+    // Handler signature: receives the DSP target ("DSP_FRONT") and the parsed message.
+    using OscHandler = std::function<void(const std::string& target, const OscMessage& msg)>;
+
+    struct OscCommand
+    {
+        std::string param;      // e.g. "RvrbTime", "IR_Autom", "Level"
+        OscHandler  handler;
+    };
+
+    std::atomic<bool> g_oscListenersRunning{ false };
+    std::thread       g_oscDspThread;
+    std::thread       g_oscLevelThread;
+    SOCKET            g_oscDspSocket = INVALID_SOCKET;
+    SOCKET            g_oscLevelSocket = INVALID_SOCKET;
+
+    // Per-DSP throttle timestamps for the audio level meter (port 5001).
+    std::mutex g_levelThrottleMutex;
+    std::map<std::string, std::chrono::steady_clock::time_point> g_levelLastPush;
+
+    // Reads a 4-byte-aligned OSC string starting at offset; advances offset past it.
+    bool ReadOscString(const char* data, int len, int& offset, std::string& out)
+    {
+        if (offset >= len) return false;
+        int start = offset;
+        while (offset < len && data[offset] != '\0')
+            ++offset;
+        if (offset >= len) return false;          // no terminator
+        out.assign(data + start, data + offset);
+        ++offset;                                 // skip the '\0'
+        offset = (offset + 3) & ~3;               // 4-byte align
+        return true;
+    }
+
+    // Minimal OSC parser: address + typetag, supporting a single ',f' and/or ',s'.
+    bool ParseOscPacket(const char* data, int len, OscMessage& msg)
+    {
+        int offset = 0;
+        if (!ReadOscString(data, len, offset, msg.address))
+            return false;
+        if (msg.address.empty() || msg.address[0] != '/')
+            return false;
+
+        std::string typeTags;
+        if (!ReadOscString(data, len, offset, typeTags))
+            return true;                          // address only, no args
+        if (typeTags.empty() || typeTags[0] != ',')
+            return true;
+
+        for (size_t i = 1; i < typeTags.size(); ++i)
+        {
+            char tag = typeTags[i];
+            if (tag == 'f')
+            {
+                if (offset + 4 > len) return false;
+                uint32_t be = 0;
+                std::memcpy(&be, data + offset, 4);
+                uint32_t hostBits = ntohl(be);
+                float f = 0.0f;
+                std::memcpy(&f, &hostBits, 4);
+                msg.floatArg = f;
+                msg.hasFloat = true;
+                offset += 4;
+            }
+            else if (tag == 'i')
+            {
+                if (offset + 4 > len) return false;
+                uint32_t be = 0;
+                std::memcpy(&be, data + offset, 4);
+                msg.floatArg = static_cast<float>(static_cast<int32_t>(ntohl(be)));
+                msg.hasFloat = true;
+                offset += 4;
+            }
+            else if (tag == 's')
+            {
+                std::string s;
+                if (!ReadOscString(data, len, offset, s)) return false;
+                msg.stringArg = s;
+                msg.hasString = true;
+            }
+            else
+            {
+                // Unknown tag — stop parsing further args, keep what we have.
+                break;
+            }
+        }
+        return true;
+    }
+
+    // Splits "/DSP_FRONT/RvrbTime" into target="DSP_FRONT", param="RvrbTime".
+    bool SplitOscAddress(const std::string& address, std::string& target, std::string& param)
+    {
+        if (address.size() < 2 || address[0] != '/')
+            return false;
+        size_t secondSlash = address.find('/', 1);
+        if (secondSlash == std::string::npos)
+            return false;
+        target = address.substr(1, secondSlash - 1);
+        param = address.substr(secondSlash + 1);
+        // Drop any trailing path segments for now (we only use the first param token).
+        size_t extra = param.find('/');
+        if (extra != std::string::npos)
+            param = param.substr(0, extra);
+        return !target.empty() && !param.empty();
+    }
+
+    // ----- Handlers -------------------------------------------------------
+
+    // /DSP_xxx/IR_Autom <value>  — selects a church from the IR table.
+    // The float value is the IR coefficient (e.g. 0.013659579) that must match a
+    // church's front/side/rear column; the DSP target selects which column to use.
+    // Highlights the matching church button on the Stream Deck.
+    void OnIrAutom(const std::string& target, const OscMessage& msg)
+    {
+        std::vector<ChurchInfo> churches = LoadChurches();
+        if (churches.empty())
+        {
+            printf("[OSC] IR_Autom from %s but no churches loaded.\n", target.c_str());
+            return;
+        }
+
+        std::string churchName;
+
+        if (msg.hasString)
+        {
+            // Direct church name match (case-insensitive).
+            for (const auto& c : churches)
+            {
+                if (_stricmp(c.name.c_str(), msg.stringArg.c_str()) == 0)
+                {
+                    churchName = c.name;
+                    break;
+                }
+            }
+        }
+        else if (msg.hasFloat)
+        {
+            // Select which IR column to compare against based on the DSP target.
+            // DSP_FRONT -> front, DSP_SIDE -> side, DSP_REAR -> rear.
+            // The target is matched case-insensitively and defaults to front.
+            auto columnFor = [&](const ChurchInfo& c) -> const std::string& {
+                if (target.find("SIDE") != std::string::npos || target.find("side") != std::string::npos)
+                    return c.side;
+                if (target.find("REAR") != std::string::npos || target.find("rear") != std::string::npos)
+                    return c.rear;
+                return c.front;
+            };
+
+            // Find the church whose column value is closest to the received value
+            // within a small tolerance (the table stores values as text).
+            double value = static_cast<double>(msg.floatArg);
+            double bestDiff = 1e-6;               // absolute tolerance
+            for (const auto& c : churches)
+            {
+                const std::string& col = columnFor(c);
+                if (col.empty())
+                    continue;
+                double colValue = 0.0;
+                try { colValue = std::stod(col); }
+                catch (...) { continue; }
+                double diff = std::fabs(colValue - value);
+                if (diff <= bestDiff)
+                {
+                    bestDiff = diff;
+                    churchName = c.name;
+                }
+            }
+        }
+
+        if (churchName.empty())
+        {
+            printf("[OSC] IR_Autom from %s: could not resolve church (str='%s', num=%.9f).\n",
+                target.c_str(), msg.hasString ? msg.stringArg.c_str() : "", msg.floatArg);
+            return;
+        }
+
+        printf("[OSC] IR_Autom from %s -> highlight church '%s'.\n", target.c_str(), churchName.c_str());
+        NotifyStreamDeckChurchHighlight(churchName);
+    }
+
+    // /DSP_xxx/RvrbTime <float>  — pushes the value to a Stream Deck LCD display.
+    void OnRvrbTime(const std::string& target, const OscMessage& msg)
+    {
+        if (!msg.hasFloat)
+        {
+            printf("[OSC] RvrbTime from %s without float arg — ignored.\n", target.c_str());
+            return;
+        }
+        NotifyStreamDeckDspValue(target, "RvrbTime", msg.floatArg);
+    }
+
+    // /DSP_xxx/Level <float>  — real-time audio meter (port 5001), throttled to 50 ms.
+    void OnAudioLevel(const std::string& target, const OscMessage& msg)
+    {
+        if (!msg.hasFloat)
+            return;
+
+        auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(g_levelThrottleMutex);
+            auto it = g_levelLastPush.find(target);
+            if (it != g_levelLastPush.end())
+            {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second).count();
+                if (elapsed < kLevelThrottleMs)
+                    return;                       // drop: too soon since last push
+            }
+            g_levelLastPush[target] = now;
+        }
+
+        NotifyStreamDeckDspValue(target, "Level", msg.floatArg);
+    }
+
+    // ----- Dispatch tables (extend by adding rows) ------------------------
+
+    const std::vector<OscCommand> g_dspCommands = {
+        { "IR_Autom", &OnIrAutom },
+        { "RvrbTime", &OnRvrbTime },
+        // Add more DSP parameter commands here.
+    };
+
+    const std::vector<OscCommand> g_levelCommands = {
+        { "Level", &OnAudioLevel },
+        // Add more audio-level commands here.
+    };
+
+    void DispatchOsc(const std::vector<OscCommand>& table, const OscMessage& msg)
+    {
+        std::string target, param;
+        if (!SplitOscAddress(msg.address, target, param))
+        {
+            printf("[OSC] Malformed address '%s' — ignored.\n", msg.address.c_str());
+            return;
+        }
+        for (const auto& cmd : table)
+        {
+            if (cmd.param == param)
+            {
+                cmd.handler(target, msg);
+                return;
+            }
+        }
+        // Unknown parameters are common (Altiverb streams the full DSP state);
+        // silently ignore them so the log is not flooded.
+    }
+
+    // Processes a raw OSC packet which may be either a single message or an
+    // OSC bundle (#bundle\0 + 8-byte timetag + repeated [int32 size][element]).
+    // Bundles may nest; each contained message is parsed and dispatched.
+    void ProcessOscData(const char* data, int len, const std::vector<OscCommand>& table)
+    {
+        if (len <= 0)
+            return;
+
+        // Bundle: starts with the literal "#bundle\0".
+        if (len >= 16 && std::memcmp(data, "#bundle", 7) == 0 && data[7] == '\0')
+        {
+            int offset = 16;                      // skip "#bundle\0" (8) + timetag (8)
+            while (offset + 4 <= len)
+            {
+                uint32_t be = 0;
+                std::memcpy(&be, data + offset, 4);
+                int elemSize = static_cast<int>(ntohl(be));
+                offset += 4;
+                if (elemSize <= 0 || offset + elemSize > len)
+                    break;                        // malformed / truncated
+                ProcessOscData(data + offset, elemSize, table);
+                offset += elemSize;
+            }
+            return;
+        }
+
+        // Plain message.
+        OscMessage msg;
+        if (ParseOscPacket(data, len, msg))
+            DispatchOsc(table, msg);
+    }
+
+    // Blocking UDP receive loop for one port and one dispatch table.
+    void OscListenerLoop(SOCKET& sockOut, unsigned short port, const std::vector<OscCommand>& table, const char* label)
+    {
+        SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock == INVALID_SOCKET)
+        {
+            printf("[OSC][%s] socket() failed: %d\n", label, WSAGetLastError());
+            return;
+        }
+
+        // Allow the port to be re-bound quickly after a restart, and let other
+        // OSC monitors (e.g. Protokol) coexist on the same port if needed.
+        BOOL reuse = TRUE;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+        sockaddr_in addr = {};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        // Bind to all interfaces (INADDR_ANY) so datagrams are received
+        // regardless of which local IP they target. Binding only to the
+        // loopback address drops packets sent to the machine's LAN IP.
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        if (bind(sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR)
+        {
+            printf("[OSC][%s] bind() to port %u failed: %d\n", label, static_cast<unsigned>(port), WSAGetLastError());
+            closesocket(sock);
+            return;
+        }
+
+        sockOut = sock;
+        printf("[OSC][%s] Listening on 0.0.0.0:%u (all interfaces)\n", label, static_cast<unsigned>(port));
+
+        char buffer[2048];
+        while (g_oscListenersRunning.load())
+        {
+            int received = recvfrom(sock, buffer, sizeof(buffer), 0, nullptr, nullptr);
+            if (received == SOCKET_ERROR)
+            {
+                if (!g_oscListenersRunning.load())
+                    break;                        // socket closed during shutdown
+                int err = WSAGetLastError();
+                if (err == WSAEINTR || err == WSAENOTSOCK)
+                    break;
+                continue;                         // transient error — keep listening
+            }
+            if (received <= 0)
+                continue;
+
+            // Handles both plain OSC messages and OSC bundles (#bundle...).
+            ProcessOscData(buffer, received, table);
+        }
+
+        printf("[OSC][%s] Listener stopped.\n", label);
+    }
+} // namespace
+
+void StartOscListeners()
+{
+    if (g_oscListenersRunning.exchange(true))
+        return;                                   // already running
+
+    WSADATA wsa = {};
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+
+    g_oscDspThread = std::thread([]() {
+        OscListenerLoop(g_oscDspSocket, kOscDspPort, g_dspCommands, "DSP");
+    });
+    g_oscLevelThread = std::thread([]() {
+        OscListenerLoop(g_oscLevelSocket, kOscLevelPort, g_levelCommands, "Level");
+    });
+}
+
+void StopOscListeners()
+{
+    if (!g_oscListenersRunning.exchange(false))
+        return;                                   // not running
+
+    // Closing the sockets unblocks the recvfrom calls.
+    if (g_oscDspSocket != INVALID_SOCKET)
+    {
+        closesocket(g_oscDspSocket);
+        g_oscDspSocket = INVALID_SOCKET;
+    }
+    if (g_oscLevelSocket != INVALID_SOCKET)
+    {
+        closesocket(g_oscLevelSocket);
+        g_oscLevelSocket = INVALID_SOCKET;
+    }
+
+    if (g_oscDspThread.joinable())
+        g_oscDspThread.join();
+    if (g_oscLevelThread.joinable())
+        g_oscLevelThread.join();
+
+    WSACleanup();
 }

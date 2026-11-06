@@ -19,3 +19,8 @@ bool HideBiduleWindow();
 bool ToggleBiduleWindowVisibility();
 // Reads current priority settings and applies them to Hauptwerk immediately.
 void ApplyHauptwerkPriorityNow();
+
+// Incoming OSC listeners: DSP parameters on UDP 5000, audio levels on UDP 5001.
+// Each runs in its own thread; safe to call Start/Stop once.
+void StartOscListeners();
+void StopOscListeners();
