@@ -20,6 +20,11 @@ void SendUnloadOrganMidiMessage(bool resetSwitches = true);
 void StartStreamDeckPipeServer();
 void StopStreamDeckPipeServer();
 
+// Launch/close the Elgato Stream Deck desktop application alongside this app.
+bool IsStreamDeckAppRunning();
+void LaunchStreamDeckApp();
+void CloseStreamDeckApp();
+
 // Notify the connected Stream Deck plugin of state changes.
 // Safe to call even when no plugin is connected.
 void NotifyStreamDeckOrganList();

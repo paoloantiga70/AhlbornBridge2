@@ -61,6 +61,10 @@ std::atomic<TimePoint> lastFeTime{};
 std::atomic<DeviceState> deviceState{ DeviceState::Disconnected };
 std::atomic<HWND> g_hauptwerkMainWindow{ nullptr };
 std::atomic<bool> g_hauptwerkKeyHeld{ false };
+// True when Hauptwerk must be kept hidden whenever no organ is loaded,
+// because the console was powered on while <Control_MainStartUpModeCode> is
+// < 4. The window is shown only while an organ is loaded.
+std::atomic<bool> g_hauptwerkHideWhenNoOrgan{ false };
 std::atomic<bool> g_0xFF_firstTime{ false };
 std::atomic<bool> g_ignoreKeyReleaseOnDisconnect{ false };
 std::atomic<bool> g_midiRouterEnabled{ false };
@@ -1417,6 +1421,19 @@ namespace
 						SendUnloadOrganMidiMessage();
 					}
 
+					// If Hauptwerk must be hidden whenever no organ is loaded
+					// (Control_MainStartUpModeCode < 4), hide it again now that
+					// the organ has been unloaded.
+					if (g_hauptwerkHideWhenNoOrgan.load())
+					{
+						HWND hwMain = g_hauptwerkMainWindow.load();
+						if (hwMain)
+						{
+							printf("[Hauptwerk] Organ unloaded: hiding main window again.\n");
+							ShowWindow(hwMain, SW_HIDE);
+						}
+					}
+
 					// If the Hauptwerk Virtual (B) monitor input was not opened
 					// during startup (e.g. timing issue), retry now.
 					if (g_hHwVirtualBIn == nullptr)
@@ -1444,6 +1461,21 @@ namespace
 					g_hauptwerkOrganTitle = ExtractOrganTitle(title);
 					NotifyOrganInfoTitleChanged();
 					g_trayIconImageStatus = TrayIconImageStatus::Online;
+				}
+
+				// If Hauptwerk must be hidden whenever no organ is loaded
+				// (Control_MainStartUpModeCode < 4), restore it once now that an
+				// organ is loaded. Only on the transition to online, otherwise
+				// the window would be forced to the foreground on every cycle.
+				if (enteringOnlineState && g_hauptwerkHideWhenNoOrgan.load())
+				{
+					HWND hwMain = g_hauptwerkMainWindow.load();
+					if (hwMain)
+					{
+						printf("[Hauptwerk] Organ loaded: restoring previously hidden main window.\n");
+						ShowWindow(hwMain, SW_RESTORE);
+						SetForegroundWindow(hwMain);
+					}
 				}
 
 				if (enteringOnlineState)
@@ -2912,7 +2944,30 @@ DWORD WINAPI WatchdogThread(LPVOID)
                     }
                 }
                 LaunchHauptwerkAndDismissWelcome();
-                
+
+                // If Hauptwerk's <Control_MainStartUpModeCode> is < 4, hide the
+                // main window on console power-on and keep it hidden whenever no
+                // organ is loaded; it is shown only while an organ is loaded.
+                // For values >= 4 (or missing/unreadable config) keep the current
+                // behavior (window stays visible). Also honors the user setting.
+                if (!isOrganLoaded)
+                {
+                    bool hideHauptwerkOnConsolePowerOn = true;
+                    LoadHideHauptwerkOnConsolePowerOn(hideHauptwerkOnConsolePowerOn);
+                    int startupModeCode = 0;
+                    if (hideHauptwerkOnConsolePowerOn &&
+                        LoadHauptwerkMainStartupModeCode(startupModeCode) && startupModeCode < 4)
+                    {
+                        g_hauptwerkHideWhenNoOrgan.store(true);
+                        HWND hwMain = g_hauptwerkMainWindow.load();
+                        if (hwMain)
+                        {
+                            printf("[Hauptwerk] Control_MainStartUpModeCode=%d (<4): hiding main window until organ is loaded.\n", startupModeCode);
+                            ShowWindow(hwMain, SW_HIDE);
+                        }
+                    }
+                }
+
             }
 
             deviceState = newState;

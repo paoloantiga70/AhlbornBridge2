@@ -64,6 +64,11 @@ bool IsHauptwerkAudioOutputDeviceIdAligned(const std::wstring& outputDeviceId);
 bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
                               const std::vector<std::wstring>& outputNames);
 
+// Read the <Control_MainStartUpModeCode> value from Config.Config_Hauptwerk_xml.
+// Returns true and sets modeCode when the file/node is available and parsable;
+// returns false (leaving modeCode unchanged) otherwise.
+bool LoadHauptwerkMainStartupModeCode(int& modeCode);
+
 // Configure AudioOutputSystem and AudioOutputUnit sections in the Hauptwerk
 // Config.Config_Hauptwerk_xml with the fixed preset for this installation.
 // Called once on first install after MIDI device detection.
@@ -251,6 +256,15 @@ bool SaveAutoAssignSwitchOutputs(bool enabled);
 // Loads/saves the preference for restoring saved organ switch states on organ load.
 bool LoadRestoreOrganSwitchStates(bool& enabled);
 bool SaveRestoreOrganSwitchStates(bool enabled);
+
+// Loads/saves the preference for auto-starting the Elgato Stream Deck app with AhlbornBridge.
+bool LoadStreamDeckAppAutoStart(bool& enabled);
+bool SaveStreamDeckAppAutoStart(bool enabled);
+
+// Loads/saves the preference for hiding the Hauptwerk main window on external
+// console power-on (when Control_MainStartUpModeCode < 4), until an organ is loaded.
+bool LoadHideHauptwerkOnConsolePowerOn(bool& enabled);
+bool SaveHideHauptwerkOnConsolePowerOn(bool enabled);
 
 // Ensures all SwitchInputOutput nodes in the organ's OrganConfig have the default
 // Hauptwerk Virtual (A) output device configured (<i2>1</i2><j2>{hwId}</j2><a3>1</a3>).

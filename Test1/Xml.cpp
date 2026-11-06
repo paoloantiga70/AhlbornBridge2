@@ -124,6 +124,8 @@ namespace
     bool s_cachedBiduleHideHauptwerkOnAltiverbUi = true;
     bool s_cachedAutoAssignSwitchOutputs = true;
     bool s_cachedRestoreOrganSwitchStates = true;
+    bool s_cachedStreamDeckAppAutoStart = true;
+    bool s_cachedHideHauptwerkOnConsolePowerOn = true;
     std::wstring s_cachedLastSeenAppVersion;
 
     std::wstring s_cachedHauptwerkIdlePriority   = L"HIGH";
@@ -1455,6 +1457,22 @@ namespace
 					{
 						TryGetTagStringValue(optionsSection, L"<LastSeenAppVersion>", L"</LastSeenAppVersion>", s_cachedLastSeenAppVersion);
 							// Priority is managed by EnsureHauptwerkPriorityLoaded / SaveHauptwerkPrioritySettings.
+
+						// Preserve the new toggle options so WriteSettingsXml calls that
+						// happen before the respective Load*/Save* populate the cache do
+						// not overwrite the on-disk value with the default (true).
+						UINT optVal = 1;
+						if (TryGetTagValue(optionsSection, L"<StreamDeckAppAutoStart>", L"</StreamDeckAppAutoStart>", optVal))
+							s_cachedStreamDeckAppAutoStart = (optVal != 0);
+						optVal = 1;
+						if (TryGetTagValue(optionsSection, L"<HideHauptwerkOnConsolePowerOn>", L"</HideHauptwerkOnConsolePowerOn>", optVal))
+							s_cachedHideHauptwerkOnConsolePowerOn = (optVal != 0);
+						optVal = 1;
+						if (TryGetTagValue(optionsSection, L"<AutoAssignSwitchOutputs>", L"</AutoAssignSwitchOutputs>", optVal))
+							s_cachedAutoAssignSwitchOutputs = (optVal != 0);
+						optVal = 1;
+						if (TryGetTagValue(optionsSection, L"<RestoreOrganSwitchStatesOnLoad>", L"</RestoreOrganSwitchStatesOnLoad>", optVal))
+							s_cachedRestoreOrganSwitchStates = (optVal != 0);
 					}
 
 				// Preserve the existing AhlbornSwitches table if it is already present in Settings.xml.
@@ -1538,6 +1556,8 @@ namespace
 			L"    <BiduleHideHauptwerkOnAltiverbUi>" + std::to_wstring(s_cachedBiduleHideHauptwerkOnAltiverbUi ? 1 : 0) + L"</BiduleHideHauptwerkOnAltiverbUi>\r\n"
 			L"    <AutoAssignSwitchOutputs>" + std::to_wstring(s_cachedAutoAssignSwitchOutputs ? 1 : 0) + L"</AutoAssignSwitchOutputs>\r\n"
 			L"    <RestoreOrganSwitchStatesOnLoad>" + std::to_wstring(s_cachedRestoreOrganSwitchStates ? 1 : 0) + L"</RestoreOrganSwitchStatesOnLoad>\r\n"
+			L"    <StreamDeckAppAutoStart>" + std::to_wstring(s_cachedStreamDeckAppAutoStart ? 1 : 0) + L"</StreamDeckAppAutoStart>\r\n"
+			L"    <HideHauptwerkOnConsolePowerOn>" + std::to_wstring(s_cachedHideHauptwerkOnConsolePowerOn ? 1 : 0) + L"</HideHauptwerkOnConsolePowerOn>\r\n"
 			L"    <ActiveSensingEnabled>" + std::to_wstring(g_activeSensingEnabled.load() ? 1 : 0) + L"</ActiveSensingEnabled>\r\n"
 			L"    <ActiveSensingOutput>" + g_activeSensingOutputName + L"</ActiveSensingOutput>\r\n"
 			L"    <RootFolder_HauptwerkApplication>" + s_rootHauptwerkApp + L"</RootFolder_HauptwerkApplication>\r\n"
@@ -2092,6 +2112,43 @@ bool SaveAssignedMidiOutputNames(const std::vector<std::wstring>& names)
 void ReadActualHauptwerkMidiPorts(std::vector<std::wstring>& inputNames, std::vector<std::wstring>& outputNames)
 {
 	ReadActualHauptwerkMidiPortsImpl(inputNames, outputNames);
+}
+
+bool LoadHauptwerkMainStartupModeCode(int& modeCode)
+{
+	std::wstring userDataRoot = GetConfiguredHauptwerkUserDataRoot();
+	if (userDataRoot.empty())
+		return false;
+
+	if (userDataRoot.back() == L'\\' || userDataRoot.back() == L'/')
+		userDataRoot.pop_back();
+
+	std::wstring configPath = userDataRoot + L"\\Config0-GeneralSettings\\Config.Config_Hauptwerk_xml";
+	std::wstring hwXml = ReadFileToWString(configPath);
+	if (hwXml.empty())
+		return false;
+
+	std::wstring value;
+	if (!TryGetTagStringValue(hwXml, L"<Control_MainStartUpModeCode>",
+		L"</Control_MainStartUpModeCode>", value))
+		return false;
+
+	// Trim surrounding whitespace.
+	size_t first = value.find_first_not_of(L" \t\r\n");
+	size_t last = value.find_last_not_of(L" \t\r\n");
+	if (first == std::wstring::npos)
+		return false;
+	value = value.substr(first, last - first + 1);
+
+	try
+	{
+		modeCode = std::stoi(value);
+	}
+	catch (...)
+	{
+		return false;
+	}
+	return true;
 }
 
 bool WriteHauptwerkMidiConfig(const std::vector<std::wstring>& inputNames,
@@ -3120,6 +3177,116 @@ bool LoadRestoreOrganSwitchStates(bool& enabled)
 bool SaveRestoreOrganSwitchStates(bool enabled)
 {
     s_cachedRestoreOrganSwitchStates = enabled;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadStreamDeckAppAutoStart(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    UINT value = 1;
+    if (!TryGetTagValue(optionsSection, L"<StreamDeckAppAutoStart>", L"</StreamDeckAppAutoStart>", value))
+    {
+        enabled = true;
+        return true;
+    }
+
+    enabled = value != 0;
+    s_cachedStreamDeckAppAutoStart = enabled;
+    return true;
+}
+
+bool SaveStreamDeckAppAutoStart(bool enabled)
+{
+    s_cachedStreamDeckAppAutoStart = enabled;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadHideHauptwerkOnConsolePowerOn(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    UINT value = 1;
+    if (!TryGetTagValue(optionsSection, L"<HideHauptwerkOnConsolePowerOn>", L"</HideHauptwerkOnConsolePowerOn>", value))
+    {
+        enabled = true;
+        return true;
+    }
+
+    enabled = value != 0;
+    s_cachedHideHauptwerkOnConsolePowerOn = enabled;
+    return true;
+}
+
+bool SaveHideHauptwerkOnConsolePowerOn(bool enabled)
+{
+    s_cachedHideHauptwerkOnConsolePowerOn = enabled;
 
     std::wstring inputName, input2Name, outputName, output2Name;
     DeviceEnabledStates devEnabled;

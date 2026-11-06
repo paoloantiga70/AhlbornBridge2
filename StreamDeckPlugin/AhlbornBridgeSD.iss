@@ -41,6 +41,11 @@ Source: "{#SourceBase}\images\*"; DestDir: "{app}\images"; Flags: ignoreversion 
 ; Altiverb IR church thumbnails (loaded at runtime by the IR Church action)
 Source: "{#SourceBase}\IR_thumbnails\*"; DestDir: "{app}\IR_thumbnails"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; Bundled OrganLoaded profile package. Stream Deck must have this registered as a
+; plugin profile so the switchToProfile API can activate "OrganLoaded" by name.
+; The host app updates its contents in place at runtime with the local device UUID.
+Source: "{#SourceBase}\OrganLoaded.streamDeckProfile"; DestDir: "{app}"; Flags: ignoreversion
+
 [Code]
 // Stop Stream Deck before install, restart after
 procedure CurStepChanged(CurStep: TSetupStep);

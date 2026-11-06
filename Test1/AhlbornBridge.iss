@@ -42,7 +42,12 @@ Source: "CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 ; Installa la cartella Icons nella posizione Roaming dell'utente corrente usata dal runtime e dal collegamento
 Source: "Icons\*"; DestDir: "{userappdata}\AhlbornBridge2\Icons"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; File di configurazione: copiato solo alla prima installazione, preservato negli aggiornamenti
+; Settings.xml viene distribuito VUOTO (0 byte) in %APPDATA% solo se non esiste gia.
+; Un file vuoto fa fallire TryReadSettingsXml sul controllo di dimensione, quindi
+; nessun input MIDI risulta assegnato e al primo avvio parte il wizard di rilevamento
+; dispositivi (DetectMidiInputInteractive), che poi scrive il vero Settings.xml.
+; NON si distribuisce un seed con dati reali: conterrebbe dati personali (organi,
+; percorsi, device) del PC di build e non sarebbe valido su altre macchine.
 Source: "Settings.xml"; DestDir: "{userappdata}\AhlbornBridge2"; Flags: onlyifdoesntexist
 
 ; Se preferisci specificare file singoli, sostituisci il pattern * con percorsi espliciti

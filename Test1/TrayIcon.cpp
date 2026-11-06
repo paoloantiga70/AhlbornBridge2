@@ -90,6 +90,8 @@ constexpr int kHauptwerkAutoAssignSwitchOutputsCheckId = 505;
 constexpr int kHauptwerkRestoreOrganSwitchStatesCheckId = 508;
 constexpr int kHauptwerkStopListId = 506;
 constexpr int kHauptwerkResetStopsButtonId = 507;
+constexpr int kStreamDeckAppAutoStartCheckId = 511;
+constexpr int kHideHauptwerkOnConsolePowerOnCheckId = 512;
 constexpr int kHauptwerkCachePresetsButtonId = 509;
 constexpr int kBiduleBrowseButtonId = 601;
 constexpr int kBiduleAutoDetectButtonId = 602;
@@ -1301,6 +1303,24 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 (HMENU)kHauptwerkRestoreOrganSwitchStatesCheckId, nullptr, nullptr);
             SendMessageW(hRestoreStatesCheck, BM_SETCHECK, restoreOrganSwitchStates ? BST_CHECKED : BST_UNCHECKED, 0);
 
+            bool hideHauptwerkOnConsolePowerOn = true;
+            LoadHideHauptwerkOnConsolePowerOn(hideHauptwerkOnConsolePowerOn);
+            HWND hHideHwCheck = CreateWindowW(L"BUTTON",
+                L"Hide Hauptwerk on console power-on until an organ is loaded",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 726, 540, 20, g_settingsHauptwerkPageHwnd,
+                (HMENU)kHideHauptwerkOnConsolePowerOnCheckId, nullptr, nullptr);
+            SendMessageW(hHideHwCheck, BM_SETCHECK, hideHauptwerkOnConsolePowerOn ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            bool streamDeckAppAutoStart = true;
+            LoadStreamDeckAppAutoStart(streamDeckAppAutoStart);
+            HWND hSdAutoStartCheck = CreateWindowW(L"BUTTON",
+                L"Auto-start and close the Elgato Stream Deck app with AhlbornBridge",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 750, 540, 20, g_settingsHauptwerkPageHwnd,
+                (HMENU)kStreamDeckAppAutoStartCheckId, nullptr, nullptr);
+            SendMessageW(hSdAutoStartCheck, BM_SETCHECK, streamDeckAppAutoStart ? BST_CHECKED : BST_UNCHECKED, 0);
+
             RefreshHauptwerkAudioAssignmentsUI();
         }
 
@@ -1823,6 +1843,24 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             SaveRestoreOrganSwitchStates(enabled);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kHideHauptwerkOnConsolePowerOnCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = GetDlgItem(g_settingsHauptwerkPageHwnd ? g_settingsHauptwerkPageHwnd : hWnd, kHideHauptwerkOnConsolePowerOnCheckId);
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveHideHauptwerkOnConsolePowerOn(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kStreamDeckAppAutoStartCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+                hCheck = GetDlgItem(g_settingsHauptwerkPageHwnd ? g_settingsHauptwerkPageHwnd : hWnd, kStreamDeckAppAutoStartCheckId);
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveStreamDeckAppAutoStart(enabled);
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleBrowseButtonId)
         {
             std::wstring bidulePath;
@@ -2117,6 +2155,48 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             HandleMidiDeviceChange(hWnd);
         }
         return 0;
+    case WM_GETMINMAXINFO:
+    {
+        // Enforce a sensible minimum size so controls remain usable.
+        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        mmi->ptMinTrackSize.x = 780;
+        mmi->ptMinTrackSize.y = 640;
+        return 0;
+    }
+    case WM_SIZE:
+    {
+        if (g_settingsTabHwnd && IsWindow(g_settingsTabHwnd))
+        {
+            RECT clientRect = {};
+            GetClientRect(hWnd, &clientRect);
+            const int margin = 8;
+            MoveWindow(g_settingsTabHwnd,
+                margin, margin,
+                clientRect.right - clientRect.left - (margin * 2),
+                clientRect.bottom - clientRect.top - (margin * 2),
+                TRUE);
+
+            RECT tabRect = {};
+            GetClientRect(g_settingsTabHwnd, &tabRect);
+            TabCtrl_AdjustRect(g_settingsTabHwnd, FALSE, &tabRect);
+            MapWindowPoints(g_settingsTabHwnd, hWnd, reinterpret_cast<LPPOINT>(&tabRect), 2);
+
+            HWND pages[] = {
+                g_settingsMidiPageHwnd, g_settingsInfoPageHwnd, g_settingsOrganInfoPageHwnd,
+                g_settingsHauptwerkPageHwnd, g_settingsBidulePageHwnd, g_settingsStreamDeckPageHwnd,
+                g_settingsProcessMgrPageHwnd, g_settingsConsoleMidiPageHwnd, g_settingsAboutPageHwnd
+            };
+            for (HWND page : pages)
+            {
+                if (page && IsWindow(page))
+                    MoveWindow(page,
+                        tabRect.left, tabRect.top,
+                        tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+                        TRUE);
+            }
+        }
+        return 0;
+    }
     case WM_NOTIFY:
         if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hauptwerkOrganListHwnd
             && reinterpret_cast<LPNMHDR>(lParam)->code == LVN_ITEMCHANGED)
@@ -2656,6 +2736,12 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		running = false;
 		StopOrganFolderWatcher();
 		StopStreamDeckPipeServer();
+		{
+			bool streamDeckAutoStart = true;
+			LoadStreamDeckAppAutoStart(streamDeckAutoStart);
+			if (streamDeckAutoStart)
+				CloseStreamDeckApp();
+		}
 		FlushOrganSwitchStatesToDisk();
 		ClosePhysicalOutputForSwitches();
 		if (hMidiIn)
@@ -2705,7 +2791,7 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner, int initialTab)
         WS_EX_TOOLWINDOW,
         kSettingsClassName,
         L"General Preferences",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 780, 820,
         hOwner,
         nullptr,

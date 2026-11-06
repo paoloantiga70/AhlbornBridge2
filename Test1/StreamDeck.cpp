@@ -9,6 +9,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <knownfolders.h>
+#include <tlhelp32.h>
 #include <string>
 #include <vector>
 #include <atomic>
@@ -1095,6 +1096,145 @@ static void UpdateStreamDeckProfileTitles()
     {
         printf("[ProfileUpdate] No title changes needed.\n");
     }
+}
+
+// ─── Launch / close the Elgato Stream Deck desktop application ──────────────
+namespace
+{
+    // Resolves the Stream Deck executable path, trying the 64-bit and 32-bit
+    // Program Files locations. Returns an empty string if not found.
+    std::wstring ResolveStreamDeckExePath()
+    {
+        const wchar_t* candidates[] = {
+            L"C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe",
+            L"C:\\Program Files (x86)\\Elgato\\StreamDeck\\StreamDeck.exe",
+        };
+        for (const wchar_t* path : candidates)
+        {
+            DWORD attr = GetFileAttributesW(path);
+            if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+                return path;
+        }
+        return {};
+    }
+}
+
+bool IsStreamDeckAppRunning()
+{
+    bool running = false;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE)
+    {
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(snapshot, &pe))
+        {
+            do
+            {
+                if (_wcsicmp(pe.szExeFile, L"StreamDeck.exe") == 0)
+                {
+                    running = true;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &pe));
+        }
+        CloseHandle(snapshot);
+    }
+    return running;
+}
+
+void LaunchStreamDeckApp()
+{
+    if (IsStreamDeckAppRunning())
+    {
+        printf("[StreamDeckApp] Already running — not launching again.\n");
+        return;
+    }
+
+    std::wstring exePath = ResolveStreamDeckExePath();
+    if (exePath.empty())
+    {
+        printf("[StreamDeckApp] StreamDeck.exe not found — cannot launch.\n");
+        return;
+    }
+
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", exePath.c_str(), nullptr, nullptr, SW_HIDE);
+    if (reinterpret_cast<INT_PTR>(result) > 32)
+        printf("[StreamDeckApp] Launched Stream Deck application.\n");
+    else
+    {
+        printf("[StreamDeckApp] Failed to launch Stream Deck (code=%lld).\n", (long long)reinterpret_cast<INT_PTR>(result));
+        return;
+    }
+
+    // Stream Deck ignores the SW_HIDE flag and shows its main window anyway, so
+    // hide it manually: for a few seconds, enumerate the StreamDeck.exe top-level
+    // windows and hide them as soon as they appear (the app keeps running in the
+    // system tray).
+    std::thread([]() {
+        for (int i = 0; i < 40; ++i) // up to ~20s
+        {
+            Sleep(500);
+
+            DWORD sdPid = 0;
+            {
+                HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (snapshot != INVALID_HANDLE_VALUE)
+                {
+                    PROCESSENTRY32W pe{};
+                    pe.dwSize = sizeof(pe);
+                    if (Process32FirstW(snapshot, &pe))
+                    {
+                        do
+                        {
+                            if (_wcsicmp(pe.szExeFile, L"StreamDeck.exe") == 0)
+                            {
+                                sdPid = pe.th32ProcessID;
+                                break;
+                            }
+                        } while (Process32NextW(snapshot, &pe));
+                    }
+                    CloseHandle(snapshot);
+                }
+            }
+            if (sdPid == 0)
+                continue;
+
+            bool hidAny = false;
+            std::pair<DWORD, bool*> ctx(sdPid, &hidAny);
+            EnumWindows([](HWND hWnd, LPARAM lParam) -> BOOL {
+                auto* ctx = reinterpret_cast<std::pair<DWORD, bool*>*>(lParam);
+                DWORD winPid = 0;
+                GetWindowThreadProcessId(hWnd, &winPid);
+                if (winPid == ctx->first && IsWindowVisible(hWnd))
+                {
+                    // Only hide real top-level application windows (with a title).
+                    wchar_t title[256] = {};
+                    if (GetWindowTextW(hWnd, title, 256) > 0)
+                    {
+                        ShowWindow(hWnd, SW_HIDE);
+                        *(ctx->second) = true;
+                    }
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&ctx));
+
+            if (hidAny)
+            {
+                printf("[StreamDeckApp] Stream Deck window hidden to tray.\n");
+                break;
+            }
+        }
+    }).detach();
+}
+
+void CloseStreamDeckApp()
+{
+    if (!IsStreamDeckAppRunning())
+        return;
+
+    printf("[StreamDeckApp] Closing Stream Deck application.\n");
+    system("taskkill /f /im StreamDeck.exe >nul 2>&1");
 }
 
 void NotifyStreamDeckOrganList()

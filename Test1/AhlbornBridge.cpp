@@ -211,6 +211,13 @@ if (FAILED(hr))
 					// idempotent, so existing profiles are preserved.
 					EnsureStreamDeckProfilesInstalled();
 
+					// Launch the Elgato Stream Deck desktop app automatically so
+					// the user does not have to start it manually (if enabled).
+					bool streamDeckAutoStart = true;
+					LoadStreamDeckAppAutoStart(streamDeckAutoStart);
+					if (streamDeckAutoStart)
+						LaunchStreamDeckApp();
+
 					StartStreamDeckPipeServer();
 				}
 				else
