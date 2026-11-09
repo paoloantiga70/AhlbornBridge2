@@ -85,6 +85,7 @@ static std::string g_currentDeviceId;
 
 // Stream Deck profile (packaged in the plugin) activated when an organ is loaded.
 static const char* kOrganLoadedProfile = "OrganLoaded";
+static const char* kBaseProfile = "AhlbornBridge";
 
 // Pending profile switch requested before the device id was known.
 // hasPending=true means a switch is queued; pendingProfile is the target
@@ -104,6 +105,7 @@ struct ButtonInfo
     int switchIndex = 0;
     bool switchIsOn = false;
     std::string thumbnail;       // IR church thumbnail filename (action com.ahlbornbridge.ir)
+    std::string meterChannel;    // OSC target for the level meter (action com.ahlbornbridge.levelmeter)
     // Cache to avoid redundant WS messages
     std::string lastSvg;
     int lastState = -1;
@@ -119,10 +121,17 @@ static bool g_altiverbUiOpen = false;
 static bool g_consoleConnected = false;
 static bool g_hauptwerkRunning = false;
 static bool g_biduleSplashActive = false;
+// Tracks the previous console-connected state to detect the power-on edge.
+static bool g_prevConsoleConnected = false;
 // Audio level clipping of the loaded organ: 0 green, 1 orange, 2 red (clipping).
 static std::atomic<int> g_audioClipping{ 0 };
-// Persistent "clip latch": organ indices that have experienced a red clip
-// (AudioLevelClipping == 2) since the last user acknowledgement. The red marker
+// Last audio level (0..1) for the DSP_FRONT master meter, mapped from dB.
+static std::atomic<float> g_masterLevel{ 0.0f };
+static std::atomic<float> g_masterLevelDb{ -60.0f };
+// Per-channel last audio level, keyed by OSC target (e.g. "AUDIO_FRONT_L").
+// value.first = normalized 0..1 level, value.second = raw dB.
+static std::mutex g_levelByChannelMutex;
+static std::map<std::string, std::pair<float, float>> g_levelByChannel;
 // stays visible even after clipping clears, so the user notices it after
 // playing. Cleared when the user presses the organ key.
 static std::mutex g_clipLatchMutex;
@@ -215,6 +224,15 @@ static int JsonExtractInt(const std::string& json, const std::string& key)
     if (pos == std::string::npos) return 0;
     pos += search.size();
     return atoi(json.c_str() + pos);
+}
+
+static float JsonExtractFloat(const std::string& json, const std::string& key, float defaultValue = 0.0f)
+{
+    std::string search = "\"" + key + "\":";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos) return defaultValue;
+    pos += search.size();
+    return static_cast<float>(atof(json.c_str() + pos));
 }
 
 static bool JsonExtractBool(const std::string& json, const std::string& key, bool defaultValue = false)
@@ -662,6 +680,89 @@ static std::string BuildConsolePowerButtonSvg(const std::string& title, bool isO
     svg += "<circle cx='44' cy='114' r='7' fill='" + ledFill + "' stroke='" + ledStroke + "' stroke-width='2'/>";
     svg += "<text x='82' y='119' font-family='Arial' font-size='14' fill='" + onOffColor + "' text-anchor='middle' font-weight='bold'>" + onOffText + "</text>";
 
+    svg += "</svg>";
+    return svg;
+}
+
+// Maps an OSC meter channel target (e.g. "AUDIO_FRONT_L") to a short label
+// shown on the meter button (e.g. "FRONT").
+static std::string MeterChannelLabel(const std::string& channel)
+{
+    if (channel.find("SIDE") != std::string::npos)      return "SIDE";
+    if (channel.find("REAR") != std::string::npos)      return "REAR";
+    if (channel.find("HAUPTWERK") != std::string::npos) return "HAUPTWERK";
+    if (channel.find("FRONT") != std::string::npos)     return "FRONT";
+    return "LEVEL";
+}
+
+// Build an SVG image for a horizontal audio level (VU) meter button.
+// 'level' is a normalized 0.0-1.0 value (already mapped from dB). 'dB' is the raw
+// decibel value used for the readout label. 'label' is the channel caption shown
+// at the top of the key. The bar fills left-to-right with a green -> yellow ->
+// red color scheme and a clipping indicator near full scale.
+static std::string BuildLevelMeterSvg(float level, float dB, const std::string& label = "LEVEL")
+{
+    if (level < 0.0f) level = 0.0f;
+    if (level > 1.0f) level = 1.0f;
+
+    // Geometry of the horizontal bar track (within the 144x144 key).
+    const int trackX = 14;
+    const int trackY = 72;
+    const int trackW = 116;
+    const int trackH = 26;
+
+    int fillW = static_cast<int>(trackW * level + 0.5f);
+    if (fillW < 0) fillW = 0;
+    if (fillW > trackW) fillW = trackW;
+
+    // A level at/near the floor means "no signal yet" (idle look).
+    const bool idle = (dB <= -59.5f);
+
+    // Fill color follows the level: green < 70%, yellow < 90%, red otherwise.
+    std::string fillColor = "#21c25a";      // green
+    if (level >= 0.90f)      fillColor = "#e53935"; // red (near clip)
+    else if (level >= 0.70f) fillColor = "#f2c744"; // yellow
+
+    char dbBuf[32] = {};
+    if (idle)
+        snprintf(dbBuf, sizeof(dbBuf), "-- dB");
+    else
+        snprintf(dbBuf, sizeof(dbBuf), "%.1f dB", dB);
+
+    std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg'>";
+    svg += "<rect width='144' height='144' rx='14' fill='#0f1115'/>";
+    svg += "<rect x='4' y='4' width='136' height='136' rx='12' fill='#161a20' stroke='#2a2f37' stroke-width='3'/>";
+    // Small action-type tag so the key is identifiable even with no signal.
+    svg += "<rect x='40' y='14' width='64' height='17' rx='8' fill='#1d2630' stroke='#30475e' stroke-width='1'/>";
+    svg += "<text x='72' y='26' font-family='Arial' font-size='10' fill='#6ab0ff' text-anchor='middle' font-weight='bold' letter-spacing='1.5'>AUDIO VU</text>";
+    // Channel name badge (prominent).
+    svg += "<text x='72' y='52' font-family='Arial' font-size='18' fill='#e6edf3' text-anchor='middle' font-weight='bold' letter-spacing='1'>" + XmlEscape(label) + "</text>";
+    // Track background
+    svg += "<rect x='" + std::to_string(trackX) + "' y='" + std::to_string(trackY) +
+           "' width='" + std::to_string(trackW) + "' height='" + std::to_string(trackH) +
+           "' rx='6' fill='#11161c' stroke='#2a2f37' stroke-width='1.5'/>";
+    // Scale tick marks at 70% and 90% thresholds.
+    for (float frac : { 0.70f, 0.90f })
+    {
+        int tx = trackX + static_cast<int>(trackW * frac + 0.5f);
+        svg += "<rect x='" + std::to_string(tx) + "' y='" + std::to_string(trackY - 3) +
+               "' width='1' height='" + std::to_string(trackH + 6) + "' fill='#3a4350'/>";
+    }
+    // Filled portion
+    if (fillW > 0 && !idle)
+    {
+        svg += "<rect x='" + std::to_string(trackX) + "' y='" + std::to_string(trackY) +
+               "' width='" + std::to_string(fillW) + "' height='" + std::to_string(trackH) +
+               "' rx='6' fill='" + fillColor + "'/>";
+    }
+    // Clip marker at the right edge
+    std::string clipColor = (!idle && level >= 0.98f) ? "#ff5252" : "#3a3f47";
+    svg += "<rect x='" + std::to_string(trackX + trackW - 3) + "' y='" + std::to_string(trackY - 2) +
+           "' width='4' height='" + std::to_string(trackH + 4) + "' rx='2' fill='" + clipColor + "'/>";
+    // dB readout
+    std::string dbColor = idle ? "#6b7480" : "#e6edf3";
+    svg += "<text x='72' y='124' font-family='Arial' font-size='18' fill='" + dbColor + "' text-anchor='middle' font-weight='bold'>" +
+           XmlEscape(dbBuf) + "</text>";
     svg += "</svg>";
     return svg;
 }
@@ -1214,6 +1315,31 @@ static void UpdateAllButtons()
         // IR church buttons render a static thumbnail set in willAppear; skip them.
         if (info.action == "com.ahlbornbridge.ir")
             continue;
+        // Audio level (VU) meter buttons are driven by OSC level updates and
+        // render their own caption/bar; redraw with the last known level so they
+        // never fall back to the generic "Empty" organ look.
+        if (info.action == "com.ahlbornbridge.levelmeter")
+        {
+            std::string ch = info.meterChannel.empty() ? std::string("AUDIO_FRONT_L") : info.meterChannel;
+            float level = 0.0f, dB = -60.0f;
+            {
+                std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                auto lit = g_levelByChannel.find(ch);
+                if (lit != g_levelByChannel.end())
+                {
+                    level = lit->second.first;
+                    dB = lit->second.second;
+                }
+            }
+            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch));
+            if (svg != info.lastSvg)
+            {
+                SdSetImage(ctx, svg, 0);
+                SdSetTitle(ctx, "", 0);
+                info.lastSvg = svg;
+            }
+            continue;
+        }
         bool isSwitchAction = (info.action == "com.ahlbornbridge.switch");
         bool isActiveSensingAction = (info.action == "com.ahlbornbridge.activesensing");
         // For a "current organ" button, resolve to whatever organ is loaded now.
@@ -1300,6 +1426,32 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
             switchIsOn = it->second.switchIsOn;
             currentOrgan = it->second.currentOrgan;
         }
+    }
+    // Audio level (VU) meter buttons render their own caption/bar; never apply
+    // the generic organ/switch rendering path to them.
+    if (action == "com.ahlbornbridge.levelmeter")
+    {
+        std::string ch;
+        {
+            std::lock_guard<std::mutex> lk(g_buttonsMutex);
+            auto it = g_visibleButtons.find(context);
+            if (it != g_visibleButtons.end())
+                ch = it->second.meterChannel;
+        }
+        if (ch.empty()) ch = "AUDIO_FRONT_L";
+        float level = 0.0f, dB = -60.0f;
+        {
+            std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+            auto lit = g_levelByChannel.find(ch);
+            if (lit != g_levelByChannel.end())
+            {
+                level = lit->second.first;
+                dB = lit->second.second;
+            }
+        }
+        SdSetImage(context, BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch)), 0);
+        SdSetTitle(context, "", 0);
+        return;
     }
     bool isSwitchAction = (action == "com.ahlbornbridge.switch");
     bool isActiveSensingAction = (action == "com.ahlbornbridge.activesensing");
@@ -1661,6 +1813,51 @@ static void HandlePipeMessage(const std::string& msg)
             SdSwitchToProfile(kOrganLoadedProfile, "", page);
         RefreshIrChurchHighlights();
     }
+    else if (msg.find("\"dspValue\"") != std::string::npos)
+    {
+        // Real-time DSP value from an incoming OSC message (port 5000/5001).
+        // Currently used to drive the horizontal audio level (VU) meter button.
+        std::string dsp = JsonExtractString(msg, "dsp");
+        std::string param = JsonExtractString(msg, "param");
+        if (param == "Level" && !dsp.empty())
+        {
+            float dB = JsonExtractFloat(msg, "value", -60.0f);
+            // Map dB (-60..0) to a normalized 0..1 bar fraction.
+            float level = (dB + 60.0f) / 60.0f;
+            if (level < 0.0f) level = 0.0f;
+            if (level > 1.0f) level = 1.0f;
+
+            // Store the latest level for this OSC channel.
+            {
+                std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                g_levelByChannel[dsp] = { level, dB };
+            }
+            // Keep the legacy default (FRONT_L) in sync for untitled meters.
+            if (dsp == "AUDIO_FRONT_L")
+            {
+                g_masterLevel.store(level);
+                g_masterLevelDb.store(dB);
+            }
+
+            // Update every meter button whose configured channel matches 'dsp'.
+            // Buttons with no channel configured default to AUDIO_FRONT_L.
+            std::vector<std::string> targets;
+            {
+                std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                for (const auto& [ctx, info] : g_visibleButtons)
+                {
+                    if (info.action != "com.ahlbornbridge.levelmeter")
+                        continue;
+                    std::string ch = info.meterChannel.empty() ? std::string("AUDIO_FRONT_L") : info.meterChannel;
+                    if (ch == dsp)
+                        targets.push_back(ctx);
+                }
+            }
+            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(dsp));
+            for (const auto& ctx : targets)
+                SdSetImage(ctx, svg, 0);
+        }
+    }
     else if (msg.find("\"switches\"") != std::string::npos)
     {
         ParseSwitchList(msg);
@@ -1811,14 +2008,31 @@ static void HandlePipeMessage(const std::string& msg)
         }
         else if (loaded <= 0 && previousLoaded > 0)
         {
-            Log("[SD] Organ unloaded (prev=%d) -> returning to previous profile", previousLoaded);
+            Log("[SD] Organ unloaded (prev=%d) -> returning to AhlbornBridge profile", previousLoaded);
             // Clear any church highlight so a stale cyan border does not linger.
             {
                 std::lock_guard<std::mutex> hl(g_highlightedChurchMutex);
                 g_highlightedChurch.clear();
             }
-            SdSwitchToProfile("");
+            SdSwitchToProfile(kBaseProfile);
         }
+        // When the Ahlborn console is powered on (edge false -> true), force the
+        // Stream Deck onto the AhlbornBridge profile so the correct keys are shown
+        // without the user having to switch manually. If an organ is already
+        // loaded, the OrganLoaded profile above already applies; otherwise jump to
+        // the base AhlbornBridge profile.
+        if (consoleConnected && !g_prevConsoleConnected && !(loaded > 0 && previousLoaded <= 0))
+        {
+            Log("[SD] Console powered on -> switching to AhlbornBridge profile (loaded=%d)", loaded);
+            if (loaded > 0)
+                SdSwitchToProfile(kOrganLoadedProfile);
+            else
+                // The base "AhlbornBridge" profile is now packaged by the bridge as
+                // a plugin-owned <name>.streamDeckProfile (with RequiredPlugins), so
+                // switchToProfile can activate it by name from any current profile.
+                SdSwitchToProfile(kBaseProfile);
+        }
+        g_prevConsoleConnected = consoleConnected;
 
         if (loaded > 0 && previousLoaded != loaded)
             UpdateAllButtons();
@@ -2036,6 +2250,7 @@ static void HttpListenerThread()
             std::string ctx = ExtractQueryParam(request, "ctx");
             std::string organStr = ExtractQueryParam(request, "organ");
             std::string switchStr = ExtractQueryParam(request, "switch");
+            std::string meterStr = ExtractQueryParam(request, "meter");
             int organIndex = atoi(organStr.c_str());
             int switchIndex = atoi(switchStr.c_str());
 
@@ -2136,6 +2351,36 @@ static void HttpListenerThread()
                 }
 
                 UpdateButtonForContext(ctx, 0);
+            }
+            else if (!ctx.empty() && !meterStr.empty())
+            {
+                std::string meterChannel = meterStr;
+                if (meterChannel.empty())
+                    meterChannel = "AUDIO_FRONT_L";
+                Log("[HTTP] SetMeter: ctx=%.40s channel=%s", ctx.c_str(), meterChannel.c_str());
+
+                std::string settingsJson = "{\"meterChannel\":\"" + EscapeJson(meterChannel) + "\"}";
+                SdSetSettings(ctx, settingsJson);
+
+                {
+                    std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                    auto it = g_visibleButtons.find(ctx);
+                    if (it != g_visibleButtons.end())
+                        it->second.meterChannel = meterChannel;
+                }
+
+                float level = 0.0f, dB = -60.0f;
+                {
+                    std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                    auto it = g_levelByChannel.find(meterChannel);
+                    if (it != g_levelByChannel.end())
+                    {
+                        level = it->second.first;
+                        dB = it->second.second;
+                    }
+                }
+                SdSetImage(ctx, BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel)), 0);
+                SdSetTitle(ctx, "", 0);
             }
         }
 
@@ -2255,6 +2500,36 @@ static void HandleSdEvent(const std::string& json)
             return;
         }
 
+        if (action == "com.ahlbornbridge.levelmeter")
+        {
+            // Audio level (VU) meter button: register and render the last known level.
+            std::string meterChannel = JsonExtractString(settings, "meterChannel");
+            if (meterChannel.empty())
+                meterChannel = "AUDIO_FRONT_L";
+            {
+                std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                ButtonInfo info;
+                info.context = context;
+                info.action = action;
+                info.meterChannel = meterChannel;
+                g_visibleButtons[context] = info;
+            }
+            float level = 0.0f, dB = -60.0f;
+            {
+                std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                auto it = g_levelByChannel.find(meterChannel);
+                if (it != g_levelByChannel.end())
+                {
+                    level = it->second.first;
+                    dB = it->second.second;
+                }
+            }
+            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel));
+            SdSetImage(context, svg, 0);
+            SdSetTitle(context, "", 0);
+            return;
+        }
+
         {
             std::lock_guard<std::mutex> lk(g_buttonsMutex);
             ButtonInfo info;
@@ -2333,6 +2608,37 @@ static void HandleSdEvent(const std::string& json)
                 Log("[SD] Delayed refresh after willAppear burst");
                 UpdateAllButtons();
             }).detach();
+        }
+    }
+    else if (event == "deviceDidConnect")
+    {
+        // A Stream Deck device connected. Capture its id so profile switches can
+        // run even when no plugin action is currently visible (e.g. the console
+        // powers on while another profile is active and willAppear never fires).
+        std::string device = JsonExtractString(json, "device");
+        Log("[SD] deviceDidConnect: device=%.60s", device.c_str());
+        if (!device.empty())
+        {
+            {
+                std::lock_guard<std::mutex> dl(g_deviceMutex);
+                g_currentDeviceId = device;
+            }
+            bool runPending = false;
+            std::string pendingName;
+            {
+                std::lock_guard<std::mutex> pl(g_pendingProfileMutex);
+                if (g_pendingProfileSwitch)
+                {
+                    runPending = true;
+                    pendingName = g_pendingProfileName;
+                    g_pendingProfileSwitch = false;
+                }
+            }
+            if (runPending)
+            {
+                Log("[SD] Executing deferred profile switch (deviceDidConnect) -> '%s'", pendingName.c_str());
+                SdSwitchToProfile(pendingName, device);
+            }
         }
     }
     else if (event == "willDisappear")
@@ -2862,11 +3168,69 @@ static void HandleSdEvent(const std::string& json)
             }
             UpdateButtonForContext(context, 0);
         }
+        else if (piEvent == "setMeterChannel")
+        {
+            std::string meterChannel = JsonExtractString(payload, "meterChannel");
+            if (meterChannel.empty())
+                meterChannel = "AUDIO_FRONT_L";
+            std::string settingsJson = "{\"meterChannel\":\"" + EscapeJson(meterChannel) + "\"}";
+            SdSetSettings(context, settingsJson);
+            {
+                std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                auto it = g_visibleButtons.find(context);
+                if (it != g_visibleButtons.end())
+                    it->second.meterChannel = meterChannel;
+            }
+            // Re-render the meter with the last known level for the new channel.
+            float level = 0.0f, dB = -60.0f;
+            {
+                std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                auto it = g_levelByChannel.find(meterChannel);
+                if (it != g_levelByChannel.end())
+                {
+                    level = it->second.first;
+                    dB = it->second.second;
+                }
+            }
+            SdSetImage(context, BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel)), 0);
+            SdSetTitle(context, "", 0);
+        }
     }
     else if (event == "didReceiveSettings")
     {
         std::string payload = JsonExtractObject(json, "payload");
         std::string settings = JsonExtractObject(payload, "settings");
+
+        // Audio level (VU) meter button: update the configured channel and
+        // re-render the meter with the new caption/label. Handled separately
+        // because meters do not use the organ/switch rendering path below.
+        if (action == "com.ahlbornbridge.levelmeter")
+        {
+            std::string meterChannel = JsonExtractString(settings, "meterChannel");
+            if (meterChannel.empty())
+                meterChannel = "AUDIO_FRONT_L";
+            {
+                std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                auto it = g_visibleButtons.find(context);
+                if (it != g_visibleButtons.end())
+                    it->second.meterChannel = meterChannel;
+            }
+            float level = 0.0f, dB = -60.0f;
+            {
+                std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                auto it = g_levelByChannel.find(meterChannel);
+                if (it != g_levelByChannel.end())
+                {
+                    level = it->second.first;
+                    dB = it->second.second;
+                }
+            }
+            Log("[SD] didReceiveSettings: meter context=%.40s channel=%s", context.c_str(), meterChannel.c_str());
+            SdSetImage(context, BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel)), 0);
+            SdSetTitle(context, "", 0);
+            return;
+        }
+
         int organIndex = JsonExtractInt(settings, "organIndex");
         bool currentOrgan = JsonExtractBool(settings, "currentOrgan", false);
         int switchIndex = JsonExtractInt(settings, "switchIndex");

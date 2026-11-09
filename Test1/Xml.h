@@ -102,6 +102,19 @@ bool SaveBiduleCloseOnUnload(bool enabled);
 bool LoadBiduleCloseOnUnload(bool& enabled);
 bool SaveBiduleHideHauptwerkOnAltiverbUi(bool enabled);
 bool LoadBiduleHideHauptwerkOnAltiverbUi(bool& enabled);
+
+// Bidule OSC/UDP port configuration (DSP input, Level input, OSC output).
+void LoadBiduleOscPorts();
+bool SaveBiduleOscPorts(bool dspEnabled, int dspPort,
+                        bool levelEnabled, int levelPort,
+                        bool oscOutEnabled, int oscOutPort);
+bool IsBiduleDspPortEnabled();
+int  GetBiduleDspPort();
+bool IsBiduleLevelPortEnabled();
+int  GetBiduleLevelPort();
+bool IsBiduleOscOutEnabled();
+int  GetBiduleOscOutPort();
+
 bool SaveActiveSensingEnabled(bool enabled);
 bool LoadActiveSensingEnabled(bool& enabled);
 bool SaveActiveSensingOutputName(const std::wstring& name);

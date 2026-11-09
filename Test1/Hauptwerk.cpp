@@ -793,6 +793,17 @@ static bool SendBiduleOscSingleStringCommand(const char* address, const std::wst
     if (!address || !*address || value.empty())
         return false;
 
+    // Respect the Bidule OSC output configuration. When the caller used the
+    // default port (3210) resolve the user-configured output port instead.
+    LoadBiduleOscPorts();
+    if (!IsBiduleOscOutEnabled())
+    {
+        printf("[BiduleOSC] Output disabled in settings; skipping %s.\n", address);
+        return false;
+    }
+    if (port == 3210)
+        port = static_cast<unsigned short>(GetBiduleOscOutPort());
+
     auto appendOscString = [](std::vector<char>& buffer, const std::string& text)
     {
         buffer.insert(buffer.end(), text.begin(), text.end());
@@ -889,6 +900,16 @@ bool SendBiduleOscFloatCommand(const std::wstring& address, float value, unsigne
 {
     if (address.empty())
         return false;
+
+    // Respect the Bidule OSC output configuration (enable flag + port).
+    LoadBiduleOscPorts();
+    if (!IsBiduleOscOutEnabled())
+    {
+        printf("[BiduleOSC] Output disabled in settings; skipping %S.\n", address.c_str());
+        return false;
+    }
+    if (port == 3210)
+        port = static_cast<unsigned short>(GetBiduleOscOutPort());
 
     int utf8AddrLen = WideCharToMultiByte(CP_UTF8, 0, address.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (utf8AddrLen <= 1)
@@ -1374,6 +1395,11 @@ namespace
     SOCKET            g_oscDspSocket = INVALID_SOCKET;
     SOCKET            g_oscLevelSocket = INVALID_SOCKET;
 
+    // One-shot trigger: when armed, the first datagram received on the DSP port
+    // (5000) sends a single "/play true" to Bidule, then disarms. See
+    // ArmBidulePlayOnNextDspPacket() for rationale.
+    std::atomic<bool> g_playOnNextDspPacket{ false };
+
     // Per-DSP throttle timestamps for the audio level meter (port 5001).
     std::mutex g_levelThrottleMutex;
     std::map<std::string, std::chrono::steady_clock::time_point> g_levelLastPush;
@@ -1581,6 +1607,8 @@ namespace
 
     const std::vector<OscCommand> g_levelCommands = {
         { "Level", &OnAudioLevel },
+        // Bidule streams the real-time meter as /AUDIO_FRONT_L/Maximum_sample.
+        { "Maximum_sample", &OnAudioLevel },
         // Add more audio-level commands here.
     };
 
@@ -1685,6 +1713,16 @@ namespace
             if (received <= 0)
                 continue;
 
+            // If a profile load armed the one-shot play trigger, the arrival of
+            // the first DSP parameter datagram proves Bidule finished loading the
+            // profile. That is the right moment to start the audio engine. Only
+            // the DSP port (5000) acts as this readiness signal.
+            if (port == kOscDspPort && g_playOnNextDspPacket.exchange(false))
+            {
+                SendBiduleOscPlay(true);
+                printf("[Bidule] First DSP packet received -> activated audio engine with /play true.\n");
+            }
+
             // Handles both plain OSC messages and OSC bundles (#bundle...).
             ProcessOscData(buffer, received, table);
         }
@@ -1693,20 +1731,37 @@ namespace
     }
 } // namespace
 
+void ArmBidulePlayOnNextDspPacket()
+{
+    g_playOnNextDspPacket.store(true);
+    printf("[Bidule] Armed /play true on next DSP packet (port 5000).\n");
+}
+
 void StartOscListeners()
 {
     if (g_oscListenersRunning.exchange(true))
         return;                                   // already running
 
+    // Pick up the latest configured ports/enable flags from Settings.xml.
+    LoadBiduleOscPorts();
+
     WSADATA wsa = {};
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
-    g_oscDspThread = std::thread([]() {
-        OscListenerLoop(g_oscDspSocket, kOscDspPort, g_dspCommands, "DSP");
-    });
-    g_oscLevelThread = std::thread([]() {
-        OscListenerLoop(g_oscLevelSocket, kOscLevelPort, g_levelCommands, "Level");
-    });
+    if (IsBiduleDspPortEnabled())
+    {
+        unsigned short dspPort = static_cast<unsigned short>(GetBiduleDspPort());
+        g_oscDspThread = std::thread([dspPort]() {
+            OscListenerLoop(g_oscDspSocket, dspPort, g_dspCommands, "DSP");
+        });
+    }
+    if (IsBiduleLevelPortEnabled())
+    {
+        unsigned short levelPort = static_cast<unsigned short>(GetBiduleLevelPort());
+        g_oscLevelThread = std::thread([levelPort]() {
+            OscListenerLoop(g_oscLevelSocket, levelPort, g_levelCommands, "Level");
+        });
+    }
 }
 
 void StopOscListeners()

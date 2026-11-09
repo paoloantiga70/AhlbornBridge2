@@ -24,3 +24,10 @@ void ApplyHauptwerkPriorityNow();
 // Each runs in its own thread; safe to call Start/Stop once.
 void StartOscListeners();
 void StopOscListeners();
+
+// Arms a one-shot trigger so that the next OSC datagram received on the DSP
+// port (5000) causes a single "/play true" to be sent to Bidule. This is used
+// after loading an organ/profile: the first incoming parameter burst from the
+// freshly loaded Bidule profile proves the profile is ready, which is the exact
+// moment to start the audio engine. The trigger disarms itself after firing.
+void ArmBidulePlayOnNextDspPacket();

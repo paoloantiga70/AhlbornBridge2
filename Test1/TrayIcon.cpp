@@ -51,6 +51,13 @@ static HWND g_biduleOscAddressEditHwnd = nullptr;
 static HWND g_biduleOscValueEditHwnd = nullptr;
 static HWND g_biduleOscPortEditHwnd = nullptr;
 static HWND g_biduleOscStatusTextHwnd = nullptr;
+static HWND g_biduleDspPortCheckHwnd = nullptr;
+static HWND g_biduleDspPortEditHwnd = nullptr;
+static HWND g_biduleLevelPortCheckHwnd = nullptr;
+static HWND g_biduleLevelPortEditHwnd = nullptr;
+static HWND g_biduleOscOutCheckHwnd = nullptr;
+static HWND g_biduleOscOutPortEditHwnd = nullptr;
+static HWND g_biduleUdpPortsStatusHwnd = nullptr;
 static HWND g_sdPipeServerCheckHwnd = nullptr;
 static HWND g_settingsProcessMgrPageHwnd = nullptr;
 static HWND g_processMgrStatusTextHwnd = nullptr;
@@ -98,6 +105,10 @@ constexpr int kBiduleAutoDetectButtonId = 602;
 constexpr int kBiduleCloseOnUnloadCheckId = 603;
 constexpr int kBiduleOscSendButtonId = 604;
 constexpr int kBiduleHideHwOnAltiverbUiCheckId = 605;
+constexpr int kBiduleUdpPortsApplyButtonId = 606;
+constexpr int kBiduleDspPortCheckId = 607;
+constexpr int kBiduleLevelPortCheckId = 608;
+constexpr int kBiduleOscOutCheckId = 609;
 constexpr int kProcessMgrStartButtonId   = 701;
 constexpr int kProcessMgrStopButtonId    = 702;
 constexpr int kProcessMgrUninstallButtonId = 703;
@@ -367,6 +378,29 @@ namespace
             LoadBiduleHideHauptwerkOnAltiverbUi(hideHw);
             SendMessageW(g_biduleHideHwOnAltiverbUiCheckHwnd, BM_SETCHECK,
                 hideHw ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        if (g_biduleDspPortCheckHwnd || g_biduleLevelPortCheckHwnd || g_biduleOscOutCheckHwnd)
+        {
+            LoadBiduleOscPorts();
+
+            if (g_biduleDspPortCheckHwnd)
+                SendMessageW(g_biduleDspPortCheckHwnd, BM_SETCHECK,
+                    IsBiduleDspPortEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+            if (g_biduleDspPortEditHwnd)
+                SetWindowTextW(g_biduleDspPortEditHwnd, std::to_wstring(GetBiduleDspPort()).c_str());
+
+            if (g_biduleLevelPortCheckHwnd)
+                SendMessageW(g_biduleLevelPortCheckHwnd, BM_SETCHECK,
+                    IsBiduleLevelPortEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+            if (g_biduleLevelPortEditHwnd)
+                SetWindowTextW(g_biduleLevelPortEditHwnd, std::to_wstring(GetBiduleLevelPort()).c_str());
+
+            if (g_biduleOscOutCheckHwnd)
+                SendMessageW(g_biduleOscOutCheckHwnd, BM_SETCHECK,
+                    IsBiduleOscOutEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+            if (g_biduleOscOutPortEditHwnd)
+                SetWindowTextW(g_biduleOscOutPortEditHwnd, std::to_wstring(GetBiduleOscOutPort()).c_str());
         }
     }
 
@@ -1140,6 +1174,62 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 L"Hide Hauptwerk window while Altiverb plugin UI is open",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                 24, 272, 430, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleHideHwOnAltiverbUiCheckId, nullptr, nullptr);
+
+            RefreshBiduleSettingsUI();
+        }
+
+        {
+            CreateWindowW(L"BUTTON", L"UDP Ports (OSC)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 316, 740, 160, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Enable or disable each UDP port and change its value. Input ports are restarted on Apply.",
+                WS_CHILD | WS_VISIBLE,
+                24, 338, 700, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            // DSP input port (Altiverb DSP parameters)
+            g_biduleDspPortCheckHwnd = CreateWindowW(L"BUTTON", L"DSP input (Altiverb parameters)",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 366, 300, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleDspPortCheckId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Port:", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                330, 368, 40, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleDspPortEditHwnd = CreateWindowW(L"EDIT", L"5000",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+                376, 364, 70, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            // Level input port (real-time audio meter levels)
+            g_biduleLevelPortCheckHwnd = CreateWindowW(L"BUTTON", L"Level input (audio meter levels)",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 394, 300, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleLevelPortCheckId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Port:", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                330, 396, 40, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleLevelPortEditHwnd = CreateWindowW(L"EDIT", L"5001",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+                376, 392, 70, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            // OSC output port (commands sent to Bidule)
+            g_biduleOscOutCheckHwnd = CreateWindowW(L"BUTTON", L"OSC output (commands to Bidule)",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                24, 422, 300, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleOscOutCheckId, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"Port:", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                330, 424, 40, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleOscOutPortEditHwnd = CreateWindowW(L"EDIT", L"3210",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+                376, 420, 70, 24, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Apply",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                470, 420, 90, 24, g_settingsBidulePageHwnd, (HMENU)kBiduleUdpPortsApplyButtonId, nullptr, nullptr);
+
+            g_biduleUdpPortsStatusHwnd = CreateWindowW(L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE,
+                24, 450, 700, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
 
             RefreshBiduleSettingsUI();
         }
@@ -1926,6 +2016,37 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             SetTimer(hWnd, kBiduleOscStatusTimerId, 3000, nullptr);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleUdpPortsApplyButtonId)
+        {
+            auto readPort = [](HWND hEdit, int fallback) -> int {
+                if (!hEdit) return fallback;
+                wchar_t buf[16] = {};
+                GetWindowTextW(hEdit, buf, static_cast<int>(_countof(buf)));
+                int v = _wtoi(buf);
+                return (v > 0 && v <= 65535) ? v : fallback;
+            };
+
+            bool dspEnabled   = g_biduleDspPortCheckHwnd   && SendMessageW(g_biduleDspPortCheckHwnd,   BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool levelEnabled = g_biduleLevelPortCheckHwnd && SendMessageW(g_biduleLevelPortCheckHwnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool oscOutEnabled= g_biduleOscOutCheckHwnd    && SendMessageW(g_biduleOscOutCheckHwnd,    BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+            int dspPort   = readPort(g_biduleDspPortEditHwnd, 5000);
+            int levelPort = readPort(g_biduleLevelPortEditHwnd, 5001);
+            int oscOutPort= readPort(g_biduleOscOutPortEditHwnd, 3210);
+
+            bool saved = SaveBiduleOscPorts(dspEnabled, dspPort, levelEnabled, levelPort, oscOutEnabled, oscOutPort);
+
+            // Restart the input listeners so the new ports/enable flags apply now.
+            StopOscListeners();
+            StartOscListeners();
+
+            if (g_biduleUdpPortsStatusHwnd)
+                SetWindowTextW(g_biduleUdpPortsStatusHwnd,
+                    saved ? L"Ports applied and listeners restarted." : L"Failed to save port settings.");
+            SetTimer(hWnd, kBiduleOscStatusTimerId, 3000, nullptr);
+            RefreshBiduleSettingsUI();
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kProcessMgrRefreshButtonId)
         {
             if (g_processMgrStatusTextHwnd)
@@ -2319,6 +2440,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             KillTimer(hWnd, kBiduleOscStatusTimerId);
             if (g_biduleOscStatusTextHwnd)
                 SetWindowTextW(g_biduleOscStatusTextHwnd, L"");
+            if (g_biduleUdpPortsStatusHwnd)
+                SetWindowTextW(g_biduleUdpPortsStatusHwnd, L"");
         }
         return 0;
     case WM_HAUPTWERK_STOP_MAPPINGS_CHANGED:
@@ -2358,6 +2481,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_biduleOscValueEditHwnd = nullptr;
         g_biduleOscPortEditHwnd = nullptr;
         g_biduleOscStatusTextHwnd = nullptr;
+        g_biduleDspPortCheckHwnd = nullptr;
+        g_biduleDspPortEditHwnd = nullptr;
+        g_biduleLevelPortCheckHwnd = nullptr;
+        g_biduleLevelPortEditHwnd = nullptr;
+        g_biduleOscOutCheckHwnd = nullptr;
+        g_biduleOscOutPortEditHwnd = nullptr;
+        g_biduleUdpPortsStatusHwnd = nullptr;
         g_settingsHwnd = nullptr;
         return 0;
     default:

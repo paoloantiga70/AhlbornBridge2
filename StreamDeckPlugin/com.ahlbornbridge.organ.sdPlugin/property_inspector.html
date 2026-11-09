@@ -58,6 +58,15 @@
             <option value="0">-- Select switch --</option>
         </select>
     </div>
+    <div class="sdpi-item" id="meterRow" style="display:none;">
+        <div class="sdpi-item-label">Channel</div>
+        <select id="meterSelect">
+            <option value="AUDIO_FRONT_L">FRONT L</option>
+            <option value="AUDIO_SIDE_L">SIDE L</option>
+            <option value="AUDIO_REAR_L">REAR L</option>
+            <option value="AUDIO_HAUPTWERK_L">HAUPTWERK L</option>
+        </select>
+    </div>
     <div class="info" id="status">Waiting for Stream Deck...</div>
 
     <script>
@@ -67,8 +76,10 @@
         var currentSettings = {};
         var organSelectEl = document.getElementById('organSelect');
         var switchSelectEl = document.getElementById('switchSelect');
+        var meterSelectEl = document.getElementById('meterSelect');
         var organRowEl = document.getElementById('organRow');
         var switchRowEl = document.getElementById('switchRow');
+        var meterRowEl = document.getElementById('meterRow');
         var statusEl = document.getElementById('status');
 
         function isSwitchAction() {
@@ -79,11 +90,21 @@
             return piAction === 'com.ahlbornbridge.activesensing';
         }
 
+        function isMeterAction() {
+            return piAction === 'com.ahlbornbridge.levelmeter';
+        }
+
         function refreshActionLayout() {
             var switchMode = isSwitchAction();
             var activeSensingMode = isActiveSensingAction();
-            organRowEl.style.display = (switchMode || activeSensingMode) ? 'none' : 'flex';
+            var meterMode = isMeterAction();
+            organRowEl.style.display = (switchMode || activeSensingMode || meterMode) ? 'none' : 'flex';
             switchRowEl.style.display = switchMode ? 'flex' : 'none';
+            meterRowEl.style.display = meterMode ? 'flex' : 'none';
+            if (meterMode) {
+                meterSelectEl.value = currentSettings.meterChannel || 'AUDIO_FRONT_L';
+                statusEl.textContent = 'Audio Level Meter: choose the OSC channel';
+            }
         }
 
         function populateOrgans(organs, connected) {
@@ -126,10 +147,34 @@
             }
         }
 
+        function saveMeterChannel(ch) {
+            currentSettings.meterChannel = ch;
+            var url = 'http://127.0.0.1:28781/set?ctx=' + encodeURIComponent(piContext) + '&meter=' + encodeURIComponent(ch);
+            fetch(url).then(function() {
+                statusEl.textContent = 'Saved channel ' + ch;
+            }).catch(function() {
+                new Image().src = url + '&t=' + Date.now();
+                statusEl.textContent = 'Saved channel ' + ch;
+            });
+            if (ws && ws.readyState === 1) {
+                ws.send(JSON.stringify({ event: 'setSettings', context: piContext, payload: { meterChannel: ch } }));
+                ws.send(JSON.stringify({
+                    event: 'sendToPlugin',
+                    context: piContext,
+                    action: piAction,
+                    payload: { piEvent: 'setMeterChannel', meterChannel: ch }
+                }));
+            }
+        }
+
         function requestPayloadList() {
             if (!ws || ws.readyState !== 1) return;
             if (isActiveSensingAction()) {
                 statusEl.textContent = 'Console Power action: no configuration required';
+                return;
+            }
+            if (isMeterAction()) {
+                statusEl.textContent = 'Audio Level Meter: choose the OSC channel';
                 return;
             }
             ws.send(JSON.stringify({
@@ -255,6 +300,10 @@
 
         switchSelectEl.addEventListener('change', function() {
             saveSwitchIndex(parseInt(switchSelectEl.value) || 0);
+        });
+
+        meterSelectEl.addEventListener('change', function() {
+            saveMeterChannel(meterSelectEl.value || 'AUDIO_FRONT_L');
         });
     </script>
 </body>

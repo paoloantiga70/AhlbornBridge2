@@ -1626,8 +1626,13 @@ namespace
 								}
 							}
 							HideBiduleWindow();
-							SendBiduleOscPlay(true);
-							printf("[Bidule] Activated audio engine with /play true.\n");
+							// Do NOT send /play true here: Bidule may not have
+							// finished loading the profile yet. Instead arm a
+							// one-shot trigger so the engine starts the moment the
+							// first DSP parameter burst arrives on port 5000, which
+							// proves the profile is fully loaded.
+							ArmBidulePlayOnNextDspPacket();
+							printf("[Bidule] Profile opened; waiting for first DSP packet to send /play true.\n");
 						}
 					}
 					else if (loadedInstalledOrganIndex > 0)

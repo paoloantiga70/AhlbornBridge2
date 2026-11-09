@@ -7,9 +7,9 @@
 // The post-build step patches the Inno Setup installer script.
 // ---------------------------------------------------------------
 #define PLUGIN_VERSION_MAJOR 1
-#define PLUGIN_VERSION_MINOR 0
-#define PLUGIN_VERSION_PATCH 458
-#define PLUGIN_VERSION "1.0.458"
+#define PLUGIN_VERSION_MINOR 4
+#define PLUGIN_VERSION_PATCH 1
+#define PLUGIN_VERSION "1.4.1"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

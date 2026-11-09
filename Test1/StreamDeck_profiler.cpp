@@ -1010,7 +1010,7 @@ bool CreateStreamDeckProfileFromSettings()
         keys[i] = key;
     }
 
-    return CreateStreamDeckProfile("AhlbornBridge", -1, keys);
+    return CreateStreamDeckPluginProfile("AhlbornBridge", keys);
 }
 
 bool CreateStreamDeckSwitchesProfile()
@@ -1172,12 +1172,17 @@ bool CreateStreamDeckPluginProfile(const std::string& profileName,
         return false;
     }
 
-    // Build the profile into a temp staging folder: <temp>\<GUID>.sdProfile
+    // Build the profile into a temp staging folder laid out as the real export
+    // package format that Stream Deck accepts for plugin-owned profiles:
+    //   <stageRoot>\package.json
+    //   <stageRoot>\Profiles\<GUID>.sdProfile\manifest.json
+    //   <stageRoot>\Profiles\<GUID>.sdProfile\Profiles\<pageGUID>\...
     std::string stageGuid = GenerateGuid();
     std::wstring tempBase = std::wstring(appData) + L"\\AhlbornBridge2\\_sdprofile_stage";
     std::error_code ec;
     fs::remove_all(tempBase, ec);
-    std::wstring sdProfileFolder = tempBase + L"\\"
+    std::wstring stageRoot = tempBase + L"\\pkg";
+    std::wstring sdProfileFolder = stageRoot + L"\\Profiles\\"
         + std::wstring(stageGuid.begin(), stageGuid.end()) + L".sdProfile";
     std::wstring profilesDir = sdProfileFolder + L"\\Profiles";
     fs::create_directories(profilesDir, ec);
@@ -1193,13 +1198,31 @@ bool CreateStreamDeckPluginProfile(const std::string& profileName,
         return false;
     }
 
-    // Package the .sdProfile contents into <profileName>.streamDeckProfile (a ZIP)
+    // Write the outer package.json describing the exported package and binding it
+    // to this plugin via RequiredPlugins, so Stream Deck treats the profile as
+    // plugin-owned and switchToProfile can activate it by name from anywhere.
+    {
+        std::string model = device.model;
+        std::string packageJson =
+            "{\"AppVersion\":\"7.4.2.22730\",\"DeviceModel\":\"" + model +
+            "\",\"DeviceSettings\":null,\"FormatVersion\":1,\"OSType\":\"Windows\","
+            "\"OSVersion\":\"10.0.26200\",\"RequiredPlugins\":[\"com.ahlbornbridge.organ\"]}";
+        std::ofstream pf(stageRoot + L"\\package.json", std::ios::binary);
+        if (!pf.is_open())
+        {
+            std::cerr << "CreateStreamDeckPluginProfile: cannot write package.json.\n";
+            return false;
+        }
+        pf << packageJson;
+    }
+
+    // Package the staging root into <profileName>.streamDeckProfile (a ZIP)
     // placed directly inside the installed plugin folder.
     std::wstring wProfileName(profileName.begin(), profileName.end());
     std::wstring packagePath = pluginDir + L"\\" + wProfileName + L".streamDeckProfile";
     fs::remove(packagePath, ec);
 
-    if (!ZipFolderContents(sdProfileFolder, packagePath))
+    if (!ZipFolderContents(stageRoot, packagePath))
     {
         std::cerr << "CreateStreamDeckPluginProfile: failed to zip profile package.\n";
         return false;

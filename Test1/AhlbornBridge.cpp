@@ -274,11 +274,8 @@ if (FAILED(hr))
 		LoadLastSeenAppVersion(lastSeenVersion);
 		if (lastSeenVersion != currentVersion)
 		{
-			std::wstring whatsNew = LoadChangelogForVersion(currentVersion);
-				if (whatsNew.empty())
-					whatsNew = L"See CHANGELOG.md in the installation folder for details.";
-				std::wstring title = L"What's new in " + currentVersion;
-				MessageBoxW(hWnd, whatsNew.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+			// Record the new version silently; the "What's new" dialog has been
+			// disabled so it no longer pops up after every new build.
 			SaveLastSeenAppVersion(currentVersion);
 		}
 

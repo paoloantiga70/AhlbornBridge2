@@ -122,6 +122,19 @@ namespace
     std::wstring s_cachedBidulePath;
     bool s_cachedBiduleCloseOnUnload = true;
     bool s_cachedBiduleHideHauptwerkOnAltiverbUi = true;
+
+    // Configurable OSC/UDP ports for Bidule integration.
+    //   DSP input   : Altiverb DSP parameters (default 5000)
+    //   Level input : real-time audio meter levels (default 5001)
+    //   OSC output  : commands sent to Bidule, e.g. /play, /open (default 3210)
+    // Each port has an enable flag; when disabled the relevant listener is not
+    // started (inputs) or no command is sent (output).
+    bool s_cachedBiduleDspPortEnabled = true;
+    int  s_cachedBiduleDspPort = 5000;
+    bool s_cachedBiduleLevelPortEnabled = true;
+    int  s_cachedBiduleLevelPort = 5001;
+    bool s_cachedBiduleOscOutEnabled = true;
+    int  s_cachedBiduleOscOutPort = 3210;
     bool s_cachedAutoAssignSwitchOutputs = true;
     bool s_cachedRestoreOrganSwitchStates = true;
     bool s_cachedStreamDeckAppAutoStart = true;
@@ -1562,6 +1575,12 @@ namespace
 			L"    <BidulePath>" + s_cachedBidulePath + L"</BidulePath>\r\n"
 			L"    <BiduleCloseOnUnload>" + std::to_wstring(s_cachedBiduleCloseOnUnload ? 1 : 0) + L"</BiduleCloseOnUnload>\r\n"
 			L"    <BiduleHideHauptwerkOnAltiverbUi>" + std::to_wstring(s_cachedBiduleHideHauptwerkOnAltiverbUi ? 1 : 0) + L"</BiduleHideHauptwerkOnAltiverbUi>\r\n"
+			L"    <BiduleDspPortEnabled>" + std::to_wstring(s_cachedBiduleDspPortEnabled ? 1 : 0) + L"</BiduleDspPortEnabled>\r\n"
+			L"    <BiduleDspPort>" + std::to_wstring(s_cachedBiduleDspPort) + L"</BiduleDspPort>\r\n"
+			L"    <BiduleLevelPortEnabled>" + std::to_wstring(s_cachedBiduleLevelPortEnabled ? 1 : 0) + L"</BiduleLevelPortEnabled>\r\n"
+			L"    <BiduleLevelPort>" + std::to_wstring(s_cachedBiduleLevelPort) + L"</BiduleLevelPort>\r\n"
+			L"    <BiduleOscOutEnabled>" + std::to_wstring(s_cachedBiduleOscOutEnabled ? 1 : 0) + L"</BiduleOscOutEnabled>\r\n"
+			L"    <BiduleOscOutPort>" + std::to_wstring(s_cachedBiduleOscOutPort) + L"</BiduleOscOutPort>\r\n"
 			L"    <AutoAssignSwitchOutputs>" + std::to_wstring(s_cachedAutoAssignSwitchOutputs ? 1 : 0) + L"</AutoAssignSwitchOutputs>\r\n"
 			L"    <RestoreOrganSwitchStatesOnLoad>" + std::to_wstring(s_cachedRestoreOrganSwitchStates ? 1 : 0) + L"</RestoreOrganSwitchStatesOnLoad>\r\n"
 			L"    <StreamDeckAppAutoStart>" + std::to_wstring(s_cachedStreamDeckAppAutoStart ? 1 : 0) + L"</StreamDeckAppAutoStart>\r\n"
@@ -3103,6 +3122,85 @@ bool SaveBiduleHideHauptwerkOnAltiverbUi(bool enabled)
     bool checkForUpdateOnStart = true;
     LoadCheckForUpdateOnStart(checkForUpdateOnStart);
     return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+// ---- Bidule OSC/UDP port configuration ----------------------------------
+// Rewrites Settings.xml preserving the MIDI device section, like the other
+// Bidule toggles above. Called after any of the port caches changes.
+static bool PersistBiduleOptionsToDisk()
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+void LoadBiduleOscPorts()
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return;
+
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return;
+
+    UINT value = 0;
+    if (TryGetTagValue(optionsSection, L"<BiduleDspPortEnabled>", L"</BiduleDspPortEnabled>", value))
+        s_cachedBiduleDspPortEnabled = value != 0;
+    if (TryGetTagValue(optionsSection, L"<BiduleDspPort>", L"</BiduleDspPort>", value) && value > 0 && value <= 65535)
+        s_cachedBiduleDspPort = static_cast<int>(value);
+    if (TryGetTagValue(optionsSection, L"<BiduleLevelPortEnabled>", L"</BiduleLevelPortEnabled>", value))
+        s_cachedBiduleLevelPortEnabled = value != 0;
+    if (TryGetTagValue(optionsSection, L"<BiduleLevelPort>", L"</BiduleLevelPort>", value) && value > 0 && value <= 65535)
+        s_cachedBiduleLevelPort = static_cast<int>(value);
+    if (TryGetTagValue(optionsSection, L"<BiduleOscOutEnabled>", L"</BiduleOscOutEnabled>", value))
+        s_cachedBiduleOscOutEnabled = value != 0;
+    if (TryGetTagValue(optionsSection, L"<BiduleOscOutPort>", L"</BiduleOscOutPort>", value) && value > 0 && value <= 65535)
+        s_cachedBiduleOscOutPort = static_cast<int>(value);
+}
+
+bool IsBiduleDspPortEnabled()   { return s_cachedBiduleDspPortEnabled; }
+int  GetBiduleDspPort()         { return s_cachedBiduleDspPort; }
+bool IsBiduleLevelPortEnabled() { return s_cachedBiduleLevelPortEnabled; }
+int  GetBiduleLevelPort()       { return s_cachedBiduleLevelPort; }
+bool IsBiduleOscOutEnabled()    { return s_cachedBiduleOscOutEnabled; }
+int  GetBiduleOscOutPort()      { return s_cachedBiduleOscOutPort; }
+
+bool SaveBiduleOscPorts(bool dspEnabled, int dspPort,
+                        bool levelEnabled, int levelPort,
+                        bool oscOutEnabled, int oscOutPort)
+{
+    if (dspPort    > 0 && dspPort    <= 65535) s_cachedBiduleDspPort    = dspPort;
+    if (levelPort  > 0 && levelPort  <= 65535) s_cachedBiduleLevelPort  = levelPort;
+    if (oscOutPort > 0 && oscOutPort <= 65535) s_cachedBiduleOscOutPort = oscOutPort;
+    s_cachedBiduleDspPortEnabled   = dspEnabled;
+    s_cachedBiduleLevelPortEnabled = levelEnabled;
+    s_cachedBiduleOscOutEnabled    = oscOutEnabled;
+    return PersistBiduleOptionsToDisk();
 }
 
 bool LoadAutoAssignSwitchOutputs(bool& enabled)
