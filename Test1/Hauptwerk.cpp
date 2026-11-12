@@ -869,10 +869,14 @@ bool SendBiduleOscFileSaveAs(const std::wstring& profilePath, unsigned short por
 
 bool SendBiduleOscPlay(bool play, unsigned short port)
 {
-    const std::wstring val = play ? L"true" : L"false";
-    bool ok = SendBiduleOscSingleStringCommand("/play", val, port);
+    // Bidule's /play transport parameter is sent as an OSC string argument
+    // ("true"/"false", type tag ',s'), the same encoding that works reliably
+    // for /open. The native OSC boolean type tags (',T'/',F', OSC 1.1) were
+    // not delivered/interpreted by Bidule, so we use the plain string form.
+    bool ok = SendBiduleOscSingleStringCommand("/play", play ? L"true" : L"false", port);
     if (ok)
-        printf("[BiduleOSC] Sent /play %S to 127.0.0.1:%u\n", val.c_str(), static_cast<unsigned>(port));
+        printf("[BiduleOSC] Sent /play %s to 127.0.0.1:%u\n",
+               play ? "true" : "false", static_cast<unsigned>(port));
     return ok;
 }
 
@@ -1395,10 +1399,74 @@ namespace
     SOCKET            g_oscDspSocket = INVALID_SOCKET;
     SOCKET            g_oscLevelSocket = INVALID_SOCKET;
 
-    // One-shot trigger: when armed, the first datagram received on the DSP port
-    // (5000) sends a single "/play true" to Bidule, then disarms. See
-    // ArmBidulePlayOnNextDspPacket() for rationale.
-    std::atomic<bool> g_playOnNextDspPacket{ false };
+    // Tracks whether Bidule's audio engine is currently running (as last driven
+    // by us). The Empty profile loads with the engine stopped (/play false); the
+    // arrival of DSP plugin parameters (e.g. /DSP_FRONT/IR_Autom) proves a
+    // non-Empty profile is active, so we start the engine once (/play true) on
+    // the transition. We cannot rely on Bidule's trigger module because it does
+    // not emit anything while the engine is stopped; the DSP plugins do.
+    std::atomic<bool> g_biduleEngineRunning{ false };
+
+    // When enabled, every parsed incoming OSC message is printed to the debug
+    // console as a "[OSC MON]" entry (address, type tag args and source port).
+    // Disabled by default so it does not flood the log in normal use.
+    std::atomic<bool> g_oscMonitorEnabled{ false };
+
+    // Thread-safe queue of recent OSC messages for the Settings "OSC Monitor"
+    // window (Bidule tab). Bounded so it cannot grow without limit.
+    std::mutex                    g_oscMonitorQueueMutex;
+    std::vector<OscMonitorEntry>  g_oscMonitorQueue;
+    constexpr size_t              kMaxOscMonitorQueueEntries = 500;
+
+    // Builds the human-readable argument string for an OSC message.
+    std::string BuildOscArgsString(const OscMessage& msg)
+    {
+        std::string args;
+        if (msg.hasFloat)
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "f=%.6g", static_cast<double>(msg.floatArg));
+            args += buf;
+        }
+        if (msg.hasString)
+        {
+            if (!args.empty()) args += " ";
+            args += "s=\"";
+            args += msg.stringArg;
+            args += "\"";
+        }
+        return args;
+    }
+
+    // Formats and prints a single OSC monitor entry. Mirrors the MIDI monitor
+    // style: a blank line before and after each entry for readability. Also
+    // enqueues the event for the Settings OSC Monitor window.
+    void LogOscMonitorEvent(unsigned short port, const OscMessage& msg)
+    {
+        std::string args = BuildOscArgsString(msg);
+
+        // Always enqueue (bounded) so the Settings window can display it.
+        {
+            std::lock_guard<std::mutex> lock(g_oscMonitorQueueMutex);
+            if (g_oscMonitorQueue.size() >= kMaxOscMonitorQueueEntries)
+                g_oscMonitorQueue.erase(g_oscMonitorQueue.begin(),
+                                        g_oscMonitorQueue.begin() + 50);
+            OscMonitorEntry entry;
+            GetLocalTime(&entry.timestamp);
+            entry.port = port;
+            entry.address = std::wstring(msg.address.begin(), msg.address.end());
+            entry.args = std::wstring(args.begin(), args.end());
+            g_oscMonitorQueue.push_back(std::move(entry));
+        }
+
+        // Optional console echo, controlled by the tray toggle.
+        if (g_oscMonitorEnabled.load(std::memory_order_relaxed))
+        {
+            printf("\n[OSC MON][:%u] %s%s%s\n\n",
+                   static_cast<unsigned>(port), msg.address.c_str(),
+                   args.empty() ? "" : " ", args.c_str());
+        }
+    }
 
     // Per-DSP throttle timestamps for the audio level meter (port 5001).
     std::mutex g_levelThrottleMutex;
@@ -1418,7 +1486,8 @@ namespace
         return true;
     }
 
-    // Minimal OSC parser: address + typetag, supporting a single ',f' and/or ',s'.
+    // Minimal OSC parser: address + typetag, supporting 'f', 'i', 's' and the
+    // argument-less boolean tags 'T'/'F'.
     bool ParseOscPacket(const char* data, int len, OscMessage& msg)
     {
         int offset = 0;
@@ -1464,6 +1533,16 @@ namespace
                 msg.stringArg = s;
                 msg.hasString = true;
             }
+            else if (tag == 'T' || tag == 'F')
+            {
+                // OSC boolean: the value is carried entirely by the type tag,
+                // no data bytes follow. Expose it as a string for display and
+                // as a float (1.0/0.0) for any numeric consumers.
+                msg.stringArg = (tag == 'T') ? "true" : "false";
+                msg.hasString = true;
+                msg.floatArg = (tag == 'T') ? 1.0f : 0.0f;
+                msg.hasFloat = true;
+            }
             else
             {
                 // Unknown tag — stop parsing further args, keep what we have.
@@ -1498,6 +1577,17 @@ namespace
     // Highlights the matching church button on the Stream Deck.
     void OnIrAutom(const std::string& target, const OscMessage& msg)
     {
+        // Any DSP plugin parameter (IR_Autom) proves a non-Empty profile is
+        // loaded. Bidule's own trigger module does not emit while the engine is
+        // stopped, so we use this as the signal to start the audio engine once,
+        // on the transition from stopped to running.
+        bool wasRunning = g_biduleEngineRunning.exchange(true);
+        if (!wasRunning)
+        {
+            printf("[Bidule] DSP parameter received (non-Empty profile) -> starting audio engine with /play true.\n");
+            SendBiduleOscPlay(true);
+        }
+
         std::vector<ChurchInfo> churches = LoadChurches();
         if (churches.empty())
         {
@@ -1581,6 +1671,26 @@ namespace
         if (!msg.hasFloat)
             return;
 
+        // Calibration offset: Bidule's meter module reports a level that is about
+        // 2 dB lower than Hauptwerk's real output. Add +2 dB to compensate so the
+        // Stream Deck bar matches the actual Hauptwerk level.
+        constexpr float kLevelCalibrationDb = 2.0f;
+        float db = msg.floatArg;
+
+        // Clamp the incoming dB value to a sane range. Bidule reports -FLT_MAX
+        // (~ -3.4e38) for the "silence / -inf" meter state, which would otherwise
+        // be forwarded as a nonsensical value and shown on the Stream Deck. The
+        // meter spans -60 dB (floor) to +6 dB (top), matching Hauptwerk.
+        if (!(db > -60.0f))      // catches -inf, NaN and anything below the floor
+            db = -60.0f;
+        else
+            db += kLevelCalibrationDb;   // apply calibration only to real readings
+
+        if (db < -60.0f)
+            db = -60.0f;
+        else if (db > 6.0f)
+            db = 6.0f;           // clamp to the +6 dB ceiling
+
         auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(g_levelThrottleMutex);
@@ -1594,7 +1704,33 @@ namespace
             g_levelLastPush[target] = now;
         }
 
-        NotifyStreamDeckDspValue(target, "Level", msg.floatArg);
+        NotifyStreamDeckDspValue(target, "Level", db);
+    }
+
+    // /Bidule/Empty_profile <1|0>  — Bidule signals (on port 5000) which kind of
+    // profile it has just loaded. We only act on value 1 (Empty profile): stop
+    // the audio engine (/play false) and reset the running flag so the next DSP
+    // parameter burst (IR_Autom) will re-start the engine for a non-Empty
+    // profile. The engine START is driven by OnIrAutom, because Bidule's trigger
+    // module does not emit while the engine is stopped.
+    void OnEmptyProfile(const std::string& target, const OscMessage& msg)
+    {
+        bool hasValue = msg.hasFloat || msg.hasString;
+        if (!hasValue)
+            return;
+
+        bool isEmpty;
+        if (msg.hasFloat)
+            isEmpty = (msg.floatArg != 0.0f);
+        else
+            isEmpty = (msg.stringArg == "1" || msg.stringArg == "true");
+
+        if (isEmpty)
+        {
+            g_biduleEngineRunning.store(false);
+            printf("[Bidule] Empty_profile=1 -> stopping audio engine with /play false.\n");
+            SendBiduleOscPlay(false);
+        }
     }
 
     // ----- Dispatch tables (extend by adding rows) ------------------------
@@ -1602,6 +1738,7 @@ namespace
     const std::vector<OscCommand> g_dspCommands = {
         { "IR_Autom", &OnIrAutom },
         { "RvrbTime", &OnRvrbTime },
+        { "Empty_profile", &OnEmptyProfile },
         // Add more DSP parameter commands here.
     };
 
@@ -1635,7 +1772,7 @@ namespace
     // Processes a raw OSC packet which may be either a single message or an
     // OSC bundle (#bundle\0 + 8-byte timetag + repeated [int32 size][element]).
     // Bundles may nest; each contained message is parsed and dispatched.
-    void ProcessOscData(const char* data, int len, const std::vector<OscCommand>& table)
+    void ProcessOscData(const char* data, int len, const std::vector<OscCommand>& table, unsigned short port)
     {
         if (len <= 0)
             return;
@@ -1652,7 +1789,7 @@ namespace
                 offset += 4;
                 if (elemSize <= 0 || offset + elemSize > len)
                     break;                        // malformed / truncated
-                ProcessOscData(data + offset, elemSize, table);
+                ProcessOscData(data + offset, elemSize, table, port);
                 offset += elemSize;
             }
             return;
@@ -1661,7 +1798,10 @@ namespace
         // Plain message.
         OscMessage msg;
         if (ParseOscPacket(data, len, msg))
+        {
+            LogOscMonitorEvent(port, msg);
             DispatchOsc(table, msg);
+        }
     }
 
     // Blocking UDP receive loop for one port and one dispatch table.
@@ -1713,28 +1853,37 @@ namespace
             if (received <= 0)
                 continue;
 
-            // If a profile load armed the one-shot play trigger, the arrival of
-            // the first DSP parameter datagram proves Bidule finished loading the
-            // profile. That is the right moment to start the audio engine. Only
-            // the DSP port (5000) acts as this readiness signal.
-            if (port == kOscDspPort && g_playOnNextDspPacket.exchange(false))
-            {
-                SendBiduleOscPlay(true);
-                printf("[Bidule] First DSP packet received -> activated audio engine with /play true.\n");
-            }
-
             // Handles both plain OSC messages and OSC bundles (#bundle...).
-            ProcessOscData(buffer, received, table);
+            ProcessOscData(buffer, received, table, port);
         }
 
         printf("[OSC][%s] Listener stopped.\n", label);
     }
 } // namespace
 
-void ArmBidulePlayOnNextDspPacket()
+void SetOscMonitorEnabled(bool enabled)
 {
-    g_playOnNextDspPacket.store(true);
-    printf("[Bidule] Armed /play true on next DSP packet (port 5000).\n");
+    g_oscMonitorEnabled.store(enabled, std::memory_order_relaxed);
+    printf("[OSC MON] %s\n", enabled ? "enabled" : "disabled");
+}
+
+bool IsOscMonitorEnabled()
+{
+    return g_oscMonitorEnabled.load(std::memory_order_relaxed);
+}
+
+std::vector<OscMonitorEntry> PopOscMonitorEvents()
+{
+    std::vector<OscMonitorEntry> drained;
+    std::lock_guard<std::mutex> lock(g_oscMonitorQueueMutex);
+    drained.swap(g_oscMonitorQueue);
+    return drained;
+}
+
+void ClearOscMonitorEvents()
+{
+    std::lock_guard<std::mutex> lock(g_oscMonitorQueueMutex);
+    g_oscMonitorQueue.clear();
 }
 
 void StartOscListeners()

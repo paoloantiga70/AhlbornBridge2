@@ -641,13 +641,12 @@ namespace
 													saved = true;
 											}
 										}
-										if (!saved)
-											printf("[Deferred] Warning: profile save not confirmed within timeout: %S\n", savePath.c_str());
-									}
-								}
-								SendBiduleOscPlay(false);
-							}
-							ClickMenu(g_hauptwerkMainWindow, mUNLOAD_ORGAN);
+													if (!saved)
+														printf("[Deferred] Warning: profile save not confirmed within timeout: %S\n", savePath.c_str());
+												}
+											}
+										}
+											ClickMenu(g_hauptwerkMainWindow, mUNLOAD_ORGAN);
 							// Wait up to 10 s for the organ to be unloaded (watch thread sets index to 0)
 							for (int w = 0; w < 100 && g_currentLoadedInstalledOrganIndex.load() > 0; ++w)
 								Sleep(100);
@@ -1028,6 +1027,17 @@ namespace
         if (!closeOnUnload)
             return;
 
+        // Suppress save-on-unload when this is a transient state produced by the
+        // preload reroute flow (manual organ load intercepted, cancelled and
+        // requeued through the deferred preload). In that case the organ is being
+        // reloaded immediately, so saving the Bidule profile and switching to
+        // Empty.bidule would overwrite the organ profile and mute audio spuriously.
+        if (g_pendingManualRerouteInstalledOrganIndex.load() != 0 || g_pendingOrganLoad.load())
+        {
+            printf("[Bidule] save-on-unload skipped: organ load reroute/requeue in progress.\n");
+            return;
+        }
+
         // If Bidule already has Empty.bidule loaded (a previous CloseBiduleIfConfigured
         // during the same unload sequence already saved the organ and switched to Empty),
         // do NOT save again — otherwise we would overwrite the organ profile with Empty.
@@ -1103,7 +1113,9 @@ namespace
             }
         }
 
-        // On organ unload, load Empty.bidule so no DSP plugins remain loaded
+        // On organ unload, load Empty.bidule so no DSP plugins remain loaded.
+        // Bidule will signal back on port 5000 with /Bidule/Empty_profile=1,
+        // which triggers the /play false that stops the audio engine.
         std::wstring emptyProfile = GetSettingsDirPath() + L"\\BiduleProfiles\\Empty.bidule";
         if (GetFileAttributesW(emptyProfile.c_str()) != INVALID_FILE_ATTRIBUTES)
         {
@@ -1111,8 +1123,6 @@ namespace
             g_biduleEmptyLoaded.store(true);
             Sleep(200);
         }
-
-        SendBiduleOscPlay(false);
     }
 
     // Choose the appropriate standby icon based on the current device state.
@@ -1625,21 +1635,19 @@ namespace
 									printf("[BiduleOSC] Profile file not found: %S\n", targetProfilePath.c_str());
 								}
 							}
-							HideBiduleWindow();
-							// Do NOT send /play true here: Bidule may not have
-							// finished loading the profile yet. Instead arm a
-							// one-shot trigger so the engine starts the moment the
-							// first DSP parameter burst arrives on port 5000, which
-							// proves the profile is fully loaded.
-							ArmBidulePlayOnNextDspPacket();
-							printf("[Bidule] Profile opened; waiting for first DSP packet to send /play true.\n");
-						}
-					}
-					else if (loadedInstalledOrganIndex > 0)
-					{
-						// Organ does not use VST Link: ensure Bidule DSP is muted
-						SendBiduleOscPlay(false);
-					}
+								HideBiduleWindow();
+									// Do NOT send /play here. When a non-Empty profile is
+									// loaded, Bidule starts its audio processing automatically.
+									// The engine is only stopped when the Empty profile is
+									// loaded, which Bidule signals back via the OSC message
+									// /Bidule/Empty_profile=1 on port 5000.
+									printf("[Bidule] Profile opened; Bidule starts processing automatically.\n");
+								}
+							}
+							else if (loadedInstalledOrganIndex > 0)
+							{
+								// Organ does not use VST Link: nothing to do for Bidule.
+							}
 				}
 				else if (deviceStateChanged)
 				{

@@ -132,6 +132,10 @@ static std::atomic<float> g_masterLevelDb{ -60.0f };
 // value.first = normalized 0..1 level, value.second = raw dB.
 static std::mutex g_levelByChannelMutex;
 static std::map<std::string, std::pair<float, float>> g_levelByChannel;
+// Per-channel peak-hold, keyed by OSC target. Holds the maximum dB reached so a
+// peak marker can be drawn on the meter once it enters the red zone. Reset to
+// -60 dB when the user presses the meter key. Protected by g_levelByChannelMutex.
+static std::map<std::string, float> g_peakHoldByChannel;
 // stays visible even after clipping clears, so the user notices it after
 // playing. Cleared when the user presses the organ key.
 static std::mutex g_clipLatchMutex;
@@ -700,7 +704,7 @@ static std::string MeterChannelLabel(const std::string& channel)
 // decibel value used for the readout label. 'label' is the channel caption shown
 // at the top of the key. The bar fills left-to-right with a green -> yellow ->
 // red color scheme and a clipping indicator near full scale.
-static std::string BuildLevelMeterSvg(float level, float dB, const std::string& label = "LEVEL")
+static std::string BuildLevelMeterSvg(float level, float dB, const std::string& label = "LEVEL", float peakDb = -60.0f)
 {
     if (level < 0.0f) level = 0.0f;
     if (level > 1.0f) level = 1.0f;
@@ -718,10 +722,13 @@ static std::string BuildLevelMeterSvg(float level, float dB, const std::string& 
     // A level at/near the floor means "no signal yet" (idle look).
     const bool idle = (dB <= -59.5f);
 
-    // Fill color follows the level: green < 70%, yellow < 90%, red otherwise.
+    // Fill color follows the dB level, matching Hauptwerk's meter thresholds:
+    //   green  : below -5 dB
+    //   orange : -5 dB .. -3 dB
+    //   red    : above -3 dB (up to +6 dB)
     std::string fillColor = "#21c25a";      // green
-    if (level >= 0.90f)      fillColor = "#e53935"; // red (near clip)
-    else if (level >= 0.70f) fillColor = "#f2c744"; // yellow
+    if (dB >= -3.0f)      fillColor = "#e53935"; // red
+    else if (dB >= -5.0f) fillColor = "#f2c744"; // orange
 
     char dbBuf[32] = {};
     if (idle)
@@ -741,8 +748,8 @@ static std::string BuildLevelMeterSvg(float level, float dB, const std::string& 
     svg += "<rect x='" + std::to_string(trackX) + "' y='" + std::to_string(trackY) +
            "' width='" + std::to_string(trackW) + "' height='" + std::to_string(trackH) +
            "' rx='6' fill='#11161c' stroke='#2a2f37' stroke-width='1.5'/>";
-    // Scale tick marks at 70% and 90% thresholds.
-    for (float frac : { 0.70f, 0.90f })
+    // Scale tick marks at the -5 dB (orange) and -3 dB (red) thresholds.
+    for (float frac : { (-5.0f + 60.0f) / 66.0f, (-3.0f + 60.0f) / 66.0f })
     {
         int tx = trackX + static_cast<int>(trackW * frac + 0.5f);
         svg += "<rect x='" + std::to_string(tx) + "' y='" + std::to_string(trackY - 3) +
@@ -759,6 +766,18 @@ static std::string BuildLevelMeterSvg(float level, float dB, const std::string& 
     std::string clipColor = (!idle && level >= 0.98f) ? "#ff5252" : "#3a3f47";
     svg += "<rect x='" + std::to_string(trackX + trackW - 3) + "' y='" + std::to_string(trackY - 2) +
            "' width='4' height='" + std::to_string(trackH + 4) + "' rx='2' fill='" + clipColor + "'/>";
+    // Peak-hold marker: once the peak has reached the red zone (>= -3 dB) leave a
+    // persistent vertical marker at the highest level reached. Cleared on key press.
+    if (peakDb >= -3.0f)
+    {
+        float peakFrac = (peakDb + 60.0f) / 66.0f;
+        if (peakFrac < 0.0f) peakFrac = 0.0f;
+        if (peakFrac > 1.0f) peakFrac = 1.0f;
+        int px = trackX + static_cast<int>(trackW * peakFrac + 0.5f);
+        if (px > trackX + trackW - 3) px = trackX + trackW - 3;
+        svg += "<rect x='" + std::to_string(px) + "' y='" + std::to_string(trackY - 3) +
+               "' width='3' height='" + std::to_string(trackH + 6) + "' rx='1' fill='#e53935'/>";
+    }
     // dB readout
     std::string dbColor = idle ? "#6b7480" : "#e6edf3";
     svg += "<text x='72' y='124' font-family='Arial' font-size='18' fill='" + dbColor + "' text-anchor='middle' font-weight='bold'>" +
@@ -1321,7 +1340,7 @@ static void UpdateAllButtons()
         if (info.action == "com.ahlbornbridge.levelmeter")
         {
             std::string ch = info.meterChannel.empty() ? std::string("AUDIO_FRONT_L") : info.meterChannel;
-            float level = 0.0f, dB = -60.0f;
+            float level = 0.0f, dB = -60.0f, peakDb = -60.0f;
             {
                 std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
                 auto lit = g_levelByChannel.find(ch);
@@ -1330,8 +1349,11 @@ static void UpdateAllButtons()
                     level = lit->second.first;
                     dB = lit->second.second;
                 }
+                auto pit = g_peakHoldByChannel.find(ch);
+                if (pit != g_peakHoldByChannel.end())
+                    peakDb = pit->second;
             }
-            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch));
+            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch), peakDb);
             if (svg != info.lastSvg)
             {
                 SdSetImage(ctx, svg, 0);
@@ -1439,7 +1461,7 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
                 ch = it->second.meterChannel;
         }
         if (ch.empty()) ch = "AUDIO_FRONT_L";
-        float level = 0.0f, dB = -60.0f;
+        float level = 0.0f, dB = -60.0f, peakDb = -60.0f;
         {
             std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
             auto lit = g_levelByChannel.find(ch);
@@ -1448,8 +1470,11 @@ static void UpdateButtonForContext(const std::string& context, int organIndex)
                 level = lit->second.first;
                 dB = lit->second.second;
             }
+            auto pit = g_peakHoldByChannel.find(ch);
+            if (pit != g_peakHoldByChannel.end())
+                peakDb = pit->second;
         }
-        SdSetImage(context, BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch)), 0);
+        SdSetImage(context, BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch), peakDb), 0);
         SdSetTitle(context, "", 0);
         return;
     }
@@ -1822,15 +1847,21 @@ static void HandlePipeMessage(const std::string& msg)
         if (param == "Level" && !dsp.empty())
         {
             float dB = JsonExtractFloat(msg, "value", -60.0f);
-            // Map dB (-60..0) to a normalized 0..1 bar fraction.
-            float level = (dB + 60.0f) / 60.0f;
+            // Map dB (-60..+6) to a normalized 0..1 bar fraction (66 dB span).
+            float level = (dB + 60.0f) / 66.0f;
             if (level < 0.0f) level = 0.0f;
             if (level > 1.0f) level = 1.0f;
 
             // Store the latest level for this OSC channel.
+            float peakDb = -60.0f;
             {
                 std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
                 g_levelByChannel[dsp] = { level, dB };
+                // Update the peak-hold for this channel (monotonic until key reset).
+                auto pit = g_peakHoldByChannel.find(dsp);
+                if (pit == g_peakHoldByChannel.end() || dB > pit->second)
+                    g_peakHoldByChannel[dsp] = dB;
+                peakDb = g_peakHoldByChannel[dsp];
             }
             // Keep the legacy default (FRONT_L) in sync for untitled meters.
             if (dsp == "AUDIO_FRONT_L")
@@ -1853,7 +1884,7 @@ static void HandlePipeMessage(const std::string& msg)
                         targets.push_back(ctx);
                 }
             }
-            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(dsp));
+            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(dsp), peakDb);
             for (const auto& ctx : targets)
                 SdSetImage(ctx, svg, 0);
         }
@@ -2369,7 +2400,7 @@ static void HttpListenerThread()
                         it->second.meterChannel = meterChannel;
                 }
 
-                float level = 0.0f, dB = -60.0f;
+                float level = 0.0f, dB = -60.0f, peakDb = -60.0f;
                 {
                     std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
                     auto it = g_levelByChannel.find(meterChannel);
@@ -2378,8 +2409,11 @@ static void HttpListenerThread()
                         level = it->second.first;
                         dB = it->second.second;
                     }
+                    auto pit = g_peakHoldByChannel.find(meterChannel);
+                    if (pit != g_peakHoldByChannel.end())
+                        peakDb = pit->second;
                 }
-                SdSetImage(ctx, BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel)), 0);
+                SdSetImage(ctx, BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel), peakDb), 0);
                 SdSetTitle(ctx, "", 0);
             }
         }
@@ -2514,7 +2548,7 @@ static void HandleSdEvent(const std::string& json)
                 info.meterChannel = meterChannel;
                 g_visibleButtons[context] = info;
             }
-            float level = 0.0f, dB = -60.0f;
+            float level = 0.0f, dB = -60.0f, peakDb = -60.0f;
             {
                 std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
                 auto it = g_levelByChannel.find(meterChannel);
@@ -2523,8 +2557,11 @@ static void HandleSdEvent(const std::string& json)
                     level = it->second.first;
                     dB = it->second.second;
                 }
+                auto pit = g_peakHoldByChannel.find(meterChannel);
+                if (pit != g_peakHoldByChannel.end())
+                    peakDb = pit->second;
             }
-            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel));
+            std::string svg = BuildLevelMeterSvg(level, dB, MeterChannelLabel(meterChannel), peakDb);
             SdSetImage(context, svg, 0);
             SdSetTitle(context, "", 0);
             return;
@@ -2671,6 +2708,34 @@ static void HandleSdEvent(const std::string& json)
             organIndex = loaded;
 
         Log("[SD] keyDown: organIndex=%d loadedOrganIndex=%d currentOrgan=%d", organIndex, loaded, (int)currentOrgan);
+
+        if (action == "com.ahlbornbridge.levelmeter")
+        {
+            // Pressing the level meter resets its peak-hold marker.
+            std::string ch;
+            {
+                std::lock_guard<std::mutex> lk(g_buttonsMutex);
+                auto it = g_visibleButtons.find(context);
+                if (it != g_visibleButtons.end())
+                    ch = it->second.meterChannel;
+            }
+            if (ch.empty()) ch = "AUDIO_FRONT_L";
+            float level = 0.0f, dB = -60.0f;
+            {
+                std::lock_guard<std::mutex> ml(g_levelByChannelMutex);
+                g_peakHoldByChannel[ch] = -60.0f;
+                auto lit = g_levelByChannel.find(ch);
+                if (lit != g_levelByChannel.end())
+                {
+                    level = lit->second.first;
+                    dB = lit->second.second;
+                }
+            }
+            Log("[SD] keyDown: level meter peak reset for channel %s", ch.c_str());
+            SdSetImage(context, BuildLevelMeterSvg(level, dB, MeterChannelLabel(ch), -60.0f), 0);
+            SdSetTitle(context, "", 0);
+            return;
+        }
 
         if (action == "com.ahlbornbridge.dsp")
         {

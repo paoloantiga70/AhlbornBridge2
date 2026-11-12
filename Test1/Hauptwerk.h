@@ -25,9 +25,22 @@ void ApplyHauptwerkPriorityNow();
 void StartOscListeners();
 void StopOscListeners();
 
-// Arms a one-shot trigger so that the next OSC datagram received on the DSP
-// port (5000) causes a single "/play true" to be sent to Bidule. This is used
-// after loading an organ/profile: the first incoming parameter burst from the
-// freshly loaded Bidule profile proves the profile is ready, which is the exact
-// moment to start the audio engine. The trigger disarms itself after firing.
-void ArmBidulePlayOnNextDspPacket();
+// Enable/disable the OSC monitor: when enabled, every parsed incoming OSC
+// message is logged to the debug console as a "[OSC MON]" entry.
+void SetOscMonitorEnabled(bool enabled);
+bool IsOscMonitorEnabled();
+
+// A single received OSC message captured for the Settings OSC Monitor window.
+struct OscMonitorEntry
+{
+    SYSTEMTIME   timestamp{};
+    unsigned short port = 0;   // source UDP port (5000 DSP, 5001 levels)
+    std::wstring address;      // e.g. "/DSP_FRONT/RvrbTime"
+    std::wstring args;         // e.g. "f=0.45" or "s=\"Church\""
+};
+
+// Drains and returns the queued incoming OSC messages (thread-safe). Incoming
+// messages are always queued regardless of the console-echo toggle so the
+// Settings OSC Monitor window can display live traffic.
+std::vector<OscMonitorEntry> PopOscMonitorEvents();
+void ClearOscMonitorEvents();

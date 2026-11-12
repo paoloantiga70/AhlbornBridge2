@@ -163,7 +163,9 @@ if (FAILED(hr))
 	if (!bidulePath.empty())
 	{
 		LaunchBidule();
-		// In background, wait for Bidule to initialize, load Empty.bidule, silence audio/MIDI with /play false, then hide window.
+		// In background, wait for Bidule to initialize, load Empty.bidule, then hide window.
+		// Bidule signals the Empty profile load back via OSC (/Bidule/Empty_profile=1) on
+		// port 5000, which stops the audio engine with /play false automatically.
 		// Repeat hiding checks over a short window in case wxWidgets restores/activates the window late.
 		HANDLE hBiduleInitThread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
 			Sleep(4000);
@@ -173,7 +175,6 @@ if (FAILED(hr))
 				SendBiduleOscOpenProfile(emptyProfile);
 				Sleep(300);
 			}
-			SendBiduleOscPlay(false);
 			Sleep(500);
 			HideBiduleWindow();
 

@@ -58,6 +58,9 @@ static HWND g_biduleLevelPortEditHwnd = nullptr;
 static HWND g_biduleOscOutCheckHwnd = nullptr;
 static HWND g_biduleOscOutPortEditHwnd = nullptr;
 static HWND g_biduleUdpPortsStatusHwnd = nullptr;
+static HWND g_biduleOscMonitorListHwnd = nullptr;
+static HWND g_biduleOscMonitorAutoScrollCheckHwnd = nullptr;
+static int  g_biduleOscMonitorTotalCount = 0;
 static HWND g_sdPipeServerCheckHwnd = nullptr;
 static HWND g_settingsProcessMgrPageHwnd = nullptr;
 static HWND g_processMgrStatusTextHwnd = nullptr;
@@ -109,6 +112,8 @@ constexpr int kBiduleUdpPortsApplyButtonId = 606;
 constexpr int kBiduleDspPortCheckId = 607;
 constexpr int kBiduleLevelPortCheckId = 608;
 constexpr int kBiduleOscOutCheckId = 609;
+constexpr int kBiduleOscMonitorClearButtonId = 610;
+constexpr int kBiduleOscMonitorAutoScrollCheckId = 611;
 constexpr int kProcessMgrStartButtonId   = 701;
 constexpr int kProcessMgrStopButtonId    = 702;
 constexpr int kProcessMgrUninstallButtonId = 703;
@@ -1235,6 +1240,41 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         }
 
         {
+            // --- OSC Monitor (incoming OSC traffic on the DSP/Level ports) ---
+            CreateWindowW(L"BUTTON", L"OSC Monitor", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 484, 740, 250, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Real-time log of incoming OSC messages received from Bidule on the DSP (5000) and Level (5001) ports.",
+                WS_CHILD | WS_VISIBLE,
+                24, 506, 710, 18, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            g_biduleOscMonitorListHwnd = CreateWindowW(WC_LISTVIEWW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                24, 528, 710, 164, g_settingsBidulePageHwnd, nullptr, nullptr, nullptr);
+
+            ListView_SetExtendedListViewStyle(g_biduleOscMonitorListHwnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+            LVCOLUMNW col = {};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(L"Time");    col.cx = 90;  ListView_InsertColumn(g_biduleOscMonitorListHwnd, 0, &col);
+            col.pszText = const_cast<LPWSTR>(L"Port");    col.cx = 55;  ListView_InsertColumn(g_biduleOscMonitorListHwnd, 1, &col);
+            col.pszText = const_cast<LPWSTR>(L"Address"); col.cx = 330; ListView_InsertColumn(g_biduleOscMonitorListHwnd, 2, &col);
+            col.pszText = const_cast<LPWSTR>(L"Arguments"); col.cx = 215; ListView_InsertColumn(g_biduleOscMonitorListHwnd, 3, &col);
+
+            CreateWindowW(L"BUTTON", L"Clear Log",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                24, 700, 100, 26, g_settingsBidulePageHwnd, (HMENU)kBiduleOscMonitorClearButtonId, nullptr, nullptr);
+
+            g_biduleOscMonitorAutoScrollCheckHwnd = CreateWindowW(L"BUTTON", L"Auto-scroll to latest",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                140, 704, 170, 20, g_settingsBidulePageHwnd, (HMENU)kBiduleOscMonitorAutoScrollCheckId, nullptr, nullptr);
+            SendMessageW(g_biduleOscMonitorAutoScrollCheckHwnd, BM_SETCHECK, BST_CHECKED, 0);
+
+            RefreshBiduleSettingsUI();
+        }
+
+        {
             CreateWindowW(L"BUTTON", L"About AhlbornBridge", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 10, 8, 300, 120, g_settingsAboutPageHwnd, nullptr, nullptr, nullptr);
 
@@ -2269,6 +2309,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             }
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kBiduleOscMonitorClearButtonId)
+        {
+            ClearOscMonitorEvents();
+            if (g_biduleOscMonitorListHwnd)
+                ListView_DeleteAllItems(g_biduleOscMonitorListHwnd);
+            g_biduleOscMonitorTotalCount = 0;
+            return 0;
+        }
         break;
     }
         if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE || wParam == DBT_DEVNODES_CHANGED)
@@ -2434,6 +2482,58 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                     }
                 }
             }
+
+            if (g_biduleOscMonitorListHwnd)
+            {
+                auto oscEvents = PopOscMonitorEvents();
+                if (!oscEvents.empty())
+                {
+                    SendMessageW(g_biduleOscMonitorListHwnd, WM_SETREDRAW, FALSE, 0);
+                    for (const auto& ev : oscEvents)
+                    {
+                        wchar_t timeBuf[32] = {};
+                        wsprintfW(timeBuf, L"%02u:%02u:%02u.%03u",
+                            ev.timestamp.wHour, ev.timestamp.wMinute,
+                            ev.timestamp.wSecond, ev.timestamp.wMilliseconds);
+
+                        wchar_t portBuf[16] = {};
+                        wsprintfW(portBuf, L"%u", static_cast<unsigned>(ev.port));
+
+                        LVITEMW lvi = {};
+                        lvi.mask = LVIF_TEXT;
+                        lvi.iItem = ListView_GetItemCount(g_biduleOscMonitorListHwnd);
+                        lvi.pszText = timeBuf;
+                        int itemIdx = ListView_InsertItem(g_biduleOscMonitorListHwnd, &lvi);
+                        if (itemIdx >= 0)
+                        {
+                            ListView_SetItemText(g_biduleOscMonitorListHwnd, itemIdx, 1, portBuf);
+                            ListView_SetItemText(g_biduleOscMonitorListHwnd, itemIdx, 2, const_cast<LPWSTR>(ev.address.c_str()));
+                            ListView_SetItemText(g_biduleOscMonitorListHwnd, itemIdx, 3, const_cast<LPWSTR>(ev.args.c_str()));
+                        }
+                        g_biduleOscMonitorTotalCount++;
+                    }
+
+                    constexpr int kMaxOscListRows = 1000;
+                    int curCount = ListView_GetItemCount(g_biduleOscMonitorListHwnd);
+                    if (curCount > kMaxOscListRows)
+                    {
+                        int removeCount = curCount - kMaxOscListRows;
+                        for (int i = 0; i < removeCount; ++i)
+                            ListView_DeleteItem(g_biduleOscMonitorListHwnd, 0);
+                    }
+
+                    SendMessageW(g_biduleOscMonitorListHwnd, WM_SETREDRAW, TRUE, 0);
+                    InvalidateRect(g_biduleOscMonitorListHwnd, nullptr, TRUE);
+
+                    if (g_biduleOscMonitorAutoScrollCheckHwnd &&
+                        SendMessageW(g_biduleOscMonitorAutoScrollCheckHwnd, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                    {
+                        int lastIdx = ListView_GetItemCount(g_biduleOscMonitorListHwnd) - 1;
+                        if (lastIdx >= 0)
+                            ListView_EnsureVisible(g_biduleOscMonitorListHwnd, lastIdx, FALSE);
+                    }
+                }
+            }
         }
         else if (wParam == kBiduleOscStatusTimerId)
         {
@@ -2469,6 +2569,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_consoleMidiListViewHwnd = nullptr;
         g_consoleMidiAutoScrollCheckHwnd = nullptr;
         g_consoleMidiCountTextHwnd = nullptr;
+        g_biduleOscMonitorListHwnd = nullptr;
+        g_biduleOscMonitorAutoScrollCheckHwnd = nullptr;
         g_hauptwerkOrganListHwnd = nullptr;
         g_hauptwerkAudioDeviceComboHwnd = nullptr;
         g_hauptwerkStopListHwnd = nullptr;
